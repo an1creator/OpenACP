@@ -1,5 +1,6 @@
 import type { Router } from "../router.js";
 import type { RouteDeps } from "../api-server.js";
+import type { IChannelAdapter } from "../../../core/channel.js";
 import { createChildLogger } from "../../../core/utils/log.js";
 
 const log = createChildLogger({ module: "api-server" });
@@ -88,7 +89,7 @@ export function registerSessionRoutes(router: Router, deps: RouteDeps): void {
 
     // Resolve adapter: use explicit channel if provided, otherwise fall back to first registered adapter
     let adapterId: string | null = null;
-    let adapter: InstanceType<any> | null = null;
+    let adapter: IChannelAdapter | null = null;
 
     if (channel) {
       if (!deps.core.adapters.has(channel)) {

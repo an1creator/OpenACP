@@ -258,6 +258,10 @@ Shows the version of the currently running daemon process.
       const workspaceIdx = args.indexOf('--workspace')
       const workspace = workspaceIdx !== -1 ? args[workspaceIdx + 1] : args[3]
       const channelIdx = args.indexOf('--channel')
+      if (channelIdx !== -1 && !args[channelIdx + 1]) {
+        console.error('Error: --channel requires a value (e.g. telegram, discord)')
+        process.exit(1)
+      }
       const channel = channelIdx !== -1 ? args[channelIdx + 1] : undefined
       const body: Record<string, string> = {}
       if (agent) body.agent = agent

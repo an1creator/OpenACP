@@ -11,6 +11,14 @@
     "./testing": {
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "import": "./dist/config.js"
+    },
+    "./formatting": {
+      "types": "./dist/formatting.d.ts",
+      "import": "./dist/formatting.js"
     }
   },
   "files": [

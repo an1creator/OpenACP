@@ -21,6 +21,21 @@ export type {
   PermissionOption, NotificationMessage, AgentCommand,
 } from '@openacp/cli'
 
+// Core types
+export type {
+  Attachment, PlanEntry, InstallProgress,
+  DisplayVerbosity, ToolCallMeta, ToolUpdateMeta, ViewerLinks,
+  AdapterCapabilities, IRenderer, MessagingAdapterConfig, RenderedMessage,
+} from '@openacp/cli'
+
+// Core classes & values
+export { OpenACPCore } from '@openacp/cli'
+export { Session } from '@openacp/cli'
+export { SessionManager } from '@openacp/cli'
+export { CommandRegistry } from '@openacp/cli'
+export { log, createChildLogger } from '@openacp/cli'
+export { PRODUCT_GUIDE } from '@openacp/cli'
+
 // Adapter base classes
 export { MessagingAdapter, StreamAdapter, BaseRenderer } from '@openacp/cli'
 

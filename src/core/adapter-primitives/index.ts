@@ -5,3 +5,6 @@ export { SendQueue, DraftManager, Draft, ToolCallTracker, ActivityTracker } from
 export type { SendQueueConfig, DraftConfig, TrackedToolCall, ActivityConfig, ActivityCallbacks } from './primitives/index.js'
 
 export type { DisplayVerbosity, ToolCallMeta, ToolUpdateMeta, FormattedMessage, MessageMetadata, ViewerLinks } from './format-types.js'
+export { STATUS_ICONS, KIND_ICONS } from './format-types.js'
+export { progressBar, formatTokens, stripCodeFences, truncateContent, splitMessage } from './format-utils.js'
+export { extractContentText, formatToolSummary, formatToolTitle, resolveToolIcon } from './message-formatter.js'

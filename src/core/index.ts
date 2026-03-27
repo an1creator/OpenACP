@@ -43,6 +43,8 @@ export {
 } from "./sessions/session-factory.js";
 export { OpenACPCore } from "./core.js";
 export { EventBus, type EventBusEvents } from "./event-bus.js";
+export { CommandRegistry } from "./command-registry.js";
+export { DoctorEngine, type DoctorReport, type PendingFix } from "./doctor/index.js";
 export {
   CONFIG_REGISTRY,
   getFieldDef,
@@ -102,6 +104,8 @@ export { EntireProvider } from "../plugins/context/entire/entire-provider.js";
 export { MessagingAdapter, StreamAdapter } from './adapter-primitives/index.js'
 export { BaseRenderer } from './adapter-primitives/index.js'
 export { SendQueue, DraftManager, ToolCallTracker, ActivityTracker } from './adapter-primitives/index.js'
+export type { MessagingAdapterConfig, IRenderer, RenderedMessage, DisplayVerbosity, ToolCallMeta, ToolUpdateMeta, ViewerLinks } from './adapter-primitives/index.js'
+export { STATUS_ICONS, KIND_ICONS, progressBar, formatTokens, stripCodeFences, truncateContent, splitMessage, extractContentText, formatToolSummary, formatToolTitle, resolveToolIcon } from './adapter-primitives/index.js'
 
 // ─── Plugin types (for SDK re-exports) ──────────────────────────────────────
 export type {

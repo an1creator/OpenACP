@@ -9,18 +9,18 @@ This file provides context for AI coding agents (Claude, Cursor, etc.) working o
 
 OpenACP is an open-source platform that bridges AI coding agents (Claude Code, Codex, etc.) to messaging platforms (Telegram, Discord, Slack) and custom UIs via the Agent Client Protocol (ACP). It features a microkernel plugin architecture where all features — adapters, services, commands — are plugins.
 
-- **Website & Docs**: https://openacp.gitbook.io/docs
+- **Website & Docs**: https://docs.openacp.ai
 - **GitHub**: https://github.com/Open-ACP/OpenACP
 - **Plugin Registry**: https://github.com/Open-ACP/plugin-registry
 
 Key documentation pages:
-- [Getting Started](https://openacp.gitbook.io/docs/getting-started) — What is OpenACP, quickstart
-- [Plugin Development](https://openacp.gitbook.io/docs/extending/building-plugins) — How to build plugins
-- [Architecture](https://openacp.gitbook.io/docs/extending/architecture) — System design, plugin lifecycle
-- [Dev Mode](https://openacp.gitbook.io/docs/extending/dev-mode) — Hot-reload development workflow
-- [CLI Commands](https://openacp.gitbook.io/docs/api-reference/cli-commands) — Full CLI reference
-- [Platform Setup](https://openacp.gitbook.io/docs/platform-setup) — Telegram, Discord, Slack guides
-- [Configuration](https://openacp.gitbook.io/docs/self-hosting/configuration) — Config and settings reference
+- [Getting Started](https://docs.openacp.ai/getting-started) — What is OpenACP, quickstart
+- [Plugin Development](https://docs.openacp.ai/extending/building-plugins) — How to build plugins
+- [Architecture](https://docs.openacp.ai/extending/architecture) — System design, plugin lifecycle
+- [Dev Mode](https://docs.openacp.ai/extending/dev-mode) — Hot-reload development workflow
+- [CLI Commands](https://docs.openacp.ai/api-reference/cli-commands) — Full CLI reference
+- [Platform Setup](https://docs.openacp.ai/platform-setup) — Telegram, Discord, Slack guides
+- [Configuration](https://docs.openacp.ai/self-hosting/configuration) — Config and settings reference
 
 ## Project Overview
 

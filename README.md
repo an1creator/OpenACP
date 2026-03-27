@@ -12,7 +12,7 @@ Send a message. The agent writes code. You see everything — in real time.
 [![npm](https://img.shields.io/npm/v/@openacp/cli.svg)](https://www.npmjs.com/package/@openacp/cli)
 [![Twitter Follow](https://img.shields.io/twitter/follow/openacp_ai?style=social)](https://x.com/openacp_ai)
 
-[Documentation](docs/gitbook/) · [Quick Start](#quick-start) · [Features](#features) · [Agents](#supported-agents) · [Contributing](docs/gitbook/extending/contributing.md)
+[Documentation](https://docs.openacp.ai) · [Quick Start](#quick-start) · [Features](#features) · [Agents](#supported-agents) · [Contributing](docs/gitbook/extending/contributing.md)
 
 </div>
 

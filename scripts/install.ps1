@@ -49,7 +49,7 @@ function Write-Msg {
 function Write-Banner {
     Write-Host ""
     Write-Host "${ACCENT}${BOLD}  OpenACP Installer${NC}"
-    Write-Host "${MUTED}  Bridge your AI agents to any messaging platform.${NC}"
+    Write-Host "${MUTED}  AI coding agents, anywhere.${NC}"
     Write-Host ""
 }
 

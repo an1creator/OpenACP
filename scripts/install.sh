@@ -15,7 +15,7 @@ ERROR='\033[38;2;239;68;68m'           # red #ef4444
 MUTED='\033[38;2;90;100;128m'          # text-muted #5a6480
 NC='\033[0m'
 
-DEFAULT_TAGLINE="Bridge your AI agents to any messaging platform."
+DEFAULT_TAGLINE="AI coding agents, anywhere."
 NODE_DEFAULT_MAJOR=24
 NODE_MIN_MAJOR=22
 NODE_MIN_MINOR=0
@@ -1137,18 +1137,16 @@ verify_installation() {
 # ─── Section 8: Taglines & Main ───────────────────────────────────────────────
 
 TAGLINES=()
-TAGLINES+=("Bridge your AI agents to any messaging platform.")
-TAGLINES+=("Your terminal just became a messaging gateway.")
-TAGLINES+=("One CLI to connect them all — Telegram, Slack, and beyond.")
-TAGLINES+=("AI agents, meet the real world. Real world, brace yourself.")
-TAGLINES+=("Because your AI deserves a social life too.")
-TAGLINES+=("From prompt to ping — bridging agents to humans.")
-TAGLINES+=("Making AI agents reachable, one adapter at a time.")
-TAGLINES+=("The open bridge between AI agents and messaging platforms.")
-TAGLINES+=("Less boilerplate, more bot-to-human conversations.")
-TAGLINES+=("Your agents were lonely. We fixed that.")
-TAGLINES+=("Agent Client Protocol: because AI should be accessible everywhere.")
-TAGLINES+=("npm install, configure, done. Your agent is now on Telegram.")
+TAGLINES+=("AI coding agents, anywhere.")
+TAGLINES+=("Your agents. Your chat. Your rules.")
+TAGLINES+=("From chat to code in seconds.")
+TAGLINES+=("Talk to your codebase from anywhere.")
+TAGLINES+=("One bridge, every platform.")
+TAGLINES+=("Agents assembled. Ready to code.")
+TAGLINES+=("Your terminal just got a lot smarter.")
+TAGLINES+=("Send a message. The agent writes code.")
+TAGLINES+=("Code from Telegram. Review from Slack. Ship from Discord.")
+TAGLINES+=("The open bridge for AI coding agents.")
 
 pick_tagline() {
     local count=${#TAGLINES[@]}

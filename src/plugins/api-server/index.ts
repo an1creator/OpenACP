@@ -1,17 +1,73 @@
 import type { OpenACPPlugin, InstallContext } from '../../core/plugin/types.js'
 import type { OpenACPCore } from '../../core/core.js'
-import type { ApiConfig } from './api-server.js'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import * as os from 'node:os'
+import * as crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+import { createChildLogger } from '../../core/utils/log.js'
+
+const log = createChildLogger({ module: 'api-server' })
+
+const DEFAULT_PORT_FILE = path.join(os.homedir(), '.openacp', 'api.port')
+const DEFAULT_SECRET_FILE = path.join(os.homedir(), '.openacp', 'api-secret')
+
+let cachedVersion: string | undefined
+function getVersion(): string {
+  if (cachedVersion) return cachedVersion
+  try {
+    const __filename = fileURLToPath(import.meta.url)
+    const pkgPath = path.resolve(path.dirname(__filename), '../../../package.json')
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))
+    cachedVersion = pkg.version ?? '0.0.0-dev'
+  } catch {
+    cachedVersion = '0.0.0-dev'
+  }
+  return cachedVersion!
+}
+
+function loadOrCreateSecret(secretFilePath: string): string {
+  const dir = path.dirname(secretFilePath)
+  fs.mkdirSync(dir, { recursive: true })
+
+  try {
+    const secret = fs.readFileSync(secretFilePath, 'utf-8').trim()
+    if (secret) {
+      // Warn if permissions too open
+      try {
+        const stat = fs.statSync(secretFilePath)
+        const mode = stat.mode & 0o777
+        if (mode & 0o077) {
+          log.warn(
+            { path: secretFilePath, mode: '0' + mode.toString(8) },
+            'API secret file has insecure permissions (should be 0600). Run: chmod 600 %s',
+            secretFilePath,
+          )
+        }
+      } catch { /* stat failed */ }
+      return secret
+    }
+  } catch { /* file doesn't exist */ }
+
+  const secret = crypto.randomBytes(32).toString('hex')
+  fs.writeFileSync(secretFilePath, secret, { mode: 0o600 })
+  return secret
+}
+
+export interface ApiConfig {
+  port: number
+  host: string
+}
 
 function createApiServerPlugin(): OpenACPPlugin {
-  let server: { start(): Promise<void>; stop?(): Promise<void> } | null = null
+  let stopServer: (() => Promise<void>) | null = null
 
   return {
     name: '@openacp/api-server',
     version: '1.0.0',
-    description: 'REST API + SSE streaming server',
+    description: 'REST API + SSE streaming server (Fastify)',
     essential: false,
     permissions: ['services:register', 'kernel:access', 'events:read'],
-
     async install(ctx: InstallContext) {
       const { settings, legacyConfig, terminal } = ctx
 
@@ -28,11 +84,7 @@ function createApiServerPlugin(): OpenACPPlugin {
         }
       }
 
-      // Save defaults
-      await settings.setAll({
-        port: 21420,
-        host: '127.0.0.1',
-      })
+      await settings.setAll({ port: 21420, host: '127.0.0.1' })
       terminal.log.success('API server defaults saved')
     },
 
@@ -80,33 +132,148 @@ function createApiServerPlugin(): OpenACPPlugin {
 
     async setup(ctx) {
       const config = ctx.pluginConfig as Record<string, unknown>
+      const core = ctx.core as OpenACPCore
 
-      // Lazy import to avoid loading unless needed
-      const { ApiServer } = await import('./api-server.js')
+      const portFilePath = DEFAULT_PORT_FILE
+      const secretFilePath = DEFAULT_SECRET_FILE
+
+      const secret = loadOrCreateSecret(secretFilePath)
 
       const apiConfig: ApiConfig = {
         port: (config.port as number) ?? 0,
         host: (config.host as string) ?? '127.0.0.1',
       }
 
-      server = new ApiServer(ctx.core as OpenACPCore, apiConfig)
+      // Lazy-import Fastify server + routes + SSE to avoid loading at module level
+      const { createApiServer } = await import('./server.js')
+      const { createApiServerService } = await import('./service.js')
+      const { SSEManager } = await import('./sse-manager.js')
+      const { StaticServer } = await import('./static-server.js')
+      const { sessionRoutesV1 } = await import('./routes/v1-sessions.js')
+      const { systemRoutesV1 } = await import('./routes/v1-system.js')
+      const { agentRoutesV1 } = await import('./routes/v1-agents.js')
+      const { configRoutesV1 } = await import('./routes/v1-config.js')
+      const { topicRoutesV1 } = await import('./routes/v1-topics.js')
+      const { tunnelRoutesV1 } = await import('./routes/v1-tunnel.js')
+      const { notifyRoutesV1 } = await import('./routes/v1-notify.js')
+      const { commandRoutesV1 } = await import('./routes/v1-commands.js')
 
-      ctx.registerService('api-server', server)
+      const startedAt = Date.now()
+      const server = await createApiServer({
+        port: apiConfig.port,
+        host: apiConfig.host,
+        getSecret: () => secret,
+      })
+
+      // Get topic manager if telegram plugin is loaded
+      let topicManager: any = undefined
+      try {
+        const telegramService = ctx.getService('telegram') as any
+        topicManager = telegramService?.topicManager
+      } catch { /* telegram not loaded */ }
+
+      const routeDeps = { core, topicManager, startedAt, getVersion }
+
+      // Register v1 routes (all authenticated via plugin-level onRequest hook)
+      server.registerPlugin('/api/v1/sessions', (app) => sessionRoutesV1(app, routeDeps))
+      server.registerPlugin('/api/v1/agents', (app) => agentRoutesV1(app, routeDeps))
+      server.registerPlugin('/api/v1/config', (app) => configRoutesV1(app, routeDeps))
+      server.registerPlugin('/api/v1/topics', (app) => topicRoutesV1(app, routeDeps))
+      server.registerPlugin('/api/v1/tunnel', (app) => tunnelRoutesV1(app, routeDeps))
+      server.registerPlugin('/api/v1/notify', (app) => notifyRoutesV1(app, routeDeps))
+      server.registerPlugin('/api/v1/commands', (app) => commandRoutesV1(app, routeDeps))
+
+      // System routes — health is unauthenticated, rest authenticated
+      server.registerPlugin('/api/v1/system', (app) => systemRoutesV1(app, routeDeps), { auth: false })
+
+      // SSE endpoint (legacy, will be superseded by SSE adapter in Plan 3)
+      const sseManager = new SSEManager(
+        core.eventBus,
+        () => {
+          const sessions = core.sessionManager.listSessions()
+          return {
+            active: sessions.filter((s) => s.status === 'active' || s.status === 'initializing').length,
+            total: sessions.length,
+          }
+        },
+        startedAt,
+      )
+
+      // Register SSE as authenticated Fastify route
+      server.registerPlugin('/api/v1/events', async (app) => {
+        app.get('/', async (request, reply) => {
+          reply.hijack()
+          const res = reply.raw
+          sseManager.handleRequest(request.raw, res)
+        })
+      })
+
+      // Backward compatibility: redirect old /api/* to /api/v1/*
+      server.app.addHook('onRequest', async (request, reply) => {
+        const url = request.url
+        if (url.startsWith('/api/') && !url.startsWith('/api/v1/') && !url.startsWith('/api/docs')) {
+          // Map old paths to new v1 paths
+          const newUrl = url.replace('/api/', '/api/v1/')
+          return reply.redirect(newUrl, 301)
+        }
+      })
+
+      // Static file serving for UI dashboard
+      const staticServer = new StaticServer()
+      if (staticServer.isAvailable()) {
+        server.app.addHook('onRequest', async (request, reply) => {
+          // Only serve static files for non-API routes
+          if (!request.url.startsWith('/api/')) {
+            const served = staticServer.serve(request.raw, reply.raw)
+            if (served) {
+              reply.hijack()
+            }
+          }
+        })
+      }
+
+      let actualPort = 0
+
+      // Register ApiServerService for other plugins
+      const service = createApiServerService(server, {
+        getPort: () => actualPort,
+        getBaseUrl: () => `http://127.0.0.1:${actualPort}`,
+        getTunnelUrl: () => core.tunnelService?.getPublicUrl() ?? null,
+      })
+      ctx.registerService('api-server', service)
 
       // Start on system:ready
       ctx.on('system:ready', async () => {
         try {
-          await server!.start()
-          ctx.log.info('API server started')
+          const addr = await server.start()
+          actualPort = addr.port
+          sseManager.setup()
+
+          // Write port file
+          const portDir = path.dirname(portFilePath)
+          fs.mkdirSync(portDir, { recursive: true })
+          fs.writeFileSync(portFilePath, String(actualPort))
+
+          if (apiConfig.host !== '127.0.0.1' && apiConfig.host !== 'localhost') {
+            log.warn('API server binding to non-localhost. Ensure api-secret file is secured.')
+          }
+
+          log.info({ host: apiConfig.host, port: actualPort }, 'API server listening')
         } catch (err) {
-          ctx.log.error(`API server failed to start: ${err}`)
+          log.error(`API server failed to start: ${err}`)
         }
       })
+
+      stopServer = async () => {
+        sseManager.stop()
+        try { fs.unlinkSync(portFilePath) } catch { /* ignore */ }
+        await server.stop()
+      }
     },
 
     async teardown() {
-      if (server) {
-        await server.stop?.()
+      if (stopServer) {
+        await stopServer()
       }
     },
   }

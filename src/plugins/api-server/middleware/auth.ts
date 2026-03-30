@@ -1,6 +1,9 @@
 import type { FastifyReply, FastifyRequest, preHandlerHookHandler } from 'fastify'
 import { timingSafeEqual } from 'node:crypto'
 import { AuthError } from './error-handler.js'
+import { verifyToken } from '../auth/jwt.js'
+import { getRoleScopes, hasScope } from '../auth/roles.js'
+import type { TokenStore } from '../auth/token-store.js'
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -14,10 +17,14 @@ declare module 'fastify' {
 }
 
 /**
- * Create auth pre-handler. Stub version — only supports secret token auth.
- * Will be extended with JWT support in Plan 2.
+ * Create auth pre-handler supporting both secret token and JWT auth.
+ * When jwtSecret or tokenStore are not provided, only secret token auth works (Plan 1 stub mode).
  */
-export function createAuthPreHandler(getSecret: () => string): preHandlerHookHandler {
+export function createAuthPreHandler(
+  getSecret: () => string,
+  getJwtSecret?: () => string,
+  tokenStore?: TokenStore,
+): preHandlerHookHandler {
   return async function authPreHandler(request: FastifyRequest, _reply: FastifyReply) {
     const authHeader = request.headers.authorization
     const queryToken = (request.query as Record<string, string>)?.token
@@ -43,7 +50,36 @@ export function createAuthPreHandler(getSecret: () => string): preHandlerHookHan
       }
     }
 
-    // JWT check — stub for Plan 2. For now, reject non-secret tokens.
+    // JWT verification (requires jwtSecret and tokenStore)
+    if (getJwtSecret && tokenStore) {
+      try {
+        const payload = verifyToken(token, getJwtSecret())
+
+        // Check if token is revoked
+        const storedToken = tokenStore.get(payload.sub)
+        if (!storedToken || storedToken.revoked) {
+          throw new AuthError('UNAUTHORIZED', 'Token revoked')
+        }
+
+        // Update last used
+        tokenStore.updateLastUsed(payload.sub)
+
+        // Resolve scopes: use token override or role defaults
+        const scopes = payload.scopes ?? getRoleScopes(payload.role)
+
+        request.auth = {
+          type: 'jwt',
+          tokenId: payload.sub,
+          role: payload.role,
+          scopes,
+        }
+        return
+      } catch (err) {
+        if (err instanceof AuthError) throw err
+        // Fall through to error below
+      }
+    }
+
     throw new AuthError('UNAUTHORIZED', 'Invalid authentication token')
   }
 }
@@ -51,11 +87,10 @@ export function createAuthPreHandler(getSecret: () => string): preHandlerHookHan
 export function requireScopes(...scopes: string[]): preHandlerHookHandler {
   return async function scopeCheck(request: FastifyRequest, _reply: FastifyReply) {
     const { scopes: userScopes } = request.auth
-    if (userScopes.includes('*')) return
-
-    const missing = scopes.filter((s) => !userScopes.includes(s))
-    if (missing.length > 0) {
-      throw new AuthError('FORBIDDEN', `Missing scopes: ${missing.join(', ')}`, 403)
+    for (const scope of scopes) {
+      if (!hasScope(userScopes, scope)) {
+        throw new AuthError('FORBIDDEN', `Missing scope: ${scope}`, 403)
+      }
     }
   }
 }

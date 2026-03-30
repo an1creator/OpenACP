@@ -11,6 +11,8 @@ const log = createChildLogger({ module: 'api-server' })
 
 const DEFAULT_PORT_FILE = path.join(os.homedir(), '.openacp', 'api.port')
 const DEFAULT_SECRET_FILE = path.join(os.homedir(), '.openacp', 'api-secret')
+const DEFAULT_JWT_SECRET_FILE = path.join(os.homedir(), '.openacp', 'jwt-secret')
+const DEFAULT_TOKENS_FILE = path.join(os.homedir(), '.openacp', 'tokens.json')
 
 let cachedVersion: string | undefined
 function getVersion(): string {
@@ -138,6 +140,15 @@ function createApiServerPlugin(): OpenACPPlugin {
       const secretFilePath = DEFAULT_SECRET_FILE
 
       const secret = loadOrCreateSecret(secretFilePath)
+      const jwtSecret = loadOrCreateSecret(DEFAULT_JWT_SECRET_FILE)
+
+      // Initialize TokenStore
+      const { TokenStore } = await import('./auth/token-store.js')
+      const tokenStore = new TokenStore(DEFAULT_TOKENS_FILE)
+      await tokenStore.load()
+
+      // Periodic cleanup of expired tokens (every hour)
+      const cleanupInterval = setInterval(() => tokenStore.cleanup(), 60 * 60 * 1000)
 
       const apiConfig: ApiConfig = {
         port: (config.port as number) ?? 0,
@@ -157,12 +168,15 @@ function createApiServerPlugin(): OpenACPPlugin {
       const { tunnelRoutesV1 } = await import('./routes/v1-tunnel.js')
       const { notifyRoutesV1 } = await import('./routes/v1-notify.js')
       const { commandRoutesV1 } = await import('./routes/v1-commands.js')
+      const { authRoutesV1 } = await import('./routes/v1-auth.js')
 
       const startedAt = Date.now()
       const server = await createApiServer({
         port: apiConfig.port,
         host: apiConfig.host,
         getSecret: () => secret,
+        getJwtSecret: () => jwtSecret,
+        tokenStore,
       })
 
       // Get topic manager if telegram plugin is loaded
@@ -182,6 +196,7 @@ function createApiServerPlugin(): OpenACPPlugin {
       server.registerPlugin('/api/v1/tunnel', (app) => tunnelRoutesV1(app, routeDeps))
       server.registerPlugin('/api/v1/notify', (app) => notifyRoutesV1(app, routeDeps))
       server.registerPlugin('/api/v1/commands', (app) => commandRoutesV1(app, routeDeps))
+      server.registerPlugin('/api/v1/auth', (app) => authRoutesV1(app, { tokenStore, getJwtSecret: () => jwtSecret }))
 
       // System routes — health is unauthenticated, rest authenticated
       server.registerPlugin('/api/v1/system', (app) => systemRoutesV1(app, routeDeps), { auth: false })
@@ -265,7 +280,9 @@ function createApiServerPlugin(): OpenACPPlugin {
       })
 
       stopServer = async () => {
+        clearInterval(cleanupInterval)
         sseManager.stop()
+        await tokenStore.save()
         try { fs.unlinkSync(portFilePath) } catch { /* ignore */ }
         await server.stop()
       }

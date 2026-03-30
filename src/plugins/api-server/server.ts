@@ -11,6 +11,8 @@ export interface ApiServerOptions {
   port: number
   host: string
   getSecret: () => string
+  getJwtSecret?: () => string
+  tokenStore?: import('./auth/token-store.js').TokenStore
   logger?: boolean
 }
 
@@ -47,8 +49,8 @@ export async function createApiServer(options: ApiServerOptions): Promise<ApiSer
   // Global error handler
   app.setErrorHandler(globalErrorHandler)
 
-  // Auth pre-handler
-  const authPreHandler = createAuthPreHandler(options.getSecret)
+  // Auth pre-handler (supports secret token + optional JWT)
+  const authPreHandler = createAuthPreHandler(options.getSecret, options.getJwtSecret, options.tokenStore)
 
   // Decorate request with auth object
   app.decorateRequest('auth', undefined as any)

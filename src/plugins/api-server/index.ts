@@ -196,7 +196,12 @@ function createApiServerPlugin(): OpenACPPlugin {
       server.registerPlugin('/api/v1/tunnel', (app) => tunnelRoutesV1(app, routeDeps))
       server.registerPlugin('/api/v1/notify', (app) => notifyRoutesV1(app, routeDeps))
       server.registerPlugin('/api/v1/commands', (app) => commandRoutesV1(app, routeDeps))
-      server.registerPlugin('/api/v1/auth', (app) => authRoutesV1(app, { tokenStore, getJwtSecret: () => jwtSecret }))
+      // Auth routes registered WITHOUT global auth — refresh needs to accept expired JWTs
+      server.registerPlugin('/api/v1/auth', (app) => authRoutesV1(app, {
+        tokenStore,
+        getJwtSecret: () => jwtSecret,
+        authPreHandler: server.authPreHandler,
+      }), { auth: false })
 
       // System routes — health is unauthenticated, rest authenticated
       server.registerPlugin('/api/v1/system', (app) => systemRoutesV1(app, routeDeps), { auth: false })

@@ -55,19 +55,8 @@ export async function createApiServer(options: ApiServerOptions): Promise<ApiSer
   // Decorate request with auth object
   app.decorateRequest('auth', undefined as any)
 
-  // System routes (health is unauthenticated)
-  await app.register(async (sub) => {
-    sub.get('/health', async () => ({
-      status: 'ok',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      memory: process.memoryUsage(),
-    }))
-
-    sub.get('/version', { preHandler: authPreHandler }, async () => ({
-      version: process.env.npm_package_version ?? 'unknown',
-    }))
-  }, { prefix: '/api/v1/system' })
+  // System routes are registered via index.ts (v1-system.ts) — not here
+  // This avoids duplicate route registration
 
   return {
     app,

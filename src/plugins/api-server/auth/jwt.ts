@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto'
+import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { JwtPayload } from './types.js'
 
 // Simple JWT implementation using Node.js crypto (no external dependency)
@@ -62,7 +62,9 @@ export function verifyToken(token: string, secret: string): JwtPayload {
     .update(`${header}.${body}`)
     .digest('base64url')
 
-  if (signature !== expectedSig) {
+  const sigBuf = Buffer.from(signature, 'base64url')
+  const expectedBuf = Buffer.from(expectedSig, 'base64url')
+  if (sigBuf.length !== expectedBuf.length || !timingSafeEqual(sigBuf, expectedBuf)) {
     throw new Error('Invalid JWT signature')
   }
 
@@ -88,7 +90,9 @@ export function verifyForRefresh(token: string, secret: string): JwtPayload {
     .update(`${header}.${body}`)
     .digest('base64url')
 
-  if (signature !== expectedSig) {
+  const sigBuf = Buffer.from(signature, 'base64url')
+  const expectedBuf = Buffer.from(expectedSig, 'base64url')
+  if (sigBuf.length !== expectedBuf.length || !timingSafeEqual(sigBuf, expectedBuf)) {
     throw new Error('Invalid JWT signature')
   }
 

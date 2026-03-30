@@ -58,7 +58,7 @@ export function serializeHeartbeat(): string {
 }
 
 export function serializeConnected(connectionId: string, sessionId: string): string {
-  return serializeSSE('connected', undefined, {
+  return serializeSSE('connected', generateEventId(), {
     connectionId,
     sessionId,
     connectedAt: new Date().toISOString(),

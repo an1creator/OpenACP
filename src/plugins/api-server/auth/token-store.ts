@@ -2,6 +2,10 @@ import { readFile, writeFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import type { StoredToken, CreateTokenOpts } from './types.js'
 
+function logSaveError(err: unknown): void {
+  console.error('[TokenStore] Failed to persist tokens to disk:', err)
+}
+
 const REFRESH_DEADLINE_MS = 7 * 24 * 60 * 60 * 1000 // 7 days
 
 function generateTokenId(): string {
@@ -55,7 +59,7 @@ export class TokenStore {
       revoked: false,
     }
     this.tokens.set(token.id, token)
-    this.save().catch(() => {})
+    this.save().catch(logSaveError)
     return token
   }
 
@@ -67,7 +71,7 @@ export class TokenStore {
     const token = this.tokens.get(id)
     if (token) {
       token.revoked = true
-      this.save().catch(() => {})
+      this.save().catch(logSaveError)
     }
   }
 
@@ -93,6 +97,6 @@ export class TokenStore {
         this.tokens.delete(id)
       }
     }
-    this.save().catch(() => {})
+    this.save().catch(logSaveError)
   }
 }

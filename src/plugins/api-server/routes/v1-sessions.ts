@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import type { RouteDeps } from './types.js'
 import { NotFoundError } from '../middleware/error-handler.js'
+import { requireScopes } from '../middleware/auth.js'
 import { createChildLogger } from '../../../core/utils/log.js'
 
 const log = createChildLogger({ module: 'api-server' })
@@ -9,7 +10,7 @@ export async function sessionRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   const { core } = deps
 
   // GET / — list sessions
-  app.get('/', async () => {
+  app.get('/', { preHandler: requireScopes('sessions:read') }, async () => {
     const sessions = core.sessionManager.listSessions()
     return {
       sessions: sessions.map((s) => ({
@@ -28,7 +29,7 @@ export async function sessionRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   })
 
   // GET /:id — session detail
-  app.get<{ Params: { id: string } }>('/:id', async (request) => {
+  app.get<{ Params: { id: string } }>('/:id', { preHandler: requireScopes('sessions:read') }, async (request) => {
     const { id } = request.params
     const session = core.sessionManager.getSession(decodeURIComponent(id))
     if (!session) {
@@ -53,7 +54,7 @@ export async function sessionRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   })
 
   // POST / — create session
-  app.post<{ Body: { agent?: string; workspace?: string; channel?: string } }>('/', async (request, reply) => {
+  app.post<{ Body: { agent?: string; workspace?: string; channel?: string } }>('/', { preHandler: requireScopes('sessions:write') }, async (request, reply) => {
     const { agent, workspace, channel } = request.body ?? {}
 
     // Check max concurrent sessions
@@ -134,7 +135,7 @@ export async function sessionRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   })
 
   // POST /adopt — adopt external session
-  app.post<{ Body: { agent?: string; agentSessionId?: string; cwd?: string; channel?: string } }>('/adopt', async (request, reply) => {
+  app.post<{ Body: { agent?: string; agentSessionId?: string; cwd?: string; channel?: string } }>('/adopt', { preHandler: requireScopes('sessions:write') }, async (request, reply) => {
     const { agent, agentSessionId, cwd, channel } = request.body ?? {}
 
     if (!agent || !agentSessionId) {
@@ -158,7 +159,7 @@ export async function sessionRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   })
 
   // POST /:id/prompt — enqueue prompt
-  app.post<{ Params: { id: string }; Body: { prompt?: string } }>('/:id/prompt', async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { prompt?: string } }>('/:id/prompt', { preHandler: requireScopes('sessions:prompt') }, async (request, reply) => {
     const session = core.sessionManager.getSession(decodeURIComponent(request.params.id))
     if (!session) {
       throw new NotFoundError('SESSION_NOT_FOUND', `Session "${request.params.id}" not found`)
@@ -182,7 +183,7 @@ export async function sessionRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   })
 
   // POST /:id/permission — resolve permission
-  app.post<{ Params: { id: string }; Body: { permissionId?: string; optionId?: string } }>('/:id/permission', async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { permissionId?: string; optionId?: string } }>('/:id/permission', { preHandler: requireScopes('sessions:permission') }, async (request, reply) => {
     const session = core.sessionManager.getSession(decodeURIComponent(request.params.id))
     if (!session) {
       throw new NotFoundError('SESSION_NOT_FOUND', `Session "${request.params.id}" not found`)
@@ -206,7 +207,7 @@ export async function sessionRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   })
 
   // PATCH /:id/dangerous — toggle dangerous mode
-  app.patch<{ Params: { id: string }; Body: { enabled?: boolean } }>('/:id/dangerous', async (request, reply) => {
+  app.patch<{ Params: { id: string }; Body: { enabled?: boolean } }>('/:id/dangerous', { preHandler: requireScopes('sessions:write') }, async (request, reply) => {
     const session = core.sessionManager.getSession(decodeURIComponent(request.params.id))
     if (!session) {
       throw new NotFoundError('SESSION_NOT_FOUND', `Session "${request.params.id}" not found`)
@@ -225,7 +226,7 @@ export async function sessionRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   })
 
   // POST /:id/archive — archive session
-  app.post<{ Params: { id: string } }>('/:id/archive', async (request, reply) => {
+  app.post<{ Params: { id: string } }>('/:id/archive', { preHandler: requireScopes('sessions:write') }, async (request, reply) => {
     const result = await core.archiveSession(decodeURIComponent(request.params.id))
     if (result.ok) {
       return result
@@ -235,7 +236,7 @@ export async function sessionRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   })
 
   // DELETE /:id — cancel session
-  app.delete<{ Params: { id: string } }>('/:id', async (request) => {
+  app.delete<{ Params: { id: string } }>('/:id', { preHandler: requireScopes('sessions:write') }, async (request) => {
     const sessionId = decodeURIComponent(request.params.id)
     const session = core.sessionManager.getSession(sessionId)
     if (!session) {

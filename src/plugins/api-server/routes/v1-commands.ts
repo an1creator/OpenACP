@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify'
 import type { RouteDeps } from './types.js'
 import type { CommandRegistry } from '../../../core/command-registry.js'
+import { requireScopes } from '../middleware/auth.js'
 
 export async function commandRoutesV1(app: FastifyInstance, deps: RouteDeps): Promise<void> {
   const { core } = deps
@@ -11,7 +12,7 @@ export async function commandRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   }
 
   // GET / — list all registered commands
-  app.get('/', async (_request, reply) => {
+  app.get('/', { preHandler: requireScopes('commands:execute') }, async (_request, reply) => {
     const registry = getCommandRegistry()
     if (!registry) {
       return reply.status(503).send({
@@ -31,7 +32,7 @@ export async function commandRoutesV1(app: FastifyInstance, deps: RouteDeps): Pr
   })
 
   // POST /execute — execute a command
-  app.post<{ Body: { command?: string; sessionId?: string } }>('/execute', async (request, reply) => {
+  app.post<{ Body: { command?: string; sessionId?: string } }>('/execute', { preHandler: requireScopes('commands:execute') }, async (request, reply) => {
     const registry = getCommandRegistry()
     if (!registry) {
       return reply.status(503).send({

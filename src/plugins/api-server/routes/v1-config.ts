@@ -23,11 +23,13 @@ function redactDeep(obj: Record<string, unknown>): void {
   }
 }
 
+import { requireScopes, requireRole } from '../middleware/auth.js'
+
 export async function configRoutesV1(app: FastifyInstance, deps: RouteDeps): Promise<void> {
   const { core } = deps
 
   // GET /editable — safe fields with metadata
-  app.get('/editable', async () => {
+  app.get('/editable', { preHandler: requireScopes('config:read') }, async () => {
     const { getSafeFields, resolveOptions, getConfigValue } = await import('../../../core/config/config-registry.js')
     const config = core.configManager.get()
     const safeFields = getSafeFields()
@@ -46,13 +48,13 @@ export async function configRoutesV1(app: FastifyInstance, deps: RouteDeps): Pro
   })
 
   // GET / — full config (redacted)
-  app.get('/', async () => {
+  app.get('/', { preHandler: requireScopes('config:read') }, async () => {
     const config = core.configManager.get()
     return { config: redactConfig(config) }
   })
 
   // PATCH / — update config field
-  app.patch<{ Body: { path?: string; value?: unknown } }>('/', async (request, reply) => {
+  app.patch<{ Body: { path?: string; value?: unknown } }>('/', { preHandler: requireScopes('config:write') }, async (request, reply) => {
     const { path: configPath, value } = request.body ?? {}
 
     if (!configPath) {

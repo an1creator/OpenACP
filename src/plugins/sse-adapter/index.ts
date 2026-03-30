@@ -11,6 +11,7 @@ function createSSEAdapterPlugin(): OpenACPPlugin {
     description: 'SSE-based messaging adapter for app clients',
     essential: false,
     permissions: ['services:register', 'kernel:access', 'events:read'],
+    pluginDependencies: { '@openacp/api-server': '*' },
 
     async setup(ctx) {
       const core = ctx.core as OpenACPCore

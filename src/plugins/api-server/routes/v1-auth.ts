@@ -1,20 +1,22 @@
-import type { FastifyInstance } from 'fastify'
+import type { FastifyInstance, preHandlerHookHandler } from 'fastify'
 import type { TokenStore } from '../auth/token-store.js'
 import { signToken, verifyForRefresh } from '../auth/jwt.js'
 import { isValidRole } from '../auth/roles.js'
 import { AuthError, NotFoundError } from '../middleware/error-handler.js'
+import { requireScopes } from '../middleware/auth.js'
 import { parseDuration } from '../auth/token-store.js'
 
 export interface AuthRouteDeps {
   tokenStore: TokenStore
   getJwtSecret: () => string
+  authPreHandler: preHandlerHookHandler
 }
 
 export async function authRoutesV1(app: FastifyInstance, deps: AuthRouteDeps): Promise<void> {
-  const { tokenStore, getJwtSecret } = deps
+  const { tokenStore, getJwtSecret, authPreHandler } = deps
 
-  // POST /tokens — generate new JWT (secret token only)
-  app.post<{ Body: { role?: string; name?: string; expire?: string; scopes?: string[] } }>('/tokens', async (request, reply) => {
+  // POST /tokens — generate new JWT (secret token only, requires auth)
+  app.post<{ Body: { role?: string; name?: string; expire?: string; scopes?: string[] } }>('/tokens', { preHandler: authPreHandler }, async (request, reply) => {
     if (request.auth.type !== 'secret') {
       throw new AuthError('FORBIDDEN', 'Only secret token can generate new tokens', 403)
     }
@@ -47,7 +49,7 @@ export async function authRoutesV1(app: FastifyInstance, deps: AuthRouteDeps): P
   })
 
   // GET /tokens — list active tokens
-  app.get('/tokens', async () => {
+  app.get('/tokens', { preHandler: [authPreHandler, requireScopes('auth:manage')] }, async () => {
     const tokens = tokenStore.list()
     return {
       tokens: tokens.map((t) => ({
@@ -63,7 +65,7 @@ export async function authRoutesV1(app: FastifyInstance, deps: AuthRouteDeps): P
   })
 
   // DELETE /tokens/:id — revoke token
-  app.delete<{ Params: { id: string } }>('/tokens/:id', async (request) => {
+  app.delete<{ Params: { id: string } }>('/tokens/:id', { preHandler: [authPreHandler, requireScopes('auth:manage')] }, async (request) => {
     const { id } = request.params
     const token = tokenStore.get(id)
     if (!token) {
@@ -113,8 +115,8 @@ export async function authRoutesV1(app: FastifyInstance, deps: AuthRouteDeps): P
     })
   })
 
-  // GET /me — current auth info
-  app.get('/me', async (request) => {
+  // GET /me — current auth info (requires auth)
+  app.get('/me', { preHandler: authPreHandler }, async (request) => {
     return {
       type: request.auth.type,
       tokenId: request.auth.tokenId,

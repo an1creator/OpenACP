@@ -23,46 +23,28 @@ describe('createApiServer', () => {
     expect(address.port).toBeGreaterThan(0)
   })
 
-  it('registers health endpoint without auth', async () => {
-    server = await createApiServer({ port: 0, host: '127.0.0.1', getSecret: () => 'test-secret' })
-    await server.start()
-
-    const response = await server.app.inject({
-      method: 'GET',
-      url: '/api/v1/system/health',
-    })
-
-    expect(response.statusCode).toBe(200)
-    const body = JSON.parse(response.body)
-    expect(body.status).toBe('ok')
-    expect(body.uptime).toBeGreaterThanOrEqual(0)
-    expect(body.memory).toBeDefined()
-  })
-
-  it('returns 401 on version endpoint without token', async () => {
-    server = await createApiServer({ port: 0, host: '127.0.0.1', getSecret: () => 'test-secret' })
-    await server.start()
-
-    const response = await server.app.inject({
-      method: 'GET',
-      url: '/api/v1/system/version',
-    })
-
-    expect(response.statusCode).toBe(401)
-  })
-
-  it('allows version endpoint with valid secret token', async () => {
-    const secret = 'my-test-secret-token'
+  it('registerPlugin with auth adds routes that require authentication', async () => {
+    const secret = 'test-health-secret'
     server = await createApiServer({ port: 0, host: '127.0.0.1', getSecret: () => secret })
+
+    // Register a test route with auth
+    server.registerPlugin('/api/v1/test', async (app) => {
+      app.get('/data', async () => ({ ok: true }))
+    })
+
     await server.start()
 
-    const response = await server.app.inject({
+    // Without auth — 401
+    const noAuth = await server.app.inject({ method: 'GET', url: '/api/v1/test/data' })
+    expect(noAuth.statusCode).toBe(401)
+
+    // With auth — 200
+    const withAuth = await server.app.inject({
       method: 'GET',
-      url: '/api/v1/system/version',
+      url: '/api/v1/test/data',
       headers: { authorization: `Bearer ${secret}` },
     })
-
-    expect(response.statusCode).toBe(200)
+    expect(withAuth.statusCode).toBe(200)
   })
 
   it('registerPlugin adds authenticated routes', async () => {

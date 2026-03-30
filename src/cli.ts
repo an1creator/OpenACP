@@ -26,6 +26,7 @@ import {
   cmdTunnel,
   cmdOnboard,
   cmdDev,
+  cmdRemote,
 } from './cli/commands/index.js'
 
 const args = process.argv.slice(2);
@@ -55,6 +56,7 @@ const commands: Record<string, () => Promise<void>> = {
   'tunnel': () => cmdTunnel(args),
   'onboard': () => cmdOnboard(),
   'dev': () => cmdDev(args),
+  'remote': () => cmdRemote(args),
   '--daemon-child': async () => {
     const { startServer } = await import('./main.js')
     await startServer()

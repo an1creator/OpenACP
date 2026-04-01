@@ -459,6 +459,24 @@ export async function sessionRoutes(
     },
   );
 
+  // GET /sessions/:sessionId/history — get full conversation history
+  app.get<{ Params: { sessionId: string } }>(
+    '/:sessionId/history',
+    { preHandler: requireScopes('sessions:read') },
+    async (request) => {
+      const { sessionId: rawId } = SessionIdParamSchema.parse(request.params);
+      const sessionId = decodeURIComponent(rawId);
+      if (!deps.historyStore) {
+        throw new NotFoundError('HISTORY_UNAVAILABLE', 'History store not available');
+      }
+      const history = await deps.historyStore.read(sessionId);
+      if (!history) {
+        throw new NotFoundError('HISTORY_NOT_FOUND', `No history for session "${sessionId}"`);
+      }
+      return { history };
+    },
+  );
+
   // DELETE /sessions/:sessionId — cancel a session
   app.delete<{ Params: { sessionId: string } }>(
     '/:sessionId',

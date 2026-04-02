@@ -463,11 +463,20 @@ export async function sessionRoutes(
   app.get<{ Params: { sessionId: string } }>(
     '/:sessionId/history',
     { preHandler: requireScopes('sessions:read') },
-    async (request) => {
+    async (request, reply) => {
       const { sessionId: rawId } = SessionIdParamSchema.parse(request.params);
       const sessionId = decodeURIComponent(rawId);
+      const session = deps.core.sessionManager.getSession(sessionId);
+      if (!session) {
+        throw new NotFoundError(
+          'SESSION_NOT_FOUND',
+          `Session "${sessionId}" not found`,
+        );
+      }
       if (!deps.historyStore) {
-        throw new NotFoundError('HISTORY_UNAVAILABLE', 'History store not available');
+        return reply.status(503).send({
+          error: { code: 'HISTORY_UNAVAILABLE', message: 'History store not available', statusCode: 503 },
+        });
       }
       const history = await deps.historyStore.read(sessionId);
       if (!history) {

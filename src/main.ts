@@ -397,10 +397,13 @@ export async function startServer(opts?: StartServerOptions) {
         /* best effort */
       }
 
-      // 2. Persist session state (don't kill agent subprocesses — they exit with parent)
+      // 2. Destroy any idle warm agent — don't leak the subprocess.
+      try { await core.agentManager.destroyWarm(); } catch { /* best effort */ }
+
+      // 3. Persist session state (don't kill agent subprocesses — they exit with parent)
       await core.sessionManager.shutdownAll()
 
-      // 3. Lifecycle teardown stops all plugins (adapters, api-server, tunnel, etc.)
+      // 4. Lifecycle teardown stops all plugins (adapters, api-server, tunnel, etc.)
       await core.lifecycleManager.shutdown()
       // Note: do NOT call core.stop() here — it would double-stop adapters and
       // try to use the notification plugin after it has already been torn down.
@@ -500,6 +503,17 @@ export async function startServer(opts?: StartServerOptions) {
     }
   } catch {
     // Non-critical — don't fail startup if registry write fails
+  }
+
+  // Agent warm-pool: spawn one instance for the default agent + workspace in the
+  // background so the first session-create call only pays for the newSession RPC.
+  try {
+    const defaultAgent = config.defaultAgent;
+    const defaultWorkingDir = configManager.resolveWorkspace();
+    const allowedPaths = config.workspace?.security?.allowedPaths ?? [];
+    core.agentManager.prewarm(defaultAgent, defaultWorkingDir, allowedPaths);
+  } catch (err) {
+    log.warn({ err }, "Agent warm-pool prewarm at boot failed");
   }
 
   // 6. Log ready

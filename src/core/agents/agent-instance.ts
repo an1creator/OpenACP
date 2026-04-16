@@ -292,7 +292,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
    *
    * Does NOT create a session — callers must follow up with newSession or loadSession.
    */
-  private static async spawnSubprocess(
+  public static async spawnSubprocess(
     agentDef: AgentDefinition,
     workingDirectory: string,
     allowedPaths: string[] = [],
@@ -455,6 +455,32 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     });
   }
 
+  /** True if the subprocess has exited or been killed. */
+  get isDead(): boolean {
+    return this.child.killed || this.child.exitCode !== null;
+  }
+
+  /**
+   * Claim a pre-initialized AgentInstance by opening a fresh ACP session on it.
+   * Called by AgentManager.spawn() when a warm instance is consumed. Also called
+   * as the second half of AgentInstance.spawn() for the normal (non-warm) path.
+   */
+  async claimForSession(workingDirectory: string, mcpServers?: McpServerConfig[]): Promise<void> {
+    if (this.sessionId) {
+      throw new Error("AgentInstance already has a session — cannot claim twice");
+    }
+    const resolvedMcp = AgentInstance.mcpManager.resolve(mcpServers);
+    const response = await withAgentTimeout(
+      this.connection.newSession({ cwd: workingDirectory, mcpServers: resolvedMcp as any }),
+      this.agentName,
+      'newSession',
+    );
+    this.sessionId = response.sessionId;
+    this.initialSessionResponse = response;
+    this.debugTracer = createDebugTracer(response.sessionId, workingDirectory);
+    this.setupCrashDetection();
+  }
+
   /**
    * Spawn a new agent subprocess and create a fresh ACP session.
    *
@@ -473,36 +499,15 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     mcpServers?: McpServerConfig[],
     allowedPaths?: string[],
   ): Promise<AgentInstance> {
-    log.debug(
-      { agentName: agentDef.name, command: agentDef.command },
-      "Spawning agent",
-    );
+    log.debug({ agentName: agentDef.name, command: agentDef.command }, "Spawning agent");
     const spawnStart = Date.now();
-
-    const instance = await AgentInstance.spawnSubprocess(
-      agentDef,
-      workingDirectory,
-      allowedPaths,
-    );
-
-    const resolvedMcp = AgentInstance.mcpManager.resolve(mcpServers);
-    const response = await withAgentTimeout(
-      instance.connection.newSession({ cwd: workingDirectory, mcpServers: resolvedMcp as any }),
-      agentDef.name,
-      'newSession',
-    );
-
-    log.info(response, 'newSession response');
-    instance.sessionId = response.sessionId;
-    instance.initialSessionResponse = response;
-    instance.debugTracer = createDebugTracer(response.sessionId, workingDirectory);
-    instance.setupCrashDetection();
-
+    const instance = await AgentInstance.spawnSubprocess(agentDef, workingDirectory, allowedPaths);
+    await instance.claimForSession(workingDirectory, mcpServers);
     log.info(
       {
-        sessionId: response.sessionId,
+        sessionId: instance.sessionId,
         durationMs: Date.now() - spawnStart,
-        configOptions: (response as any).configOptions ?? [],
+        configOptions: (instance.initialSessionResponse as any)?.configOptions ?? [],
         agentCapabilities: instance.agentCapabilities ?? null,
       },
       "Agent spawn complete",

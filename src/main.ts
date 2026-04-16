@@ -507,6 +507,10 @@ export async function startServer(opts?: StartServerOptions) {
 
   // Agent warm-pool: spawn one instance for the default agent + workspace in the
   // background so the first session-create call only pays for the newSession RPC.
+  // The try/catch only covers SYNC errors from reading config + resolveWorkspace
+  // (e.g. misconfigured workspace path). prewarm() itself returns void
+  // synchronously and runs the actual spawn in the background — async errors
+  // there are caught and logged inside AgentManager.
   try {
     const defaultAgent = config.defaultAgent;
     const defaultWorkingDir = configManager.resolveWorkspace();

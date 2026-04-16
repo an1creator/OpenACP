@@ -461,9 +461,29 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
   }
 
   /**
-   * Claim a pre-initialized AgentInstance by opening a fresh ACP session on it.
-   * Called by AgentManager.spawn() when a warm instance is consumed. Also called
-   * as the second half of AgentInstance.spawn() for the normal (non-warm) path.
+   * Open a fresh ACP session on a pre-initialized AgentInstance.
+   *
+   * Pre-conditions:
+   *  - The instance has been through `spawnSubprocess` (subprocess is running,
+   *    ACP `initialize` handshake is done, `agentCapabilities` is set).
+   *  - `sessionId` is unset — calling twice is a programming error.
+   *
+   * Post-conditions on success:
+   *  - `sessionId`, `initialSessionResponse`, and `debugTracer` are populated.
+   *  - `setupCrashDetection` is wired so subsequent process exits emit
+   *    `AGENT_EVENT` with an error message.
+   *  - The instance is fully ready for `prompt()` calls.
+   *
+   * @throws Error("AgentInstance already has a session — cannot claim twice")
+   *         if `sessionId` is already set.
+   * @throws Whatever the agent's `newSession` RPC throws (timeout, ACP error,
+   *         subprocess exited mid-call). The instance is NOT destroyed in this
+   *         case — the caller is responsible for cleanup.
+   *
+   * Called by:
+   *  - `AgentManager.spawn()` when a warm instance is consumed (only path
+   *    where `spawnSubprocess` and `claimForSession` are split apart).
+   *  - `AgentInstance.spawn()` as the second half of the normal spawn path.
    */
   async claimForSession(workingDirectory: string, mcpServers?: McpServerConfig[]): Promise<void> {
     if (this.sessionId) {

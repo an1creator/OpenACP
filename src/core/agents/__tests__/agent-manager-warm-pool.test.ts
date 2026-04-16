@@ -317,4 +317,104 @@ describe('AgentManager warm-pool', () => {
       expect(AgentInstance.spawn).toHaveBeenCalledOnce()
     })
   })
+
+  // ── Review fix: dead warm instance must be destroy()ed (not just orphaned) ──
+
+  describe('spawn() — dead warm instance is destroyed (resource cleanup)', () => {
+    it('calls destroy() on a dead warm instance to release listeners + StderrCapture', async () => {
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+
+      const deadInstance = fakeWarmInstance({ isDead: true })
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(deadInstance as any)
+
+      manager.prewarm('claude', '/workspace')
+      await vi.waitFor(() =>
+        expect(AgentInstance.spawnSubprocess).toHaveBeenCalledTimes(1),
+      )
+
+      await manager.spawn('claude', '/workspace')
+
+      expect(deadInstance.destroy).toHaveBeenCalled()
+    })
+  })
+
+  // ── Review fix: allowedPaths is part of the warm match key ────────────────
+
+  describe('allowedPaths matching', () => {
+    it('reuses the warm when allowedPaths match (order-insensitive)', async () => {
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+
+      manager.prewarm('claude', '/workspace', ['/a', '/b'])
+      await vi.waitFor(() =>
+        expect(AgentInstance.spawnSubprocess).toHaveBeenCalledTimes(1),
+      )
+
+      // Different order, same set — must match
+      const result = await manager.spawn('claude', '/workspace', ['/b', '/a'])
+      expect((result as any).claimForSession).toHaveBeenCalled()
+      expect(AgentInstance.spawn).not.toHaveBeenCalled()
+    })
+
+    it('discards the warm when allowedPaths differ — security boundary mismatch', async () => {
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+
+      const warmInst = fakeWarmInstance()
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warmInst as any)
+
+      manager.prewarm('claude', '/workspace', ['/a'])
+      await vi.waitFor(() =>
+        expect(AgentInstance.spawnSubprocess).toHaveBeenCalledTimes(1),
+      )
+
+      // Different allowedPaths → mismatched PathGuard → must NOT reuse
+      await manager.spawn('claude', '/workspace', ['/a', '/b'])
+
+      // Warm was destroyed (cleared), full spawn happened
+      expect(warmInst.destroy).toHaveBeenCalled()
+      expect(warmInst.claimForSession).not.toHaveBeenCalled()
+      expect(AgentInstance.spawn).toHaveBeenCalledOnce()
+    })
+  })
+
+  // ── Review fix: concurrent prewarm + spawn race ───────────────────────────
+
+  describe('race: prewarm in flight when spawn fires', () => {
+    it('falls through to full spawn, then refills via post-spawn prewarm', async () => {
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+
+      // First prewarm: keep it suspended so spawn fires before it completes.
+      let resolveFirstSpawn!: (i: any) => void
+      vi.mocked(AgentInstance.spawnSubprocess).mockImplementationOnce(
+        () => new Promise<any>((res) => { resolveFirstSpawn = res }),
+      )
+
+      manager.prewarm('claude', '/workspace')
+
+      // Spawn fires while warming is in flight — takeWarm finds nothing in slot,
+      // falls through to AgentInstance.spawn.
+      const spawnP = manager.spawn('claude', '/workspace')
+      await spawnP
+      expect(AgentInstance.spawn).toHaveBeenCalledOnce()
+
+      // Refill (post-spawn prewarm) is dropped because the original prewarm is
+      // still warming — it logs at debug and returns. Now resolve the original:
+      resolveFirstSpawn(fakeWarmInstance())
+
+      await vi.waitFor(() => {
+        // The first spawnSubprocess from the original prewarm completes and
+        // populates the warm slot. A subsequent spawn should find it.
+        expect(AgentInstance.spawnSubprocess).toHaveBeenCalledTimes(1)
+      })
+
+      // Subsequent spawn picks up the now-warm slot.
+      vi.mocked(AgentInstance.spawn).mockClear()
+      const next = await manager.spawn('claude', '/workspace')
+      expect((next as any).claimForSession).toHaveBeenCalled()
+      expect(AgentInstance.spawn).not.toHaveBeenCalled()
+    })
+  })
 })

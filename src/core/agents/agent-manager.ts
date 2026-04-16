@@ -10,8 +10,28 @@ const WARM_TTL_MS = 5 * 60 * 1000; // 5 minutes
 interface WarmEntry {
   agentName: string;
   workingDir: string;
+  /**
+   * The allowedPaths set baked into the warm instance's PathGuard at spawn time.
+   * Must match the requested set on takeWarm — different paths produce a
+   * different security boundary, so a mismatched warm is not safe to claim.
+   */
+  allowedPaths: readonly string[];
   instance: AgentInstance;
   createdAt: number;
+}
+
+/**
+ * Order-insensitive equality on two path lists. Used to decide whether a warm
+ * instance's PathGuard configuration matches a fresh request.
+ */
+function pathListsEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  for (let i = 0; i < sa.length; i++) {
+    if (sa[i] !== sb[i]) return false;
+  }
+  return true;
 }
 
 /**
@@ -53,16 +73,29 @@ export class AgentManager {
   }
 
   /**
-   * Spawn-and-initialize one AgentInstance in the background for the given agent/workingDir.
-   * Safe to call repeatedly — a second call while warming is in flight is a no-op,
-   * and a call while a valid warm entry already exists is a no-op.
+   * Spawn-and-initialize one AgentInstance in the background for the given
+   * agent/workingDir/allowedPaths. Safe to call repeatedly — a second call
+   * while warming is in flight is a no-op (logged at debug), and a call while
+   * a valid warm entry with matching params already exists is a no-op.
+   *
+   * If a warm entry exists with mismatched params, this call is also a no-op:
+   * the existing entry stays in the slot and `takeWarm` will discard it on
+   * the next mismatched request. Eviction-on-prewarm could be added if the
+   * usage pattern produces frequent mismatches.
    */
-  prewarm(agentName: string, workingDir: string, allowedPaths: string[] = []): void {
-    if (this.warming) return;
+  prewarm(agentName: string, workingDir: string, allowedPaths: readonly string[] = []): void {
+    if (this.warming) {
+      log.debug(
+        { requestedAgent: agentName, requestedWorkingDir: workingDir },
+        "prewarm: another warm spawn already in flight; request dropped",
+      );
+      return;
+    }
     if (
       this.warmEntry &&
       this.warmEntry.agentName === agentName &&
-      this.warmEntry.workingDir === workingDir
+      this.warmEntry.workingDir === workingDir &&
+      pathListsEqual(this.warmEntry.allowedPaths, allowedPaths)
     ) {
       return;
     }
@@ -73,7 +106,7 @@ export class AgentManager {
     }
     this.warming = (async () => {
       try {
-        const instance = await AgentInstance.spawnSubprocess(agentDef, workingDir, allowedPaths);
+        const instance = await AgentInstance.spawnSubprocess(agentDef, workingDir, [...allowedPaths]);
         // If someone else set warmEntry while we were warming (unlikely), destroy ours.
         if (this.warmEntry) {
           await instance.destroy().catch(() => {});
@@ -82,6 +115,7 @@ export class AgentManager {
         this.warmEntry = {
           agentName,
           workingDir,
+          allowedPaths: [...allowedPaths],
           instance,
           createdAt: Date.now(),
         };
@@ -94,7 +128,11 @@ export class AgentManager {
     })();
   }
 
-  /** Destroy the warm instance (if any). Called on shutdown. */
+  /**
+   * Destroy the warm instance (if any) and clear the slot. Called from the
+   * server shutdown path so the warm subprocess does not outlive its parent.
+   * Best-effort — errors are swallowed since shutdown should not fail.
+   */
   async destroyWarm(): Promise<void> {
     const entry = this.warmEntry;
     this.warmEntry = null;
@@ -104,22 +142,47 @@ export class AgentManager {
   }
 
   /**
-   * Take the warm instance if it matches the given agent/workingDir and is alive.
-   * Clears the slot regardless — the caller is responsible for claiming or
-   * discarding the returned instance.
+   * Take the warm instance if it matches the given agent/workingDir/allowedPaths
+   * AND is alive AND has not exceeded its TTL. Clears the slot in every
+   * mismatch/discard branch — the caller is responsible for claiming the
+   * returned instance (or discarding it if claim fails).
+   *
+   * `allowedPaths` is part of the match key because it is baked into the
+   * subprocess's PathGuard at spawn time and cannot be safely re-applied
+   * post-hoc on a warm instance.
    */
-  private takeWarm(agentName: string, workingDir: string): AgentInstance | null {
+  private takeWarm(
+    agentName: string,
+    workingDir: string,
+    allowedPaths: readonly string[],
+  ): AgentInstance | null {
     const entry = this.warmEntry;
     if (!entry) return null;
     if (entry.agentName !== agentName || entry.workingDir !== workingDir) return null;
+    if (!pathListsEqual(entry.allowedPaths, allowedPaths)) {
+      // Security-relevant mismatch: PathGuard differs. Discard and clear.
+      log.debug(
+        { agentName, workingDir },
+        "Warm-pool: allowedPaths mismatch on takeWarm — discarding warm",
+      );
+      this.warmEntry = null;
+      entry.instance.destroy().catch(() => {});
+      return null;
+    }
     if (Date.now() - entry.createdAt > WARM_TTL_MS) {
-      // Stale — discard and clear slot.
+      log.debug({ agentName, workingDir }, "Warm-pool: TTL expired — discarding warm");
       this.warmEntry = null;
       entry.instance.destroy().catch(() => {});
       return null;
     }
     if (entry.instance.isDead) {
+      log.warn(
+        { agentName, workingDir },
+        "Warm-pool: instance died before claim — discarding",
+      );
       this.warmEntry = null;
+      // Subprocess is gone but listeners and StderrCapture are still referenced.
+      entry.instance.destroy().catch(() => {});
       return null;
     }
     this.warmEntry = null;
@@ -148,8 +211,8 @@ export class AgentManager {
       );
     }
 
-    // Fast path: claim the warm instance if it matches.
-    const warm = this.takeWarm(agentName, workingDirectory);
+    // Fast path: claim the warm instance if it matches (agent + workingDir + allowedPaths).
+    const warm = this.takeWarm(agentName, workingDirectory, allowedPaths ?? []);
     if (warm) {
       try {
         await warm.claimForSession(workingDirectory);

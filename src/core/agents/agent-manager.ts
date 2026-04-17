@@ -78,10 +78,9 @@ export class AgentManager {
    * while warming is in flight is a no-op (logged at debug), and a call while
    * a valid warm entry with matching params already exists is a no-op.
    *
-   * If a warm entry exists with mismatched params, this call is also a no-op:
-   * the existing entry stays in the slot and `takeWarm` will discard it on
-   * the next mismatched request. Eviction-on-prewarm could be added if the
-   * usage pattern produces frequent mismatches.
+   * If a warm entry exists with mismatched params (different agent, workingDir,
+   * or allowedPaths), it is evicted first so the new warm slot reflects the
+   * requested security boundary.
    */
   prewarm(agentName: string, workingDir: string, allowedPaths: readonly string[] = []): void {
     if (this.warming) {
@@ -91,13 +90,20 @@ export class AgentManager {
       );
       return;
     }
-    if (
-      this.warmEntry &&
-      this.warmEntry.agentName === agentName &&
-      this.warmEntry.workingDir === workingDir &&
-      pathListsEqual(this.warmEntry.allowedPaths, allowedPaths)
-    ) {
-      return;
+    if (this.warmEntry) {
+      const e = this.warmEntry;
+      if (
+        e.agentName === agentName &&
+        e.workingDir === workingDir &&
+        pathListsEqual(e.allowedPaths, allowedPaths)
+      ) {
+        // Exact match — nothing to do.
+        return;
+      }
+      // Mismatched entry — evict before warming with new params so we don't
+      // spawn + immediately discard a subprocess in the async block below.
+      this.warmEntry = null;
+      e.instance.destroy().catch(() => {});
     }
     const agentDef = this.catalog.resolve(agentName);
     if (!agentDef) {

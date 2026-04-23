@@ -602,6 +602,8 @@ export class OpenACPCore {
     threadTitle?: string;
     threadId?: string;
     isAssistant?: boolean;
+    /** Glob patterns matched against bash command descriptions to auto-approve without user prompts. */
+    autoApprovedCommands?: string[];
   }): Promise<Session> {
     const adapter = this.adapters.get(params.channelId);
 

@@ -29,6 +29,8 @@ export interface SessionCreateParams {
   isAssistant?: boolean;
   /** User ID from identity system — who is creating this session. */
   userId?: string;
+  /** Glob patterns matched against bash command descriptions to auto-approve without user prompts. */
+  autoApprovedCommands?: string[];
 }
 
 export interface SideEffectDeps {
@@ -205,6 +207,7 @@ export class SessionFactory {
       workingDirectory: createParams.workingDirectory,
       agentInstance,
       speechService: this.speechService,
+      autoApprovedCommands: createParams.autoApprovedCommands,
     });
     session.agentSessionId = agentInstance.sessionId;
     session.middlewareChain = this.middlewareChain;

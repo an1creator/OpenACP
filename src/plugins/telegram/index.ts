@@ -66,8 +66,13 @@ function createTelegramPlugin(): OpenACPPlugin {
       }
 
       // Chat ID detection
-      terminal.log.info('To find your group chat ID, you can either send a message in the group')
-      terminal.log.info('(OpenACP will detect it automatically) or enter it manually.')
+      terminal.log.info('')
+      terminal.log.info('OpenACP requires a Telegram Supergroup with Topics enabled.')
+      terminal.log.info('If you haven\'t set this up yet:')
+      terminal.log.info('  1. Create a new group in Telegram and add your bot as a member')
+      terminal.log.info('  2. Go to Group Settings → Edit → toggle on "Topics"')
+      terminal.log.info('  3. Tap Save — this upgrades the group to a Supergroup automatically')
+      terminal.log.info('')
 
       const chatIdMethod = await terminal.select({
         message: 'How to get the chat ID?',
@@ -90,7 +95,7 @@ function createTelegramPlugin(): OpenACPPlugin {
         chatId = Number(val.trim())
       } else {
         // Simple polling-based detection
-        terminal.log.step('Open Telegram, go to your group, and send any message (e.g. "hi"). Waiting up to 4 minutes...')
+        terminal.log.step('Open Telegram, go to your Supergroup (Topics enabled), and send "/start". Waiting up to 4 minutes...')
         chatId = await detectChatIdViaPolling(botToken, terminal)
       }
 
@@ -314,9 +319,15 @@ async function detectChatIdViaPolling(
         for (const update of data.result) {
           lastUpdateId = update.update_id
           const chat = update.message?.chat ?? update.my_chat_member?.chat
-          if (chat && (chat.type === 'supergroup' || chat.type === 'group')) {
-            terminal.log.success(`Group detected: ${chat.title ?? chat.id} (${chat.id})`)
+          if (chat && chat.type === 'supergroup') {
+            terminal.log.success(`Supergroup detected: ${chat.title ?? chat.id} (${chat.id})`)
             return chat.id
+          } else if (chat && chat.type === 'group') {
+            // Basic group detected — Topics not enabled yet. Tell user to enable it, then keep polling.
+            // After enabling Topics, Telegram upgrades the group to a supergroup and the next message will show type 'supergroup'.
+            terminal.log.warning(`Basic group detected: "${chat.title ?? chat.id}". Topics are not enabled.`)
+            terminal.log.info('Enable Topics: Group Settings → Edit → toggle on "Topics" → Save.')
+            terminal.log.info('Then send another message in the group to continue...')
           }
         }
       }

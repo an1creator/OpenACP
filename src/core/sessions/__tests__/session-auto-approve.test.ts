@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
-import { isMatch } from 'micromatch'
+import micromatch from 'micromatch'
+const { isMatch } = micromatch
 import { Session } from '../session.js'
 import { SessionBridge } from '../session-bridge.js'
 import { TypedEmitter } from '../../utils/typed-emitter.js'

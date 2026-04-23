@@ -10,7 +10,9 @@ import type { MiddlewareChain } from "../plugin/middleware-chain.js";
 import type { DebugTracer } from "../utils/debug-tracer.js";
 import { createChildLogger } from "../utils/log.js";
 import { isPermissionBypass } from "../utils/bypass-detection.js";
-import { isMatch } from "micromatch";
+// micromatch is a CJS module — must use default import and destructure
+import micromatch from "micromatch";
+const { isMatch } = micromatch;
 import { isSystemEvent, getEffectiveTarget, extractSender, type TurnContext, type TurnRouting } from "./turn-context.js";
 import { Hook, BusEvent, SessionEv } from "../events.js";
 

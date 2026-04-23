@@ -151,6 +151,8 @@ export class TelegramAdapter extends MessagingAdapter {
   private _pendingSkillCommands = new Map<string, AgentCommand[]>();
   /** Control message IDs per session (for updating status text/buttons) */
   private controlMsgIds = new Map<string, number>();
+  /** Last usage message ID per session — replaced on each new prompt cycle */
+  private usageMsgIds = new Map<string, number>();
   private _threadReadyHandler?: (data: { sessionId: string; channelId: string; threadId: string }) => void;
   private _configChangedHandler?: (data: { sessionId: string }) => void;
   /** Mutable ref passed to callbacks before topics are ready; updated in-place by initTopicDependentFeatures */
@@ -166,6 +168,11 @@ export class TelegramAdapter extends MessagingAdapter {
   private _topicsInitialized = false;
   /** Background watcher timer — cancelled on stop() or when topics succeed */
   private _prerequisiteWatcher: ReturnType<typeof setTimeout> | null = null;
+
+  /** Returns the configured Telegram supergroup chat ID. */
+  getChatId(): number {
+    return this.telegramConfig.chatId
+  }
 
   /**
    * Persist the control message ID both in-memory and to the session record.
@@ -1494,6 +1501,15 @@ export class TelegramAdapter extends MessagingAdapter {
     this.getTracer(sessionId)?.log("telegram", { action: "handle:usage", sessionId, tokensUsed: meta?.tokensUsed, contextSize: meta?.contextSize, cost: (meta as Record<string, unknown>)?.cost });
     await this.draftManager.finalize(sessionId, this.core.assistantManager?.get('telegram')?.id);
 
+    // Delete previous usage message for this session before sending the new one
+    const prevUsageMsgId = this.usageMsgIds.get(sessionId);
+    if (prevUsageMsgId) {
+      this.sendQueue
+        .enqueue(() => this.bot.api.deleteMessage(this.telegramConfig.chatId, prevUsageMsgId).catch(() => {}))
+        .catch(() => {});
+      this.usageMsgIds.delete(sessionId);
+    }
+
     // Send usage as a separate message (not part of the tool card)
     const usageText = formatUsage(meta ?? {}, verbosity);
     let usageMsgId: number | undefined;
@@ -1506,32 +1522,11 @@ export class TelegramAdapter extends MessagingAdapter {
         }),
       );
       usageMsgId = result?.message_id;
+      if (usageMsgId) this.usageMsgIds.set(sessionId, usageMsgId);
     } catch (err) {
       log.warn({ err, sessionId }, "Failed to send usage message");
     }
 
-    // Notify the Notifications topic that a prompt has completed
-    if (this.notificationTopicId && sessionId !== this.core.assistantManager?.get('telegram')?.id) {
-      const sess = this.core.sessionManager.getSession(sessionId);
-      const sessionName = sess?.name || "Session";
-      const chatIdStr = String(this.telegramConfig.chatId);
-      const numericId = chatIdStr.startsWith("-100")
-        ? chatIdStr.slice(4)
-        : chatIdStr.replace("-", "");
-      const deepLink = usageMsgId
-        ? `https://t.me/c/${numericId}/${threadId}/${usageMsgId}`
-        : `https://t.me/c/${numericId}/${threadId}`;
-      const text = `✅ <b>${escapeHtml(sessionName)}</b>\nTask completed.\n\n<a href="${deepLink}">→ Go to topic</a>`;
-      this.sendQueue
-        .enqueue(() =>
-          this.bot.api.sendMessage(this.telegramConfig.chatId, text, {
-            message_thread_id: this.notificationTopicId,
-            parse_mode: "HTML",
-            disable_notification: false,
-          }),
-        )
-        .catch(() => {});
-    }
   }
 
   protected async handleAttachment(
@@ -1606,6 +1601,31 @@ export class TelegramAdapter extends MessagingAdapter {
     await this.draftManager.finalize(sessionId, this.core.assistantManager?.get('telegram')?.id);
     this.draftManager.cleanup(sessionId);
     await this.skillManager.cleanup(sessionId);
+
+    // Notify the Notifications topic once the turn is fully done
+    const lastUsageMsgId = this.usageMsgIds.get(sessionId);
+    this.usageMsgIds.delete(sessionId);
+    if (this.notificationTopicId && sessionId !== this.core.assistantManager?.get('telegram')?.id) {
+      const sess = this.core.sessionManager.getSession(sessionId);
+      const sessionName = sess?.name || "Session";
+      const chatIdStr = String(this.telegramConfig.chatId);
+      const numericId = chatIdStr.startsWith("-100")
+        ? chatIdStr.slice(4)
+        : chatIdStr.replace("-", "");
+      const deepLink = lastUsageMsgId
+        ? `https://t.me/c/${numericId}/${threadId}/${lastUsageMsgId}`
+        : `https://t.me/c/${numericId}/${threadId}`;
+      const text = `✅ <b>${escapeHtml(sessionName)}</b>\nTask completed.\n\n<a href="${deepLink}">→ Go to topic</a>`;
+      this.sendQueue
+        .enqueue(() =>
+          this.bot.api.sendMessage(this.telegramConfig.chatId, text, {
+            message_thread_id: this.notificationTopicId,
+            parse_mode: "HTML",
+            disable_notification: false,
+          }),
+        )
+        .catch(() => {});
+    }
     const tracker = this.sessionTrackers.get(sessionId);
     if (tracker) {
       await tracker.cleanup();

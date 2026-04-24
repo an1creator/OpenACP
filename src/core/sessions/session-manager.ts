@@ -56,6 +56,7 @@ export class SessionManager {
     agentName: string,
     workingDirectory: string,
     agentManager: AgentManager,
+    options?: { autoApprovedCommands?: string[] },
   ): Promise<Session> {
     const agentInstance = await agentManager.spawn(agentName, workingDirectory);
     const session = new Session({
@@ -63,6 +64,7 @@ export class SessionManager {
       agentName,
       workingDirectory,
       agentInstance,
+      autoApprovedCommands: options?.autoApprovedCommands ?? [],
     });
     this.sessions.set(session.id, session);
     session.agentSessionId = session.agentInstance.sessionId;
@@ -177,13 +179,17 @@ export class SessionManager {
       } catch {
         // Agent may already be dead — continue with cleanup
       }
-      session.markCancelled();
+      // Skip markCancelled for sessions already in a terminal state (e.g. finished)
+      // to avoid invalid state machine transition errors.
+      if (session.status !== "finished" && session.status !== "cancelled") {
+        session.markCancelled();
+      }
       await session.destroy();
       this.sessions.delete(sessionId);
     }
     if (this.store) {
       const record = this.store.get(sessionId);
-      if (record && record.status !== "cancelled") {
+      if (record && record.status !== "cancelled" && record.status !== "finished") {
         await this.store.save({ ...record, status: "cancelled" });
       }
     }

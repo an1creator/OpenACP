@@ -12,6 +12,7 @@ import type { TurnSender } from "./sessions/turn-context.js";
 export interface EventBusEvents {
   "session:created": (data: {
     sessionId: string;
+    name?: string;
     agent: string;
     status: SessionStatus;
     userId?: string;

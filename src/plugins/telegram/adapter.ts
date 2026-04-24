@@ -151,6 +151,8 @@ export class TelegramAdapter extends MessagingAdapter {
   private _pendingSkillCommands = new Map<string, AgentCommand[]>();
   /** Control message IDs per session (for updating status text/buttons) */
   private controlMsgIds = new Map<string, number>();
+  /** Last usage message ID per session — replaced on each new prompt cycle */
+  private usageMsgIds = new Map<string, number>();
   private _threadReadyHandler?: (data: { sessionId: string; channelId: string; threadId: string }) => void;
   private _configChangedHandler?: (data: { sessionId: string }) => void;
   /** Mutable ref passed to callbacks before topics are ready; updated in-place by initTopicDependentFeatures */
@@ -166,6 +168,11 @@ export class TelegramAdapter extends MessagingAdapter {
   private _topicsInitialized = false;
   /** Background watcher timer — cancelled on stop() or when topics succeed */
   private _prerequisiteWatcher: ReturnType<typeof setTimeout> | null = null;
+
+  /** Returns the configured Telegram supergroup chat ID. */
+  getChatId(): number {
+    return this.telegramConfig.chatId
+  }
 
   /**
    * Persist the control message ID both in-memory and to the session record.
@@ -356,9 +363,16 @@ export class TelegramAdapter extends MessagingAdapter {
       const text = ctx.message?.text;
       if (!text?.startsWith("/")) return next();
 
+      // /retry is always allowed — it is specifically for recovering from the not-initialized state
+      const rawCmd = text.split(" ")[0].slice(1).split("@")[0].toLowerCase();
+      if (rawCmd === "retry") {
+        await this.handleRetryCommand(ctx);
+        return;
+      }
+
       if (!this._topicsInitialized) {
         await ctx.reply(
-          "⏳ OpenACP is still setting up. Check the General topic for instructions.",
+          "⏳ OpenACP is still setting up. Open the Topics list of this group and check the 📌 General topic for setup instructions. Or send /retry to re-check now.",
         ).catch(() => {});
         return;
       }
@@ -891,11 +905,60 @@ export class TelegramAdapter extends MessagingAdapter {
     log.info("Telegram adapter fully initialized");
   }
 
+  /**
+   * Handle the /retry command — re-runs prerequisite checks immediately.
+   *
+   * This command is allowed even before topics are initialized so users can
+   * trigger a recheck right after fixing permissions, without waiting for the
+   * next automatic retry cycle.
+   */
+  private async handleRetryCommand(ctx: { reply: (text: string, opts?: Record<string, unknown>) => Promise<unknown> }): Promise<void> {
+    if (this._topicsInitialized) {
+      await ctx.reply("✅ OpenACP is already running.").catch(() => {});
+      return;
+    }
+
+    await ctx.reply("🔄 Re-checking prerequisites...").catch(() => {});
+
+    const { checkTopicsPrerequisites } = await import('./validators.js');
+    const result = await checkTopicsPrerequisites(
+      this.telegramConfig.botToken,
+      this.telegramConfig.chatId,
+    );
+
+    if (result.ok) {
+      try {
+        // Cancel the background watcher since we're handling init inline
+        if (this._prerequisiteWatcher !== null) {
+          clearTimeout(this._prerequisiteWatcher);
+          this._prerequisiteWatcher = null;
+        }
+        await this.initTopicDependentFeatures();
+        const assistantTopicLink = this.assistantTopicId
+          ? ` <a href="https://t.me/c/${String(this.telegramConfig.chatId).replace(/^-100/, '')}/${this.assistantTopicId}">🤖 Assistant</a>`
+          : ' 🤖 Assistant';
+        await ctx.reply(
+          `✅ <b>OpenACP is ready!</b> Tap${assistantTopicLink} to get started.`,
+          { parse_mode: 'HTML' },
+        ).catch(() => {});
+      } catch (err) {
+        log.error({ err }, 'handleRetryCommand: init failed after prerequisites met');
+        await ctx.reply("⚠️ Prerequisites are met but initialization failed. Check server logs and try /retry again.").catch(() => {});
+      }
+    } else {
+      const issueText = result.issues.join('\n\n');
+      await ctx.reply(
+        `⚠️ <b>Still not ready:</b>\n\n${issueText}\n\nFix the issues above and send /retry again.`,
+        { parse_mode: 'HTML' },
+      ).catch(() => {});
+    }
+  }
+
   private startPrerequisiteWatcher(issues: string[]): void {
     const setupMessage =
       `⚠️ <b>OpenACP needs setup before it can start.</b>\n\n` +
       issues.join('\n\n') +
-      `\n\nOpenACP will automatically retry until this is resolved.`;
+      `\n\nOpenACP will automatically retry every 30 seconds. After fixing the issues above, send /retry to re-check immediately.`;
 
     this.bot.api.sendMessage(this.telegramConfig.chatId, setupMessage, {
       parse_mode: 'HTML',
@@ -916,17 +979,25 @@ export class TelegramAdapter extends MessagingAdapter {
       );
 
       if (result.ok) {
-        this._prerequisiteWatcher = null;
         log.info('Prerequisites met — completing Telegram adapter initialization');
         try {
           await this.initTopicDependentFeatures();
+          // Only cancel watcher after successful init — if init fails we keep retrying
+          this._prerequisiteWatcher = null;
+          const assistantTopicLink = this.assistantTopicId
+            ? ` <a href="https://t.me/c/${String(this.telegramConfig.chatId).replace(/^-100/, '')}/${this.assistantTopicId}">🤖 Assistant</a>`
+            : ' 🤖 Assistant';
           await this.bot.api.sendMessage(
             this.telegramConfig.chatId,
-            '✅ <b>OpenACP is ready!</b>\n\nSystem topics have been created. Use the 🤖 Assistant topic to get started.',
+            `✅ <b>OpenACP is ready!</b>\n\nSystem topics have been created. Tap${assistantTopicLink} to get started.`,
             { parse_mode: 'HTML' },
           );
         } catch (err) {
-          log.error({ err }, 'Failed to complete initialization after prerequisites met');
+          log.error({ err }, 'Failed to complete initialization after prerequisites met — will retry');
+          // Don't cancel watcher; schedule next retry so init can be reattempted
+          const delay = schedule[Math.min(attempt, schedule.length - 1)];
+          attempt++;
+          this._prerequisiteWatcher = setTimeout(retry, delay);
         }
         return;
       }
@@ -1081,7 +1152,7 @@ export class TelegramAdapter extends MessagingAdapter {
       // Guard: topics not yet initialized — non-command messages would use stale/zero topic IDs
       if (!this._topicsInitialized) {
         await ctx.reply(
-          "⏳ OpenACP is still setting up. Check the General topic for instructions.",
+          "⏳ OpenACP is still setting up. Open the Topics list of this group and check the 📌 General topic for setup instructions. Or send /retry to re-check now.",
         ).catch(() => {});
         return;
       }
@@ -1430,6 +1501,15 @@ export class TelegramAdapter extends MessagingAdapter {
     this.getTracer(sessionId)?.log("telegram", { action: "handle:usage", sessionId, tokensUsed: meta?.tokensUsed, contextSize: meta?.contextSize, cost: (meta as Record<string, unknown>)?.cost });
     await this.draftManager.finalize(sessionId, this.core.assistantManager?.get('telegram')?.id);
 
+    // Delete previous usage message for this session before sending the new one
+    const prevUsageMsgId = this.usageMsgIds.get(sessionId);
+    if (prevUsageMsgId) {
+      this.sendQueue
+        .enqueue(() => this.bot.api.deleteMessage(this.telegramConfig.chatId, prevUsageMsgId).catch(() => {}))
+        .catch(() => {});
+      this.usageMsgIds.delete(sessionId);
+    }
+
     // Send usage as a separate message (not part of the tool card)
     const usageText = formatUsage(meta ?? {}, verbosity);
     let usageMsgId: number | undefined;
@@ -1442,32 +1522,11 @@ export class TelegramAdapter extends MessagingAdapter {
         }),
       );
       usageMsgId = result?.message_id;
+      if (usageMsgId) this.usageMsgIds.set(sessionId, usageMsgId);
     } catch (err) {
       log.warn({ err, sessionId }, "Failed to send usage message");
     }
 
-    // Notify the Notifications topic that a prompt has completed
-    if (this.notificationTopicId && sessionId !== this.core.assistantManager?.get('telegram')?.id) {
-      const sess = this.core.sessionManager.getSession(sessionId);
-      const sessionName = sess?.name || "Session";
-      const chatIdStr = String(this.telegramConfig.chatId);
-      const numericId = chatIdStr.startsWith("-100")
-        ? chatIdStr.slice(4)
-        : chatIdStr.replace("-", "");
-      const deepLink = usageMsgId
-        ? `https://t.me/c/${numericId}/${threadId}/${usageMsgId}`
-        : `https://t.me/c/${numericId}/${threadId}`;
-      const text = `✅ <b>${escapeHtml(sessionName)}</b>\nTask completed.\n\n<a href="${deepLink}">→ Go to topic</a>`;
-      this.sendQueue
-        .enqueue(() =>
-          this.bot.api.sendMessage(this.telegramConfig.chatId, text, {
-            message_thread_id: this.notificationTopicId,
-            parse_mode: "HTML",
-            disable_notification: false,
-          }),
-        )
-        .catch(() => {});
-    }
   }
 
   protected async handleAttachment(
@@ -1542,6 +1601,31 @@ export class TelegramAdapter extends MessagingAdapter {
     await this.draftManager.finalize(sessionId, this.core.assistantManager?.get('telegram')?.id);
     this.draftManager.cleanup(sessionId);
     await this.skillManager.cleanup(sessionId);
+
+    // Notify the Notifications topic once the turn is fully done
+    const lastUsageMsgId = this.usageMsgIds.get(sessionId);
+    this.usageMsgIds.delete(sessionId);
+    if (this.notificationTopicId && sessionId !== this.core.assistantManager?.get('telegram')?.id) {
+      const sess = this.core.sessionManager.getSession(sessionId);
+      const sessionName = sess?.name || "Session";
+      const chatIdStr = String(this.telegramConfig.chatId);
+      const numericId = chatIdStr.startsWith("-100")
+        ? chatIdStr.slice(4)
+        : chatIdStr.replace("-", "");
+      const deepLink = lastUsageMsgId
+        ? `https://t.me/c/${numericId}/${threadId}/${lastUsageMsgId}`
+        : `https://t.me/c/${numericId}/${threadId}`;
+      const text = `✅ <b>${escapeHtml(sessionName)}</b>\nTask completed.\n\n<a href="${deepLink}">→ Go to topic</a>`;
+      this.sendQueue
+        .enqueue(() =>
+          this.bot.api.sendMessage(this.telegramConfig.chatId, text, {
+            message_thread_id: this.notificationTopicId,
+            parse_mode: "HTML",
+            disable_notification: false,
+          }),
+        )
+        .catch(() => {});
+    }
     const tracker = this.sessionTrackers.get(sessionId);
     if (tracker) {
       await tracker.cleanup();
@@ -1721,13 +1805,23 @@ export class TelegramAdapter extends MessagingAdapter {
   /**
    * Create a new Telegram forum topic for a session and return its thread ID as a string.
    * Called by the core when a session is created via the API or CLI (not from the Telegram UI).
+   *
+   * Sends "⏳ Setting up..." immediately after topic creation so the user sees
+   * activity while the agent subprocess initializes in the background.
    */
   async createSessionThread(sessionId: string, name: string): Promise<string> {
     this.getTracer(sessionId)?.log("telegram", { action: "thread:create", sessionId, name });
     log.info({ sessionId, name }, "Session topic created");
-    return String(
-      await createSessionTopic(this.bot, this.telegramConfig.chatId, name),
-    );
+    const threadId = await createSessionTopic(this.bot, this.telegramConfig.chatId, name);
+    // Non-critical — fire and forget so topic creation still succeeds even if this fails
+    this.bot.api.sendMessage(
+      this.telegramConfig.chatId,
+      "⏳ Setting up session, please wait...",
+      { message_thread_id: threadId, parse_mode: "HTML" },
+    ).catch((err) => {
+      log.warn({ err, sessionId, threadId }, "Failed to send setup message to new topic");
+    });
+    return String(threadId);
   }
 
   /**
@@ -1961,24 +2055,32 @@ export class TelegramAdapter extends MessagingAdapter {
     this.getTracer(sessionId)?.log("telegram", { action: "thread:archive", sessionId });
     const core = this.core as OpenACPCore;
     const session = core.sessionManager.getSession(sessionId);
-    if (!session) throw new Error("Session not found");
 
     const chatId = this.telegramConfig.chatId;
-    const oldTopicId = Number(session.threadId);
+    let oldTopicId: number;
 
-    // Set archiving flag — sendMessage will skip while this is true.
-    session.archiving = true;
+    if (session) {
+      // Set archiving flag — sendMessage will skip while this is true.
+      session.archiving = true;
+      oldTopicId = Number(session.threadId);
 
-    // Finalize any pending draft
-    await this.draftManager.finalize(session.id, this.core.assistantManager?.get('telegram')?.id);
+      // Finalize any pending draft
+      await this.draftManager.finalize(session.id, this.core.assistantManager?.get('telegram')?.id);
 
-    // Cleanup all trackers
-    this.draftManager.cleanup(session.id);
-    await this.skillManager.cleanup(session.id);
-    const tracker = this.sessionTrackers.get(session.id);
-    if (tracker) {
-      tracker.destroy();
-      this.sessionTrackers.delete(session.id);
+      // Cleanup all trackers
+      this.draftManager.cleanup(session.id);
+      await this.skillManager.cleanup(session.id);
+      const tracker = this.sessionTrackers.get(session.id);
+      if (tracker) {
+        tracker.destroy();
+        this.sessionTrackers.delete(session.id);
+      }
+    } else {
+      // Session not in memory — get topicId from stored record
+      const record = core.sessionManager.getSessionRecord(sessionId);
+      const platform = record?.platform as TelegramPlatformData | undefined;
+      if (!platform?.topicId) throw new Error("Session not found");
+      oldTopicId = platform.topicId;
     }
 
     // Delete topic (removes all messages) — no recreation

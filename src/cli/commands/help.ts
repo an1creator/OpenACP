@@ -61,6 +61,7 @@ Connect messaging platforms (Telegram, Discord) to 28+ AI coding agents via ACP 
   openacp integrate <agent>            Install handoff integration
   openacp integrate <agent> --uninstall
   openacp adopt <agent> <id>           Adopt an external session  \x1b[2m[--json]\x1b[0m
+  openacp channels                     List connected channel adapters  \x1b[2m[--json]\x1b[0m
 
 \x1b[1mRemote Access:\x1b[0m
   openacp remote                            Generate one-time remote access link  \x1b[2m[--json]\x1b[0m

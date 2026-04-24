@@ -8,6 +8,7 @@ import { handleUpdate, handleRestart, handleTTS, handleVerbosity, handleOutputMo
 import { handleMenu, handleHelp, buildMenuKeyboard } from './menu.js'
 import { handleAgents, handleInstall, handleAgentCallback } from "./agents.js";
 import { handleIntegrate } from "./integrate.js";
+import { showModelPage } from './model.js'
 import {
   handleResume,
   setupResumeCallbacks,
@@ -57,6 +58,13 @@ export function setupAllCallbacks(
 
   // Agent callbacks (install + pagination) — must be before broad m: handler
   bot.callbackQuery(/^ag:/, (ctx) => handleAgentCallback(ctx, core));
+
+  // Model pagination callbacks — must be before broad m: handler
+  bot.callbackQuery(/^mod:/, async (ctx) => {
+    const page = parseInt(ctx.callbackQuery.data.replace('mod:', ''), 10)
+    try { await ctx.answerCallbackQuery() } catch { /* expired */ }
+    await showModelPage(ctx, core, page, 'edit')
+  })
 
   // New session with specific agent callback — must be before broad m: handler
   bot.callbackQuery(/^na:/, async (ctx) => {
@@ -217,6 +225,7 @@ export const STATIC_COMMANDS = [
   { command: "restart", description: "Restart OpenACP" },
   { command: "update", description: "Update to latest version and restart" },
   { command: "doctor", description: "Run system diagnostics" },
+  { command: "retry", description: "Re-check setup prerequisites (use if bot is stuck on startup)" },
   { command: "tunnel", description: "Create/stop tunnel for a local port" },
   { command: "tunnels", description: "List active tunnels" },
   { command: 'archive', description: 'Archive session topic (recreate with clean history)' },

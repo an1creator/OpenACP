@@ -812,9 +812,13 @@ EOF
         # nvm installer only appends to existing files, so we must ensure ~/.zshrc exists.
         touch "$HOME/.zshrc"
         patch_rc "$HOME/.zshrc"
-        # Also patch bash configs if they exist
+        # Also patch bash configs if they exist.
+        # Use if/then instead of [[ ]] && to avoid triggering set -e when the file
+        # doesn't exist (which is common on fresh macOS machines).
         for rc in "$HOME/.bashrc" "$HOME/.bash_profile"; do
-            [[ -f "$rc" ]] && patch_rc "$rc"
+            if [[ -f "$rc" ]]; then
+                patch_rc "$rc"
+            fi
         done
     else
         # Linux: patch whichever rc files exist; create ~/.bashrc if none present
@@ -844,13 +848,15 @@ install_node() {
             run_quiet_step "Installing nvm" bash "$nvm_install"
             export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || printf %s "${XDG_CONFIG_HOME}/nvm")"
             # shellcheck source=/dev/null
-            [[ -s "${NVM_DIR}/nvm.sh" ]] && source "${NVM_DIR}/nvm.sh"
+            # Use || true: source nvm.sh may exit non-zero via nvm_auto when no
+            # node versions are installed yet; that's expected at this stage.
+            [[ -s "${NVM_DIR}/nvm.sh" ]] && source "${NVM_DIR}/nvm.sh" || true
             patch_nvm_shell_configs
         fi
 
         if [[ -s "${NVM_DIR:-${HOME}/.nvm}/nvm.sh" ]]; then
             # shellcheck source=/dev/null
-            source "${NVM_DIR:-${HOME}/.nvm}/nvm.sh"
+            source "${NVM_DIR:-${HOME}/.nvm}/nvm.sh" || true
             ui_info "Installing Node.js v${NODE_DEFAULT_MAJOR} via nvm"
             run_quiet_step "Installing Node.js" nvm install "${NODE_DEFAULT_MAJOR}"
             nvm use "${NODE_DEFAULT_MAJOR}" 2>/dev/null || true
@@ -878,13 +884,13 @@ install_node() {
             run_quiet_step "Installing nvm" bash "$nvm_install"
             export NVM_DIR="$([ -z "${XDG_CONFIG_HOME-}" ] && printf %s "${HOME}/.nvm" || printf %s "${XDG_CONFIG_HOME}/nvm")"
             # shellcheck source=/dev/null
-            [[ -s "${NVM_DIR}/nvm.sh" ]] && source "${NVM_DIR}/nvm.sh"
+            [[ -s "${NVM_DIR}/nvm.sh" ]] && source "${NVM_DIR}/nvm.sh" || true
             patch_nvm_shell_configs
         fi
 
         if [[ -n "${NVM_DIR:-}" && -s "${NVM_DIR}/nvm.sh" ]] || [[ -s "${HOME}/.nvm/nvm.sh" ]]; then
             # shellcheck source=/dev/null
-            [[ -s "${NVM_DIR:-${HOME}/.nvm}/nvm.sh" ]] && source "${NVM_DIR:-${HOME}/.nvm}/nvm.sh"
+            [[ -s "${NVM_DIR:-${HOME}/.nvm}/nvm.sh" ]] && source "${NVM_DIR:-${HOME}/.nvm}/nvm.sh" || true
             ui_info "Installing Node.js v${NODE_DEFAULT_MAJOR} via nvm"
             run_quiet_step "Installing Node.js" nvm install "${NODE_DEFAULT_MAJOR}"
             nvm use "${NODE_DEFAULT_MAJOR}" 2>/dev/null || true

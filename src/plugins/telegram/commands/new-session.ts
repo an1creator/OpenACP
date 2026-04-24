@@ -143,28 +143,18 @@ export async function handleNewChat(
     return;
   }
 
-  // Resolve agent config from existing session/record BEFORE spawning
-  const currentSession = await core.getOrResumeSession(
-    "telegram",
-    String(threadId),
-  );
-  let agentName: string | undefined;
-  let workspace: string | undefined;
-
-  if (currentSession) {
-    agentName = currentSession.agentName;
-    workspace = currentSession.workingDirectory;
-  } else {
-    const record = core.sessionManager.getRecordByThread("telegram", String(threadId));
-    if (!record || record.status === "cancelled" || record.status === "error") {
-      await ctx.reply("No active session in this topic.", {
-        parse_mode: "HTML",
-      });
-      return;
-    }
-    agentName = record.agentName;
-    workspace = record.workingDir;
+  // Read agent config directly from the stored record — no need to resume the old session
+  // since /newchat only inherits agentName + workspace, not any live session state.
+  const record = core.sessionManager.getRecordByThread("telegram", String(threadId));
+  if (!record || record.status === "cancelled" || record.status === "error") {
+    await ctx.reply("No active session in this topic.", {
+      parse_mode: "HTML",
+    });
+    return;
   }
+
+  const agentName = record.agentName;
+  const workspace = record.workingDir;
 
   let newThreadId: number | undefined;
   try {

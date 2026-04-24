@@ -56,10 +56,11 @@ export async function validateChatId(
       return { ok: false, error: data.description || "Invalid chat ID" };
     }
     if (data.result.type !== "supergroup") {
-      return {
-        ok: false,
-        error: `Chat must be a group (not a channel or private chat). Got: "${data.result.type}"`,
-      };
+      const typeHint =
+        data.result.type === "group"
+          ? 'This group does not have Topics enabled. Tap the group name → Edit (pencil icon) → enable "Topics" → tap the checkmark to save. Telegram will upgrade the group automatically.'
+          : `Chat must be a group with Topics enabled (got: "${data.result.type}"). Channels and private chats are not supported.`;
+      return { ok: false, error: typeHint };
     }
     return {
       ok: true,
@@ -124,7 +125,7 @@ export async function validateBotAdmin(
     }
     return {
       ok: false,
-      error: `Bot is "${status}" in this group. It must be an admin. Please promote the bot to admin in group settings.`,
+      error: `Bot is "${status}" in this group — it must be an admin. Ask a group admin to go to Group Settings → Administrators → add the bot → tap Save/Done. Note: only existing admins can promote the bot.`,
     };
   } catch (err) {
     return { ok: false, error: (err as Error).message };
@@ -165,7 +166,7 @@ export async function checkTopicsPrerequisites(
     )
     if (data.ok && data.result && !data.result.is_forum) {
       issues.push(
-        '❌ Topics are not enabled on this group.\n→ Go to Group Settings → Edit → enable "Topics"',
+        '❌ Topics are not enabled on this group.\n→ Go to Group Settings → Edit → enable "Topics" → tap Save/Done',
       );
     }
   } catch (err) {
@@ -181,11 +182,11 @@ export async function checkTopicsPrerequisites(
   )
   if (!adminResult.ok) {
     issues.push(
-      `❌ Bot is not an admin.\n→ Go to Group Settings → Administrators → add the bot → save`,
+      `❌ Bot is not an admin.\n→ Go to Group Settings → Administrators → add the bot as admin → tap Save/Done\n→ Note: only existing group admins can promote the bot`,
     );
   } else if (!adminResult.canManageTopics) {
     issues.push(
-      '❌ Bot cannot manage topics.\n→ In Admin settings, enable the "Manage Topics" permission',
+      '❌ Bot cannot manage topics.\n→ Go to Group Settings → Administrators → tap the bot → enable "Manage Topics" → tap Save/Done (the checkmark)',
     );
   }
 

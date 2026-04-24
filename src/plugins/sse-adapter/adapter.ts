@@ -124,4 +124,8 @@ export class SSEAdapter implements IChannelAdapter {
   /** No-op for SSE — there are no named threads to rename. */
   async renameSessionThread(_sessionId: string, _newName: string): Promise<void> {
   }
+
+  /** No-op for SSE — there are no platform topics to archive. */
+  async archiveSessionTopic(_sessionId: string): Promise<void> {
+  }
 }

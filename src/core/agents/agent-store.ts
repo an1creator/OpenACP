@@ -26,6 +26,7 @@ const InstalledAgentSchema = z.object({
   workingDirectory: z.string().optional(),
   installedAt: z.string(),
   binaryPath: z.string().nullable().default(null),
+  initTimeoutMs: z.number().positive().optional(),
 });
 
 const AgentStoreSchema = z.object({

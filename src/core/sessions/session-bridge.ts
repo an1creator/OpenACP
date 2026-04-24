@@ -10,6 +10,9 @@ import type { MiddlewareChain } from "../plugin/middleware-chain.js";
 import type { DebugTracer } from "../utils/debug-tracer.js";
 import { createChildLogger } from "../utils/log.js";
 import { isPermissionBypass } from "../utils/bypass-detection.js";
+// micromatch is a CJS module — must use default import and destructure
+import micromatch from "micromatch";
+const { isMatch } = micromatch;
 import { isSystemEvent, getEffectiveTarget, extractSender, type TurnContext, type TurnRouting } from "./turn-context.js";
 import { Hook, BusEvent, SessionEv } from "../events.js";
 
@@ -508,6 +511,26 @@ export class SessionBridge {
           "Bypass mode: auto-approving permission",
         );
         return allowOption.id;
+      }
+    }
+
+    // Plugin-declared auto-approved command patterns (micromatch glob matching).
+    // Multi-line shell commands (heredoc bodies, `\`-line continuations) contain
+    // real newlines which micromatch globs do not cross — normalize runs of
+    // whitespace to a single space so the whole command becomes a single line
+    // for matching purposes.
+    const patterns = this.session.autoApprovedCommands;
+    if (patterns.length > 0 && request.description) {
+      const normalized = request.description.replace(/\s+/g, ' ').trim();
+      if (isMatch(normalized, patterns, { dot: true })) {
+        const allowOption = request.options.find((o) => o.isAllow);
+        if (allowOption) {
+          log.info(
+            { sessionId: this.session.id, requestId: request.id, command: request.description },
+            "autoApprovedCommands: auto-approving matching command",
+          );
+          return allowOption.id;
+        }
       }
     }
 

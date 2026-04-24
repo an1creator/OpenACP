@@ -250,14 +250,6 @@ describe("Core Orchestrator — Message Routing & Lifecycle", () => {
       }
     });
 
-    it("rejects if session is not active", () => {
-      const session = { status: "finished" };
-      if (session.status !== "active") {
-        const result = { ok: false, error: `Session is ${session.status}` };
-        expect(result.error).toContain("finished");
-      }
-    });
-
     it("rejects if adapter not found", () => {
       const adapters = new Map<string, IChannelAdapter>();
       const adapter = adapters.get("nonexistent");

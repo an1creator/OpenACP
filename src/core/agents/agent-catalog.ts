@@ -257,6 +257,7 @@ export class AgentCatalog {
       args: agent.args,
       workingDirectory: agent.workingDirectory,
       env: agent.env,
+      initTimeoutMs: agent.initTimeoutMs,
     };
   }
 

@@ -20,3 +20,4 @@ plugin-registry/
 
 # OpenACP local workspace (contains secrets)
 .openacp
+.worktrees/

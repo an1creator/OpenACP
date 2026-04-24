@@ -294,10 +294,22 @@ export class HistoryRecorder {
 
   async onTurnEnd(sessionId: string, stopReason: string): Promise<void> {
     const state = this.states.get(sessionId);
-    if (!state || !state.currentAssistantTurn) return;
+    if (!state) return;
     this.cancelDebounce(sessionId);
-    state.currentAssistantTurn.stopReason = stopReason;
-    state.currentAssistantTurn = null;
+    if (state.currentAssistantTurn) {
+      // Turn still in-progress — finalize it
+      state.currentAssistantTurn.stopReason = stopReason;
+      state.currentAssistantTurn = null;
+    } else if (stopReason === 'interrupted' && state.history.turns.length > 0) {
+      // Retroactive interrupt: turn already completed but cancel arrived late.
+      // Update the last assistant turn's stopReason so clients see "interrupted" on reload.
+      const lastTurn = state.history.turns[state.history.turns.length - 1];
+      if (lastTurn.role === 'assistant') {
+        lastTurn.stopReason = 'interrupted';
+      }
+    } else {
+      return; // nothing to update
+    }
     await this.store.write(state.history);
   }
 

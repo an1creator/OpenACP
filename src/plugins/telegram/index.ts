@@ -66,8 +66,13 @@ function createTelegramPlugin(): OpenACPPlugin {
       }
 
       // Chat ID detection
-      terminal.log.info('Send a message in your Telegram group to detect the chat ID,')
-      terminal.log.info('or enter the chat ID manually.')
+      terminal.log.info('')
+      terminal.log.info('OpenACP requires a Telegram group with Topics enabled.')
+      terminal.log.info('If you haven\'t set this up yet:')
+      terminal.log.info('  1. Create a new group in Telegram and add your bot as a member')
+      terminal.log.info('  2. Tap the group name at the top → Edit (pencil icon) → enable "Topics"')
+      terminal.log.info('  3. Tap the checkmark to save — Telegram will upgrade the group automatically')
+      terminal.log.info('')
 
       const chatIdMethod = await terminal.select({
         message: 'How to get the chat ID?',
@@ -90,11 +95,12 @@ function createTelegramPlugin(): OpenACPPlugin {
         chatId = Number(val.trim())
       } else {
         // Simple polling-based detection
-        terminal.log.step('Listening for messages... Send "hi" in the group.')
+        terminal.log.step('Open Telegram, go to your group (Topics enabled), and send any message. Waiting up to 4 minutes...')
         chatId = await detectChatIdViaPolling(botToken, terminal)
       }
 
       // Validate chat ID
+      const pendingIssues: string[] = []
       const chatResult = await validateChatId(botToken, chatId)
       if (chatResult.ok) {
         terminal.log.success(`Group: ${chatResult.title}`)
@@ -103,18 +109,19 @@ function createTelegramPlugin(): OpenACPPlugin {
           terminal.log.info('OpenACP requires Topics to organize sessions.')
           terminal.log.info('')
           terminal.log.info('To enable Topics:')
-          terminal.log.info('  1. Open your group in Telegram')
-          terminal.log.info('  2. Go to Group Settings → Edit')
-          terminal.log.info('  3. Enable "Topics"')
+          terminal.log.info('  1. Tap the group name at the top of the chat')
+          terminal.log.info('  2. Tap Edit (pencil icon) → enable "Topics"')
+          terminal.log.info('  3. Tap the checkmark to save — easy to miss!')
           terminal.log.info('')
           const proceed = await terminal.confirm({
-            message: 'Topics not enabled. Continue anyway? (You can fix this before starting OpenACP)',
+            message: 'Topics not enabled. Continue anyway? (OpenACP won\'t work until you fix this)',
             initialValue: false,
           })
           if (!proceed) {
             terminal.log.info('Setup cancelled. Re-run when Topics are enabled.')
             return
           }
+          pendingIssues.push('Topics not enabled on the group')
         }
       } else {
         terminal.log.warning(chatResult.error)
@@ -127,22 +134,35 @@ function createTelegramPlugin(): OpenACPPlugin {
         if (!adminResult.canManageTopics) {
           terminal.log.warning('Bot does not have "Manage Topics" permission.')
           terminal.log.info('')
-          terminal.log.info('To fix:')
-          terminal.log.info('  1. Open Group Settings → Administrators')
-          terminal.log.info('  2. Select the bot')
+          terminal.log.info('To fix (you must be a group admin):')
+          terminal.log.info('  1. Tap the group name at the top → Administrators')
+          terminal.log.info('  2. Tap the bot in the admin list')
           terminal.log.info('  3. Enable "Manage Topics"')
+          terminal.log.info('  4. Tap the checkmark to save — easy to miss!')
           terminal.log.info('')
           const proceed = await terminal.confirm({
-            message: 'Bot cannot manage topics. Continue anyway? (You can fix this before starting OpenACP)',
+            message: 'Bot cannot manage topics. Continue anyway? (OpenACP won\'t work until you fix this)',
             initialValue: false,
           })
           if (!proceed) {
             terminal.log.info('Setup cancelled. Re-run when bot permissions are set.')
             return
           }
+          pendingIssues.push('Bot "Manage Topics" permission not set')
         }
       } else {
         terminal.log.warning(adminResult.error)
+        pendingIssues.push('Bot is not a group admin')
+      }
+
+      if (pendingIssues.length > 0) {
+        terminal.log.info('')
+        terminal.log.warning('⚠️  Setup saved with pending issues — OpenACP will not work until these are fixed:')
+        for (const issue of pendingIssues) {
+          terminal.log.info(`  • ${issue}`)
+        }
+        terminal.log.info('After fixing, run OpenACP and it will detect the changes automatically.')
+        terminal.log.info('')
       }
 
       await settings.setAll({
@@ -298,9 +318,15 @@ async function detectChatIdViaPolling(
         for (const update of data.result) {
           lastUpdateId = update.update_id
           const chat = update.message?.chat ?? update.my_chat_member?.chat
-          if (chat && (chat.type === 'supergroup' || chat.type === 'group')) {
-            terminal.log.success(`Group detected: ${chat.title ?? chat.id} (${chat.id})`)
+          if (chat && chat.type === 'supergroup') {
+            terminal.log.success(`Supergroup detected: ${chat.title ?? chat.id} (${chat.id})`)
             return chat.id
+          } else if (chat && chat.type === 'group') {
+            // Basic group detected — Topics not enabled yet. Tell user to enable it, then keep polling.
+            // After enabling Topics, Telegram upgrades the group to a supergroup and the next message will show type 'supergroup'.
+            terminal.log.warning(`Basic group detected: "${chat.title ?? chat.id}". Topics are not enabled.`)
+            terminal.log.info('Enable Topics: tap the group name → Edit (pencil icon) → enable "Topics" → tap the checkmark.')
+            terminal.log.info('Then send another message in the group to continue...')
           }
         }
       }

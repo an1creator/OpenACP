@@ -292,7 +292,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
    *
    * Does NOT create a session — callers must follow up with newSession or loadSession.
    */
-  private static async spawnSubprocess(
+  public static async spawnSubprocess(
     agentDef: AgentDefinition,
     workingDirectory: string,
     allowedPaths: string[] = [],
@@ -455,6 +455,53 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     });
   }
 
+  /** True if the subprocess has exited or been killed. */
+  get isDead(): boolean {
+    return this.child.killed || this.child.exitCode !== null;
+  }
+
+  /**
+   * Open a fresh ACP session on a pre-initialized AgentInstance.
+   *
+   * Pre-conditions:
+   *  - The instance has been through `spawnSubprocess` (subprocess is running,
+   *    ACP `initialize` handshake is done, `agentCapabilities` is set).
+   *  - `sessionId` is unset — calling twice is a programming error.
+   *
+   * Post-conditions on success:
+   *  - `sessionId`, `initialSessionResponse`, and `debugTracer` are populated.
+   *  - `setupCrashDetection` is wired so subsequent process exits emit
+   *    `AGENT_EVENT` with an error message.
+   *  - The instance is fully ready for `prompt()` calls.
+   *
+   * @throws Error("AgentInstance already has a session — cannot claim twice")
+   *         if `sessionId` is already set.
+   * @throws Whatever the agent's `newSession` RPC throws (timeout, ACP error,
+   *         subprocess exited mid-call). The instance is NOT destroyed in this
+   *         case — the caller is responsible for cleanup.
+   *
+   * Called by:
+   *  - `AgentManager.spawn()` when a warm instance is consumed (only path
+   *    where `spawnSubprocess` and `claimForSession` are split apart).
+   *  - `AgentInstance.spawn()` as the second half of the normal spawn path.
+   */
+  async claimForSession(workingDirectory: string, mcpServers?: McpServerConfig[], timeoutMs?: number): Promise<void> {
+    if (this.sessionId) {
+      throw new Error("AgentInstance already has a session — cannot claim twice");
+    }
+    const resolvedMcp = AgentInstance.mcpManager.resolve(mcpServers);
+    const response = await withAgentTimeout(
+      this.connection.newSession({ cwd: workingDirectory, mcpServers: resolvedMcp as any }),
+      this.agentName,
+      'newSession',
+      timeoutMs,
+    );
+    this.sessionId = response.sessionId;
+    this.initialSessionResponse = response;
+    this.debugTracer = createDebugTracer(response.sessionId, workingDirectory);
+    this.setupCrashDetection();
+  }
+
   /**
    * Spawn a new agent subprocess and create a fresh ACP session.
    *
@@ -473,36 +520,17 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     mcpServers?: McpServerConfig[],
     allowedPaths?: string[],
   ): Promise<AgentInstance> {
-    log.debug(
-      { agentName: agentDef.name, command: agentDef.command },
-      "Spawning agent",
-    );
+    log.debug({ agentName: agentDef.name, command: agentDef.command }, "Spawning agent");
     const spawnStart = Date.now();
 
-    const instance = await AgentInstance.spawnSubprocess(
-      agentDef,
-      workingDirectory,
-      allowedPaths,
-    );
-
-    const resolvedMcp = AgentInstance.mcpManager.resolve(mcpServers);
-    const response = await withAgentTimeout(
-      instance.connection.newSession({ cwd: workingDirectory, mcpServers: resolvedMcp as any }),
-      agentDef.name,
-      'newSession',
-    );
-
-    log.info(response, 'newSession response');
-    instance.sessionId = response.sessionId;
-    instance.initialSessionResponse = response;
-    instance.debugTracer = createDebugTracer(response.sessionId, workingDirectory);
-    instance.setupCrashDetection();
+    const instance = await AgentInstance.spawnSubprocess(agentDef, workingDirectory, allowedPaths);
+    await instance.claimForSession(workingDirectory, mcpServers, agentDef.initTimeoutMs);
 
     log.info(
       {
-        sessionId: response.sessionId,
+        sessionId: instance.sessionId,
         durationMs: Date.now() - spawnStart,
-        configOptions: (response as any).configOptions ?? [],
+        configOptions: (instance.initialSessionResponse as any)?.configOptions ?? [],
         agentCapabilities: instance.agentCapabilities ?? null,
       },
       "Agent spawn complete",
@@ -544,6 +572,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
           instance.connection.loadSession({ sessionId: agentSessionId, cwd: workingDirectory, mcpServers: resolvedMcp as any }),
           agentDef.name,
           'loadSession',
+          agentDef.initTimeoutMs,
         );
         instance.sessionId = agentSessionId;
         instance.initialSessionResponse = response;
@@ -561,6 +590,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
           instance.connection.unstable_resumeSession({ sessionId: agentSessionId, cwd: workingDirectory }),
           agentDef.name,
           'resumeSession',
+          agentDef.initTimeoutMs,
         );
         instance.sessionId = response.sessionId;
         instance.initialSessionResponse = response;
@@ -583,6 +613,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
         instance.connection.newSession({ cwd: workingDirectory, mcpServers: resolvedMcp as any }),
         agentDef.name,
         'newSession (fallback)',
+        agentDef.initTimeoutMs,
       );
       instance.sessionId = response.sessionId;
       instance.initialSessionResponse = response;
@@ -1076,14 +1107,15 @@ const AGENT_INIT_TIMEOUT_MS = 30_000;
  * a timeout so a non-responsive agent process fails fast instead of hanging
  * the HTTP request and blocking a server thread indefinitely.
  */
-function withAgentTimeout<T>(promise: Promise<T>, agentName: string, op: string): Promise<T> {
+function withAgentTimeout<T>(promise: Promise<T>, agentName: string, op: string, timeoutMs?: number): Promise<T> {
+  const timeout = timeoutMs ?? AGENT_INIT_TIMEOUT_MS;
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       reject(new Error(
-        `Agent "${agentName}" did not respond to ${op} within ${AGENT_INIT_TIMEOUT_MS / 1000}s. ` +
+        `Agent "${agentName}" did not respond to ${op} within ${timeout / 1000}s. ` +
         `The agent process may have hung during initialization.`
       ));
-    }, AGENT_INIT_TIMEOUT_MS);
+    }, timeout);
 
     promise.then(
       (val) => { clearTimeout(timer); resolve(val); },

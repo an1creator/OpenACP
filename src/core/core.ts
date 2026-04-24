@@ -335,34 +335,47 @@ export class OpenACPCore {
   /**
    * Archive a session: delete its adapter topic/thread and cancel the session.
    *
-   * Only sessions in archivable states (active, cancelled, error) can be archived —
-   * initializing and finished sessions are excluded.
+   * Sessions in any state except 'initializing' can be archived.
+   * Initializing sessions are excluded because the agent subprocess may not be fully started yet.
    * The adapter handles platform-side cleanup (e.g. deleting a Telegram topic).
    */
   async archiveSession(sessionId: string): Promise<{ ok: true } | { ok: false; error: string }> {
     const session = this.sessionManager.getSession(sessionId);
-    if (!session) return { ok: false, error: "Session not found (must be in memory)" };
 
-    // Must be active (not initializing or finished)
-    if (session.status !== "active" && session.status !== "cancelled" && session.status !== "error") {
-      return { ok: false, error: `Cannot archive session in '${session.status}' state` };
+    // Determine channelId and status — prefer live session, fall back to stored record
+    let channelId: string;
+    let status: string;
+    if (session) {
+      channelId = session.channelId;
+      status = session.status;
+    } else {
+      const record = this.sessionManager.getSessionRecord(sessionId);
+      if (!record) return { ok: false, error: "Session not found" };
+      channelId = record.channelId;
+      status = record.status;
     }
 
-    const adapter = this.adapters.get(session.channelId);
+    // Only archivable from non-initializing states — initializing sessions are excluded
+    // because the agent subprocess may not be fully started yet.
+    if (status === "initializing") {
+      return { ok: false, error: `Cannot archive session in '${status}' state` };
+    }
+
+    const adapter = this.adapters.get(channelId);
     if (!adapter) return { ok: false, error: "Adapter not found for session" };
     if (!adapter.archiveSessionTopic) return { ok: false, error: "Adapter does not support topic archiving" };
 
     try {
       // archiveSessionTopic handles: cleanup trackers → delete topic
-      await adapter.archiveSessionTopic(session.id);
+      await adapter.archiveSessionTopic(sessionId);
 
       // Cancel session — stops agent, removes from active sessions, marks record as cancelled
       await this.sessionManager.cancelSession(sessionId);
 
       return { ok: true };
     } catch (err) {
-      // Clear archiving flag on error
-      session.archiving = false;
+      // Clear archiving flag on error (only relevant for live sessions)
+      if (session) session.archiving = false;
       return { ok: false, error: (err as Error).message };
     }
   }
@@ -583,25 +596,33 @@ export class OpenACPCore {
     existingSessionId?: string;
     createThread?: boolean;
     initialName?: string;
+    // threadTitle sets the adapter thread display name without populating session.name.
+    // Use this when you want a placeholder thread title (e.g. "Adopted session") but
+    // still need auto-naming to run after the first prompt.
+    threadTitle?: string;
     threadId?: string;
     isAssistant?: boolean;
+    /** Glob patterns matched against bash command descriptions to auto-approve without user prompts. */
+    autoApprovedCommands?: string[];
   }): Promise<Session> {
+    const adapter = this.adapters.get(params.channelId);
+
+    // Create thread FIRST (before spawning the agent) so the user sees the topic
+    // appear immediately. Session ID is not yet known at this point — the adapter
+    // logs it as empty and skips tracing; this is updated in the persisted record below.
+    let preCreatedThreadId: string | undefined;
+    if (params.createThread && adapter) {
+      const name = params.threadTitle ?? params.initialName ?? `🔄 ${params.agentName} — New Session`;
+      preCreatedThreadId = await adapter.createSessionThread("", name);
+    }
+
     // 1-3. Spawn/resume agent, create Session, register in SessionManager
     const session = await this.sessionFactory.create(params);
 
-    // Set threadId early so agent events during bridge.connect() can find the thread
-    if (params.threadId) {
-      session.threadId = params.threadId;
-    }
-
-    // 4. Create thread if needed
-    const adapter = this.adapters.get(params.channelId);
-    if (params.createThread && adapter) {
-      const threadId = await adapter.createSessionThread(
-        session.id,
-        params.initialName ?? `🔄 ${params.agentName} — New Session`,
-      );
-      session.threadId = threadId;
+    // Apply thread ID: pre-created thread takes priority over params.threadId
+    const resolvedThreadId = preCreatedThreadId ?? params.threadId;
+    if (resolvedThreadId) {
+      session.threadId = resolvedThreadId;
     }
 
     // 5. Persist initial record BEFORE bridge.connect() so that:
@@ -866,11 +887,22 @@ export class OpenACPCore {
       }
       adapterChannelId = channelId;
     } else {
-      const firstEntry = this.adapters.entries().next().value;
-      if (!firstEntry) {
+      if (this.adapters.size === 0) {
         return { ok: false, error: "no_adapter", message: "No channel adapter registered" };
       }
-      adapterChannelId = firstEntry[0];
+      // If multiple adapters are registered, require explicit --channel so the caller
+      // intentionally picks the target platform rather than silently landing in the wrong one.
+      if (this.adapters.size > 1) {
+        const available = Array.from(this.adapters.keys());
+        // Map internal adapter names to human-readable display names for the prompt
+        const displayName: Record<string, string> = { sse: "Desktop App" };
+        return {
+          ok: false,
+          error: "channel_required",
+          message: `Multiple channels available. Specify one with --channel:\n${available.map(c => `  - ${c} (${displayName[c] ?? c})`).join("\n")}`,
+        };
+      }
+      adapterChannelId = this.adapters.keys().next().value!;
     }
 
     // 6. Create session via unified pipeline
@@ -882,7 +914,11 @@ export class OpenACPCore {
         workingDirectory: cwd,
         resumeAgentSessionId: agentSessionId,
         createThread: true,
+        // initialName shows a placeholder in the app immediately after adopt.
+        // auto-naming checks for this placeholder value and overwrites it on first
+        // user message, so the name is still updated automatically.
         initialName: "Adopted session",
+        threadTitle: "Adopted session",
       });
     } catch (err) {
       return {

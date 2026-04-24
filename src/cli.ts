@@ -46,6 +46,7 @@ import {
   cmdRemote,
   cmdSetup,
   cmdAutostart,
+  cmdChannels,
 } from './cli/commands/index.js'
 import { resolveInstanceRoot } from './core/instance/instance-context.js'
 
@@ -143,6 +144,7 @@ const noInstanceCommands: Record<string, () => Promise<void>> = {
   '-v': () => cmdVersion(args),
   'update': () => cmdUpdate(args),
   'adopt': () => cmdAdopt(args),
+  'channels': () => cmdChannels(args),
   'instances': async () => cmdInstances(args, flags),
   'integrate': () => cmdIntegrate(args),
   'dev': () => cmdDev(args),

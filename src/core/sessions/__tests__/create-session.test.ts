@@ -156,8 +156,9 @@ describe("OpenACPCore.createSession", () => {
       initialName: "Adopted session",
     });
 
+    // Thread is created BEFORE the session is spawned, so sessionId is "" at call time.
     expect(adapter.createSessionThread).toHaveBeenCalledWith(
-      session.id,
+      "",
       "Adopted session",
     );
     expect(session.threadId).toBe("thread-123");

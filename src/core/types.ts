@@ -217,6 +217,8 @@ export interface AgentDefinition {
   args: string[];
   workingDirectory?: string;
   env?: Record<string, string>;
+  /** Override the default init timeout (ms) for this agent's ACP handshake. */
+  initTimeoutMs?: number;
 }
 
 // --- Agent Registry Types ---
@@ -237,6 +239,8 @@ export interface InstalledAgent {
   installedAt: string;
   /** Absolute path to the binary on disk (only for "binary" distribution). */
   binaryPath: string | null;
+  /** Override the default init timeout (ms) for this agent's ACP handshake. */
+  initTimeoutMs?: number;
 }
 
 /** Platform-specific binary download target from the agent registry. */

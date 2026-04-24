@@ -44,11 +44,10 @@ export async function showModelPage(
     : null
 
   if (!sessionId) {
-    const text = '⚠️ No active session. Start a session first.'
     if (action === 'edit') {
-      await ctx.editMessageText(text).catch(() => {})
+      await ctx.answerCallbackQuery({ text: 'Session no longer active.' }).catch(() => {})
     } else {
-      await ctx.reply(text).catch(() => {})
+      await ctx.reply('⚠️ No active session. Start a session first.').catch(() => {})
     }
     return
   }
@@ -57,11 +56,10 @@ export async function showModelPage(
   const configOption = session?.getConfigByCategory('model')
 
   if (!configOption || configOption.type !== 'select') {
-    const text = '⚠️ This agent does not support switching models.'
     if (action === 'edit') {
-      await ctx.editMessageText(text).catch(() => {})
+      await ctx.answerCallbackQuery({ text: 'This agent does not support switching models.' }).catch(() => {})
     } else {
-      await ctx.reply(text).catch(() => {})
+      await ctx.reply('⚠️ This agent does not support switching models.').catch(() => {})
     }
     return
   }

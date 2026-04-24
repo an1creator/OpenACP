@@ -44,6 +44,18 @@ function makeCtx(opts: { topicId?: number } = {}): Context {
   } as unknown as Context
 }
 
+function makeCtxCallback(opts: { topicId?: number } = {}): Context {
+  return {
+    message: undefined,
+    callbackQuery: opts.topicId != null
+      ? { message: { message_thread_id: opts.topicId } }
+      : { message: undefined },
+    reply: vi.fn().mockResolvedValue(undefined),
+    editMessageText: vi.fn().mockResolvedValue(undefined),
+    answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+  } as unknown as Context
+}
+
 describe('handleModel', () => {
   it('calls showModelPage with page 0 and send action', async () => {
     const core = makeCore({ choices: makeChoices(3) })
@@ -121,9 +133,25 @@ describe('showModelPage — pagination', () => {
     expect(activeBtn?.text).toBe('✅ Model 1')
   })
 
+  it('uses answerCallbackQuery toast when action is edit and session is missing', async () => {
+    const core = makeCore({ sessionId: null })
+    const ctx = makeCtxCallback({ topicId: 1 })
+    await showModelPage(ctx, core, 0, 'edit')
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: 'Session no longer active.' })
+    expect(ctx.editMessageText).not.toHaveBeenCalled()
+  })
+
+  it('uses answerCallbackQuery toast when action is edit and model config is missing', async () => {
+    const core = makeCore({ noConfig: true })
+    const ctx = makeCtxCallback({ topicId: 1 })
+    await showModelPage(ctx, core, 0, 'edit')
+    expect(ctx.answerCallbackQuery).toHaveBeenCalledWith({ text: 'This agent does not support switching models.' })
+    expect(ctx.editMessageText).not.toHaveBeenCalled()
+  })
+
   it('edits message in-place when action is edit', async () => {
     const core = makeCore({ choices: makeChoices(3) })
-    const ctx = makeCtx({ topicId: 1 })
+    const ctx = makeCtxCallback({ topicId: 1 })
     await showModelPage(ctx, core, 0, 'edit')
     expect(ctx.editMessageText).toHaveBeenCalledOnce()
     expect(ctx.reply).not.toHaveBeenCalled()
@@ -139,5 +167,32 @@ describe('showModelPage — pagination', () => {
     const [title] = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(title).toContain('Choose a model')
     expect(title).not.toContain('Page') // clamped to page 0 of 1 — no page indicator
+  })
+
+  it('flattens grouped choices', async () => {
+    const groupedChoices = [
+      { group: 'Anthropic', name: 'Anthropic', options: [{ value: 'claude-3', name: 'Claude 3' }] },
+      { group: 'OpenAI', name: 'OpenAI', options: [{ value: 'gpt-4', name: 'GPT-4' }, { value: 'gpt-3.5', name: 'GPT-3.5' }] },
+    ]
+    const configOption = {
+      id: 'model-opt',
+      name: 'Model',
+      category: 'model',
+      type: 'select' as const,
+      currentValue: 'claude-3',
+      options: groupedChoices,
+    }
+    const session = { getConfigByCategory: (cat: string) => cat === 'model' ? configOption : undefined }
+    const core = {
+      getOrResumeSession: vi.fn().mockResolvedValue({ id: 'sess-1' }),
+      sessionManager: { getSession: vi.fn().mockReturnValue(session) },
+    } as unknown as OpenACPCore
+    const ctx = makeCtx({ topicId: 1 })
+    await showModelPage(ctx, core, 0, 'send')
+    const [, { reply_markup }] = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]
+    const buttons = reply_markup.inline_keyboard.flat()
+    // 3 total models from 2 groups
+    expect(buttons).toHaveLength(3)
+    expect(buttons[0].callback_data).toBe('c//model claude-3')
   })
 })

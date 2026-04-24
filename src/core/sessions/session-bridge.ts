@@ -514,10 +514,15 @@ export class SessionBridge {
       }
     }
 
-    // Plugin-declared auto-approved command patterns (micromatch glob matching)
+    // Plugin-declared auto-approved command patterns (micromatch glob matching).
+    // Multi-line shell commands (heredoc bodies, `\`-line continuations) contain
+    // real newlines which micromatch globs do not cross — normalize runs of
+    // whitespace to a single space so the whole command becomes a single line
+    // for matching purposes.
     const patterns = this.session.autoApprovedCommands;
     if (patterns.length > 0 && request.description) {
-      if (isMatch(request.description, patterns, { dot: true })) {
+      const normalized = request.description.replace(/\s+/g, ' ').trim();
+      if (isMatch(normalized, patterns, { dot: true })) {
         const allowOption = request.options.find((o) => o.isAllow);
         if (allowOption) {
           log.info(

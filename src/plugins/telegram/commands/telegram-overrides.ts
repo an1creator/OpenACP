@@ -6,6 +6,7 @@ import { handleTopics } from './session.js'
 import { handleDoctor } from './doctor.js'
 import { handleUpdate, handleRestart } from './admin.js'
 import { handleHelp, handleMenu } from './menu.js'
+import { handleModel } from './model.js'
 
 /**
  * Commands that should be intercepted and handled by Telegram-specific
@@ -19,6 +20,7 @@ export const TELEGRAM_OVERRIDES: Record<
   (ctx: Context, core: OpenACPCore) => Promise<void>
 > = {
   agents: (ctx, core) => handleAgents(ctx, core),
+  model: (ctx, core) => handleModel(ctx, core),
   sessions: (ctx, core) => handleTopics(ctx, core),
   doctor: (ctx) => handleDoctor(ctx),
   update: (ctx, core) => handleUpdate(ctx, core),

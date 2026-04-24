@@ -138,5 +138,6 @@ describe('showModelPage — pagination', () => {
     expect(ctx.reply).toHaveBeenCalledOnce()
     const [title] = (ctx.reply as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(title).toContain('Choose a model')
+    expect(title).not.toContain('Page') // clamped to page 0 of 1 — no page indicator
   })
 })

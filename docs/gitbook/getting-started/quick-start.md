@@ -4,7 +4,7 @@ This guide gets you from zero to chatting with an AI agent in your Telegram (or 
 
 ## What you'll need
 
-- **Node.js 20 or later** — check with `node --version`
+- **Node.js 20 or later** — check with `node --version`. If Node.js is not installed, use the installer below or install it with a version manager such as `nvm`.
 - **A bot token** for your chat platform:
   - Telegram: create one via [@BotFather](https://t.me/BotFather)
   - Discord: create one in the [Discord Developer Portal](https://discord.com/developers/applications)
@@ -14,6 +14,30 @@ This guide gets you from zero to chatting with an AI agent in your Telegram (or 
 ---
 
 ## Step 1: Install OpenACP
+
+On macOS or Linux, run the installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.sh | bash
+```
+
+On Windows, run this in PowerShell:
+
+```powershell
+powershell -c "irm https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.ps1 | iex"
+```
+
+If you prefer a manual npm install and do not have Node.js yet, install Node.js first. For example, on macOS or Linux with `nvm`:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+nvm install --lts
+nvm use --lts
+```
+
+Then install OpenACP:
 
 ```bash
 npm install -g @openacp/cli

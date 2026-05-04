@@ -100,7 +100,17 @@ powershell -c "irm https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scrip
 
 ### Manual install via npm
 
-If you already have Node.js 20+ installed:
+If you do not have Node.js yet, install it first. For example, on macOS or Linux with `nvm`:
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+nvm install --lts
+nvm use --lts
+```
+
+Then install OpenACP with npm:
 
 ```bash
 npm install -g @openacp/cli

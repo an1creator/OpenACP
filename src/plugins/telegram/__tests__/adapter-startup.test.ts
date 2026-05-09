@@ -191,4 +191,35 @@ describe('TelegramAdapter startup sequence', () => {
 
     expect(core.requestRestart).toHaveBeenCalledTimes(1)
   })
+
+  it('exits when Telegram polling stops and no restart hook is available', async () => {
+    MockBot.startImplementation = () => Promise.reject(new Error('polling failed'))
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never)
+
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any  // makeMockCore has no requestRestart
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+
+    await expect(adapter.start()).resolves.not.toThrow()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(exitSpy).toHaveBeenCalledWith(1)
+    exitSpy.mockRestore()
+  })
+
+  it('does not restart when polling stops during intentional shutdown', async () => {
+    MockBot.startImplementation = () => Promise.reject(new Error('polling failed'))
+
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    core.requestRestart = vi.fn().mockResolvedValue(undefined)
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+
+    await expect(adapter.start()).resolves.not.toThrow()
+    // stop() sets _stopping=true before the setImmediate callback fires
+    await adapter.stop()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(core.requestRestart).not.toHaveBeenCalled()
+  })
 })

@@ -168,6 +168,10 @@ export class TelegramAdapter extends MessagingAdapter {
   private _topicsInitialized = false;
   /** Background watcher timer — cancelled on stop() or when topics succeed */
   private _prerequisiteWatcher: ReturnType<typeof setTimeout> | null = null;
+  /** Promise returned by grammY's long-polling loop. A rejected promise means Telegram is no longer being consumed. */
+  private _pollingPromise: Promise<void> | null = null;
+  /** Set during normal shutdown so bot.stop() does not trigger a self-restart. */
+  private _stopping = false;
 
   /** Returns the configured Telegram supergroup chat ID. */
   getChatId(): number {
@@ -262,6 +266,7 @@ export class TelegramAdapter extends MessagingAdapter {
    * If prerequisites are not met, a background watcher retries until they are.
    */
   async start(): Promise<void> {
+    this._stopping = false;
     this.bot = new Bot(this.telegramConfig.botToken, {
       client: {
         baseFetchConfig: { duplex: "half" } as RequestInit,
@@ -623,9 +628,32 @@ export class TelegramAdapter extends MessagingAdapter {
     this.setupRoutes();
 
     // Start bot polling
-    this.bot.start({
+    this._pollingPromise = this.bot.start({
       allowed_updates: ["message", "callback_query"],
       onStart: () => log.info({ chatId: this.telegramConfig.chatId }, "Telegram bot started"),
+    }).catch((err: unknown) => {
+      if (this._stopping) return;
+
+      const rootCause =
+        err instanceof Error
+          ? err
+          : err && typeof err === 'object' && 'error' in err && (err as { error?: unknown }).error instanceof Error
+            ? (err as { error: Error }).error
+            : err;
+
+      log.error({ err: rootCause }, "Telegram polling stopped unexpectedly");
+      if (this.core.requestRestart) {
+        const requestRestart = this.core.requestRestart;
+        log.error("Restarting OpenACP because Telegram polling stopped");
+        setImmediate(() => {
+          void requestRestart().catch((restartErr: unknown) => {
+            log.error({ err: restartErr }, "OpenACP restart request failed after Telegram polling stopped");
+          });
+        });
+      } else {
+        log.error("Exiting because Telegram polling stopped and no restart hook is available");
+        setImmediate(() => process.exit(1));
+      }
     });
 
     // Phase 2: check prerequisites and either initialize topics now or start watcher
@@ -1019,6 +1047,8 @@ export class TelegramAdapter extends MessagingAdapter {
    * send queue, and stops the grammY bot polling loop.
    */
   async stop(): Promise<void> {
+    this._stopping = true;
+
     // Cancel background prerequisite watcher if running
     if (this._prerequisiteWatcher !== null) {
       clearTimeout(this._prerequisiteWatcher);
@@ -1045,6 +1075,7 @@ export class TelegramAdapter extends MessagingAdapter {
     this.sendQueue.clear();
 
     await this.bot.stop();
+    this._pollingPromise = null;
     log.info("Telegram bot stopped");
   }
 

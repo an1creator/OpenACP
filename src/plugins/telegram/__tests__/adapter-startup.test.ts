@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 const mockUseAfterStartError = 'REGRESSION: bot.use() called after bot.start() — grammY will throw in production'
 
 class MockBot {
+  static startImplementation: ((opts?: { onStart?: () => void; allowed_updates?: string[] }) => Promise<void>) | null = null
   private _started = false
   api = {
     config: { use: vi.fn() },
@@ -42,6 +43,7 @@ class MockBot {
   start(opts?: { onStart?: () => void; allowed_updates?: string[] }) {
     this._started = true
     opts?.onStart?.()
+    if (MockBot.startImplementation) return MockBot.startImplementation(opts)
     return new Promise<void>(() => { /* intentionally never resolves, like real bot polling */ })
   }
 }
@@ -118,6 +120,7 @@ function makeTelegramConfig() {
 describe('TelegramAdapter startup sequence', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    MockBot.startImplementation = null
   })
 
   it('registers all handlers before calling bot.start() — no grammy "augment after start" error', async () => {
@@ -173,5 +176,19 @@ describe('TelegramAdapter startup sequence', () => {
 
     // Clean up the watcher timer so the test exits cleanly
     await adapter.stop()
+  })
+
+  it('requests restart when Telegram polling stops unexpectedly', async () => {
+    MockBot.startImplementation = () => Promise.reject(new Error('polling failed'))
+
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    core.requestRestart = vi.fn().mockResolvedValue(undefined)
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+
+    await expect(adapter.start()).resolves.not.toThrow()
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    expect(core.requestRestart).toHaveBeenCalledTimes(1)
   })
 })

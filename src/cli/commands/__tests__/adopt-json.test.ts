@@ -8,6 +8,10 @@ vi.mock('../../api-client.js', () => ({
   }),
 }))
 
+vi.mock('../../../core/instance/instance-context.js', () => ({
+  resolveRunningInstance: vi.fn().mockResolvedValue('/tmp/openacp-test/.openacp'),
+}))
+
 describe('adopt --json', () => {
   afterEach(() => { vi.restoreAllMocks() })
 

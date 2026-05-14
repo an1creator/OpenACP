@@ -48,7 +48,7 @@ export function setupAllCallbacks(
   setupSettingsCallbacks(bot, core, getAssistantSession ?? (() => undefined));
 
   // Doctor handlers — must be before broad m: handler
-  setupDoctorCallbacks(bot);
+  setupDoctorCallbacks(bot, core);
 
   // Tunnel callbacks — must be before broad m: handler
   setupTunnelCallbacks(bot, core);

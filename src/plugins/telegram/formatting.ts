@@ -359,31 +359,92 @@ function renderSpecSection(spec: ToolDisplaySpec): string {
 const TELEGRAM_MAX_LENGTH = 4096;
 
 /**
+ * Close any HTML tags that were opened but not closed in the given text.
+ * Handles the Telegram HTML subset: b, i, u, s, code, pre, a, tg-spoiler.
+ */
+function closeOpenHtmlTags(text: string): string {
+  const openStack: string[] = [];
+  const tagRe = /<\/?([a-z][\w-]*)(?:\s[^>]*)?\/?>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(text)) !== null) {
+    const full = m[0];
+    const tag = m[1].toLowerCase();
+    if (full.endsWith("/>")) continue;
+    if (full.startsWith("</")) {
+      const idx = openStack.lastIndexOf(tag);
+      if (idx !== -1) openStack.splice(idx, 1);
+    } else {
+      openStack.push(tag);
+    }
+  }
+  if (openStack.length === 0) return text;
+  return text + openStack.reverse().map((t) => `</${t}>`).join("");
+}
+
+/**
+ * Split text on "\n\n" boundaries that are NOT inside <code> or <pre> blocks.
+ * Naive splitting breaks HTML when commands contain blank lines.
+ */
+function splitAtSafeBoundaries(text: string): string[] {
+  const sections: string[] = [];
+  let depth = 0;
+  let start = 0;
+
+  for (let i = 0; i < text.length; ) {
+    if (text[i] === "<") {
+      // Detect opening or closing <code>/<pre> tags to track depth
+      if (text.startsWith("</code>", i) || text.startsWith("</pre>", i)) {
+        depth = Math.max(0, depth - 1);
+        i += text[i + 1] === "/" ? 7 : 6;
+        continue;
+      }
+      if (text.startsWith("<code", i) || text.startsWith("<pre", i)) {
+        depth++;
+      }
+    }
+
+    if (depth === 0 && text[i] === "\n" && text[i + 1] === "\n") {
+      sections.push(text.slice(start, i));
+      start = i + 2;
+      i += 2;
+      continue;
+    }
+
+    i++;
+  }
+
+  sections.push(text.slice(start));
+  return sections;
+}
+
+/**
  * Split a tool card into multiple chunks at entry boundaries.
  * Each chunk stays under the Telegram message length limit.
  */
 export function splitToolCardText(text: string): string[] {
   if (text.length <= TELEGRAM_MAX_LENGTH) return [text];
 
-  const sections = text.split("\n\n");
+  const sections = splitAtSafeBoundaries(text);
   const chunks: string[] = [];
   let current = "";
 
   for (const section of sections) {
-    // Handle single section > limit (truncate with ellipsis)
+    // Truncate oversized sections: slice, append ellipsis, then close open tags.
+    // Order matters: ellipsis goes inside the code block, closing tag wraps it.
+    // Buffer of 20 chars leaves room for closing tags after the ellipsis.
     const safeSection =
       section.length > TELEGRAM_MAX_LENGTH
-        ? section.slice(0, TELEGRAM_MAX_LENGTH - 3) + "..."
+        ? closeOpenHtmlTags(section.slice(0, TELEGRAM_MAX_LENGTH - 20) + "...")
         : section;
 
     const candidate = current ? `${current}\n\n${safeSection}` : safeSection;
     if (candidate.length > TELEGRAM_MAX_LENGTH && current) {
-      chunks.push(current);
+      chunks.push(closeOpenHtmlTags(current));
       current = safeSection;
     } else {
       current = candidate;
     }
   }
-  if (current) chunks.push(current);
+  if (current) chunks.push(closeOpenHtmlTags(current));
   return chunks;
 }

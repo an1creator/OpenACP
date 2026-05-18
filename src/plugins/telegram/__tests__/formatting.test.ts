@@ -153,3 +153,44 @@ describe("splitToolCardText — single section > 4096 fix", () => {
     expect(chunks[1]).toBe(section2);
   });
 });
+
+describe("splitToolCardText — HTML tag safety", () => {
+  it("does not split inside a <code> block even when it contains \\n\\n", () => {
+    // Command with a blank line inside — must not split the <code> block
+    const command = "line1\n\nline2";
+    const section = `✅ <b>Run</b> · title\n   <code>${command}</code>`;
+    // Pad with previous sections to push total over 4096
+    const padding = "P".repeat(3900);
+    const text = `${padding}\n\n${section}`;
+    const chunks = splitToolCardText(text);
+    // The section containing <code>...</code> must stay in one chunk
+    const codeChunk = chunks.find((c) => c.includes("<code>"));
+    expect(codeChunk).toBeDefined();
+    expect(codeChunk).toContain("</code>");
+  });
+
+  it("closes unclosed <code> tag when a large section is truncated", () => {
+    // A section starting with <code> that is large enough to be truncated
+    const section = `<code>${"x".repeat(5000)}</code>`;
+    const chunks = splitToolCardText(section);
+    expect(chunks.length).toBe(1);
+    expect(chunks[0]).toMatch(/<\/code>$/);
+    expect(chunks[0].length).toBeLessThanOrEqual(4096);
+  });
+
+  it("closes unclosed tags when chunk boundary falls inside a <code> block", () => {
+    // Two tool entries: first fills up near 4096, second has <code> with \n\n
+    const bigFirst = "A".repeat(3800);
+    // Second entry: <code> block split by \n\n; combined entry > remaining space
+    const secondEntry =
+      "✅ <b>Run</b> · Check\n   <code>" + "B".repeat(200) + "\n\n" + "C".repeat(200) + "</code>";
+    const text = `${bigFirst}\n\n${secondEntry}`;
+    const chunks = splitToolCardText(text);
+    // Every chunk must have balanced HTML tags
+    for (const chunk of chunks) {
+      const openTags = [...chunk.matchAll(/<code>/gi)].length;
+      const closeTags = [...chunk.matchAll(/<\/code>/gi)].length;
+      expect(openTags).toBe(closeTags);
+    }
+  });
+});

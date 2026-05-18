@@ -41,10 +41,11 @@ function extractErrorMessage(value: unknown, seen = new WeakSet<object>()): stri
   const direct = typeof record.message === "string" ? normalizeErrorMessage(record.message) : null;
   if (direct && !isGenericPromptErrorMessage(direct)) return direct;
 
-  for (const key of ["error", "reason", "details", "detail", "data", "cause", "message"]) {
+  for (const key of ["error", "reason", "details", "detail", "data", "cause"]) {
     const nested = extractErrorMessage(record[key], seen);
     if (nested) return nested;
   }
+  // "message" is already captured in `direct` above; use it as last resort before JSON fallback.
   if (direct) return direct;
 
   try {
@@ -67,6 +68,8 @@ function normalizeErrorMessage(message: string | undefined): string | null {
   return trimmed;
 }
 
+// JSON-RPC -32603 surfaces "Internal error" as its top-level message, which is not
+// meaningful to users. Skip it and look for a more specific cause in nested fields.
 function isGenericPromptErrorMessage(message: string): boolean {
   return message === "Internal error";
 }

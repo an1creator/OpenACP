@@ -22,7 +22,7 @@ export const TELEGRAM_OVERRIDES: Record<
   agents: (ctx, core) => handleAgents(ctx, core),
   model: (ctx, core) => handleModel(ctx, core),
   sessions: (ctx, core) => handleTopics(ctx, core),
-  doctor: (ctx) => handleDoctor(ctx),
+  doctor: (ctx, core) => handleDoctor(ctx, core),
   update: (ctx, core) => handleUpdate(ctx, core),
   restart: (ctx, core) => handleRestart(ctx, core),
   help: (ctx) => handleHelp(ctx),

@@ -1,5 +1,6 @@
 import type { Bot, Context } from "grammy";
 import { InlineKeyboard } from "grammy";
+import type { OpenACPCore } from "../../../core/index.js";
 import { DoctorEngine } from "../../../core/doctor/index.js";
 import type { DoctorReport, PendingFix } from "../../../core/doctor/types.js";
 import { createChildLogger } from "../../../core/utils/log.js";
@@ -47,11 +48,11 @@ function escapeHtml(text: string): string {
  * edits the message with the report. Pending fixes are stored per-message so
  * the `m:doctor:fix:<index>` callbacks know which fixes to apply.
  */
-export async function handleDoctor(ctx: Context): Promise<void> {
+export async function handleDoctor(ctx: Context, core: OpenACPCore): Promise<void> {
   const statusMsg = await ctx.reply("🩺 Running diagnostics...", { parse_mode: "HTML" });
 
   try {
-    const engine = new DoctorEngine();
+    const engine = new DoctorEngine({ dataDir: core.instanceContext.root });
     const report = await engine.runAll();
     const { text, keyboard } = renderReport(report);
 
@@ -75,7 +76,7 @@ export async function handleDoctor(ctx: Context): Promise<void> {
   }
 }
 
-export function setupDoctorCallbacks(bot: Bot): void {
+export function setupDoctorCallbacks(bot: Bot, core: OpenACPCore): void {
   bot.callbackQuery(/^m:doctor:fix:/, async (ctx) => {
     const data = ctx.callbackQuery.data;
     const index = parseInt(data.replace("m:doctor:fix:", ""), 10);
@@ -99,7 +100,7 @@ export function setupDoctorCallbacks(bot: Bot): void {
     try {
       const result = await pending.fix();
       if (result.success) {
-        const engine = new DoctorEngine();
+        const engine = new DoctorEngine({ dataDir: core.instanceContext.root });
         const report = await engine.runAll();
         const { text, keyboard } = renderReport(report);
 
@@ -120,6 +121,6 @@ export function setupDoctorCallbacks(bot: Bot): void {
 
   bot.callbackQuery("m:doctor", async (ctx) => {
     try { await ctx.answerCallbackQuery(); } catch { /* */ }
-    await handleDoctor(ctx);
+    await handleDoctor(ctx, core);
   });
 }

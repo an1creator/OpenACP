@@ -145,7 +145,12 @@ export class JsonFileSessionStore implements SessionStore {
     };
     const dir = path.dirname(this.filePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2));
+    // Write to a temp file first, then atomically rename into place.
+    // This prevents sessions.json from being left in a corrupt state if the
+    // process is killed (SIGKILL, OOM) while the write is in progress.
+    const tmpPath = `${this.filePath}.tmp`;
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+    fs.renameSync(tmpPath, this.filePath);
   }
 
   /** Clean up timers and process listeners. Call on shutdown to prevent leaks. */
@@ -161,6 +166,11 @@ export class JsonFileSessionStore implements SessionStore {
   }
 
   private load(): void {
+    // Remove any orphaned temp file left by a previous interrupted write.
+    // If the crash happened before the rename, sessions.json is still the last
+    // good state and the .tmp file is stale — safe to delete.
+    try { fs.unlinkSync(`${this.filePath}.tmp`); } catch { /* not present */ }
+
     if (!fs.existsSync(this.filePath)) return;
     try {
       const raw = JSON.parse(

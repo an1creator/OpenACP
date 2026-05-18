@@ -37,6 +37,10 @@ export class SessionManager {
   private store: SessionStore | null;
   private eventBus?: EventBus;
   middlewareChain?: MiddlewareChain;
+  // Set to true after shutdownAll() flushes "finished" state to disk.
+  // Prevents SessionBridge STATUS_CHANGE listeners from overwriting the flushed state
+  // with transient error status from in-flight prompts that fail after shutdown.
+  private _shutdownComplete = false;
 
   /**
    * Inject the EventBus after construction. Deferred because EventBus is created
@@ -151,6 +155,9 @@ export class SessionManager {
     options?: { immediate?: boolean },
   ): Promise<void> {
     if (!this.store) return;
+    // After shutdown, the store was already flushed with terminal state — ignore further patches
+    // to prevent in-flight prompt failures from overwriting "finished" with "error" on disk.
+    if (this._shutdownComplete) return;
     const record = this.store.get(sessionId);
     if (record) {
       await this.store.save({ ...record, ...patch });
@@ -314,6 +321,7 @@ export class SessionManager {
       }
       this.store.flush();
     }
+    this._shutdownComplete = true;
     this.sessions.clear();
   }
 

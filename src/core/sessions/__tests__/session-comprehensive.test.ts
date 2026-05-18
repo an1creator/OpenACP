@@ -625,6 +625,60 @@ describe("Session — Error Handling in Prompt", () => {
     expect(session.status).toBe("error");
   });
 
+  it("formats plain object prompt errors without [object Object]", async () => {
+    const agent = mockAgentInstance();
+    agent.prompt.mockRejectedValue({ error: { message: "Conversation compaction failed" } });
+    const session = createTestSession(agent);
+    const events: AgentEvent[] = [];
+    session.on("agent_event", (event) => events.push(event));
+
+    await session.enqueuePrompt("hello");
+
+    const errorEvent = events.find((event) => event.type === "error");
+    expect(errorEvent).toBeDefined();
+    expect((errorEvent as Extract<AgentEvent, { type: "error" }>).message).toBe(
+      "Prompt execution failed: Conversation compaction failed",
+    );
+    expect((errorEvent as Extract<AgentEvent, { type: "error" }>).message).not.toContain("[object Object]");
+  });
+
+  it("formats JSON-RPC prompt error data details", async () => {
+    const agent = mockAgentInstance();
+    agent.prompt.mockRejectedValue({
+      code: -32603,
+      message: "Internal error",
+      data: { error: { message: "Conversation compaction failed" } },
+    });
+    const session = createTestSession(agent);
+    const events: AgentEvent[] = [];
+    session.on("agent_event", (event) => events.push(event));
+
+    await session.enqueuePrompt("hello");
+
+    const errorEvent = events.find((event) => event.type === "error");
+    expect((errorEvent as Extract<AgentEvent, { type: "error" }>).message).toBe(
+      "Prompt execution failed: Conversation compaction failed",
+    );
+  });
+
+  it("uses stable fallback for uninformative prompt error objects", async () => {
+    const agent = mockAgentInstance();
+    const err: Record<string, unknown> = {};
+    err.error = err;
+    agent.prompt.mockRejectedValue(err);
+    const session = createTestSession(agent);
+    const events: AgentEvent[] = [];
+    session.on("agent_event", (event) => events.push(event));
+
+    await session.enqueuePrompt("hello");
+
+    const errorEvent = events.find((event) => event.type === "error");
+    expect((errorEvent as Extract<AgentEvent, { type: "error" }>).message).toBe(
+      "Prompt execution failed: Unknown error",
+    );
+    expect((errorEvent as Extract<AgentEvent, { type: "error" }>).message).not.toContain("[object Object]");
+  });
+
   it("error in one prompt does not prevent next prompt", async () => {
     const agent = mockAgentInstance();
     let callCount = 0;

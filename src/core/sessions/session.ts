@@ -13,6 +13,64 @@ import { createTurnContext, type TurnContext } from "./turn-context.js";
 import { Hook, SessionEv } from "../events.js";
 const moduleLog = createChildLogger({ module: "session" });
 
+function formatPromptError(err: unknown): string {
+  const message = extractErrorMessage(err);
+  return message ?? "Unknown error";
+}
+
+function extractErrorMessage(value: unknown, seen = new WeakSet<object>()): string | null {
+  if (typeof value === "string") return normalizeErrorMessage(value);
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (value == null || typeof value !== "object") return null;
+  if (seen.has(value)) return null;
+  seen.add(value);
+
+  if (value instanceof Error) {
+    const direct = normalizeErrorMessage(value.message);
+    if (direct && !isGenericPromptErrorMessage(direct)) return direct;
+
+    const cause = extractErrorMessage((value as { cause?: unknown }).cause, seen);
+    if (cause) return cause;
+
+    return direct ?? normalizeErrorMessage(value.name);
+  }
+
+  const record = value as Record<string, unknown>;
+  const direct = typeof record.message === "string" ? normalizeErrorMessage(record.message) : null;
+  if (direct && !isGenericPromptErrorMessage(direct)) return direct;
+
+  for (const key of ["error", "reason", "details", "detail", "data", "cause", "message"]) {
+    const nested = extractErrorMessage(record[key], seen);
+    if (nested) return nested;
+  }
+  if (direct) return direct;
+
+  try {
+    const json = JSON.stringify(value);
+    const jsonMessage = json ? normalizeErrorMessage(json) : null;
+    if (jsonMessage && jsonMessage !== "{}") return jsonMessage;
+  } catch {
+    // Fall through to a stable fallback below.
+  }
+
+  const name = (value as { constructor?: { name?: string } }).constructor?.name;
+  return name && name !== "Object" ? name : null;
+}
+
+function normalizeErrorMessage(message: string | undefined): string | null {
+  const trimmed = message?.trim();
+  if (!trimmed || trimmed === "[object Object]" || trimmed === "undefined" || trimmed === "null") {
+    return null;
+  }
+  return trimmed;
+}
+
+function isGenericPromptErrorMessage(message: string): boolean {
+  return message === "Internal error";
+}
+
 // TTS injection pattern: we append TTS_PROMPT_INSTRUCTION to the user's prompt so the
 // agent includes a [TTS]...[/TTS] block in its response. After the response completes,
 // we extract that block via TTS_BLOCK_REGEX and synthesize speech from it. The TTS block
@@ -156,7 +214,7 @@ export class Session extends TypedEmitter<SessionEvents> {
       (text, userPrompt, attachments, routing, turnId, meta) => this.processPrompt(text, userPrompt, attachments, routing, turnId, meta),
       (err) => {
         this.log.error({ err }, "Prompt execution failed");
-        const message = err instanceof Error ? err.message : String(err);
+        const message = formatPromptError(err);
         this.fail(message);
         this.emit(SessionEv.AGENT_EVENT, { type: "error", message: `Prompt execution failed: ${message}` });
       },

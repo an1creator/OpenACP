@@ -40,13 +40,13 @@ The adapter is always the outermost layer. Core never talks to the platform dire
 ## Step 1 — Extend ChannelAdapter
 
 ```typescript
-import { ChannelAdapter, type ChannelConfig } from 'openacp'
+import { ChannelAdapter, type ChannelConfig } from '@n1creator/openacp-cli'
 import type {
   OutgoingMessage,
   PermissionRequest,
   NotificationMessage,
-} from 'openacp'
-import type { OpenACPCore } from 'openacp'
+} from '@n1creator/openacp-cli'
+import type { OpenACPCore } from '@n1creator/openacp-cli'
 
 export class MyPlatformAdapter extends ChannelAdapter<OpenACPCore> {
   constructor(core: OpenACPCore, config: ChannelConfig) {
@@ -203,7 +203,7 @@ async renameSessionThread(sessionId: string, newName: string): Promise<void> {
 Before calling `core.start()`, register your adapter:
 
 ```typescript
-import { OpenACPCore } from 'openacp'
+import { OpenACPCore } from '@n1creator/openacp-cli'
 import { MyPlatformAdapter } from './adapter.js'
 
 const core = new OpenACPCore(config)
@@ -219,22 +219,36 @@ await core.start()
 Adapter plugins implement `OpenACPPlugin` and register themselves in `setup()`:
 
 ```typescript
-import type { OpenACPPlugin, PluginContext } from '@n1creator/openacp-plugin-sdk'
+import type {
+  OpenACPCore,
+  OpenACPPlugin,
+  PluginContext,
+} from '@n1creator/openacp-plugin-sdk'
 import { MyPlatformAdapter } from './adapter.js'
 
 const plugin: OpenACPPlugin = {
-  name: '@openacp/adapter-myplatform',
+  name: '@myorg/adapter-myplatform',
   version: '1.0.0',
   description: 'MyPlatform adapter for OpenACP',
+  permissions: ['services:register', 'kernel:access'],
   async setup(ctx: PluginContext) {
-    const settings = await ctx.settings.getAll()
-    const adapter = new MyPlatformAdapter(ctx, settings)
-    ctx.registerAdapter('myplatform', adapter)
+    const core = ctx.core as OpenACPCore
+    const adapter = new MyPlatformAdapter(core, {
+      ...ctx.pluginConfig,
+      enabled: true,
+    })
+    ctx.registerService('adapter:myplatform', adapter)
   },
 }
 
 export default plugin
 ```
+
+`services:register` permits the `adapter:myplatform` service registration.
+This example also declares `kernel:access` because `MyPlatformAdapter` needs the
+real `OpenACPCore` from `ctx.core`; omit that permission when an adapter does not
+access kernel APIs. During startup, OpenACP discovers `adapter:*` services and
+wires them into core with `core.registerAdapter()`.
 
 Adapter implementations can extend `MessagingAdapter` (for platforms with threads/topics) or `StreamAdapter` (for simpler integrations) from `@n1creator/openacp-plugin-sdk`, instead of extending `ChannelAdapter` directly.
 
@@ -245,14 +259,14 @@ Adapter implementations can extend `MessagingAdapter` (for platforms with thread
 ## Complete Minimal Adapter
 
 ```typescript
-import { ChannelAdapter } from 'openacp'
+import { ChannelAdapter } from '@n1creator/openacp-cli'
 import type {
   ChannelConfig,
   OutgoingMessage,
   PermissionRequest,
   NotificationMessage,
-} from 'openacp'
-import type { OpenACPCore } from 'openacp'
+} from '@n1creator/openacp-cli'
+import type { OpenACPCore } from '@n1creator/openacp-cli'
 
 export class MinimalAdapter extends ChannelAdapter<OpenACPCore> {
   private sessionThreads = new Map<string, string>()

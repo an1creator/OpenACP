@@ -214,16 +214,16 @@ const ctx = createTestContext({
    \`\`\`bash
    openacp plugin install ${params.pluginName}
    \`\`\`
-5. Submit to the [OpenACP Plugin Registry](https://github.com/Open-ACP/plugin-registry) for discoverability.
+5. Verify installation by the complete npm package name from a clean environment.
 
 ## Useful Links
 
-- [Architecture: Plugin System](https://docs.openacp.dev/architecture/plugin-system)
-- [Architecture: Writing Plugins](https://docs.openacp.dev/architecture/writing-plugins)
-- [Architecture: Command System](https://docs.openacp.dev/architecture/command-system)
-- [Plugin SDK Reference](https://docs.openacp.dev/extending/plugin-sdk-reference)
-- [Getting Started: Your First Plugin](https://docs.openacp.dev/extending/getting-started-plugin)
-- [Dev Mode](https://docs.openacp.dev/extending/dev-mode)
+- [Architecture: Plugin System](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/architecture/plugin-system.md)
+- [Architecture: Writing Plugins](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/architecture/writing-plugins.md)
+- [Architecture: Command System](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/architecture/command-system.md)
+- [Plugin SDK Reference](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/extending/plugin-sdk-reference.md)
+- [Getting Started: Your First Plugin](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/extending/getting-started-plugin.md)
+- [Dev Mode](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/extending/dev-mode.md)
 - [Contributing](https://github.com/an1creator/OpenACP/blob/main/CONTRIBUTING.md)
 `
 }

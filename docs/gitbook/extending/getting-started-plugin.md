@@ -8,7 +8,7 @@ This is a **hands-on tutorial** that walks you through creating, developing, tes
 
 ## Prerequisites
 
-- **Node.js** 18+ installed
+- **Node.js** 20+ installed
 - **npm** or **pnpm** installed
 - **OpenACP** installed globally (`npm install -g @n1creator/openacp-cli`)
 - A working OpenACP setup (run `openacp onboard` if you haven't yet)
@@ -100,20 +100,23 @@ Key fields in the generated `package.json`:
     "prepublishOnly": "npm run build"
   },
   "engines": {
-    "openacp": ">=2026.0327.1"
+    "openacp": ">=2026.712.12"
   },
   "peerDependencies": {
-    "@n1creator/openacp-cli": ">=2026.0327.1"
+    "@n1creator/openacp-cli": ">=2026.712.12"
   },
   "devDependencies": {
-    "@n1creator/openacp-plugin-sdk": "^1.0.0",
+    "@n1creator/openacp-plugin-sdk": "2026.712.12",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
   }
 }
 ```
 
-The `engines.openacp` field declares the minimum OpenACP CLI version required by your plugin. When users install your plugin, OpenACP checks this field and warns if their CLI version is too old. The `peerDependencies` on `@n1creator/openacp-cli` serves the same purpose for npm's dependency resolver.
+The example reflects the current `2026.712.12` release. The scaffold substitutes
+the version of the installed CLI: `engines.openacp` and the CLI peer dependency
+use `>=<cli-version>`, while the SDK dev dependency uses the exact same calendar
+version. This keeps plugin types aligned with the minimum compatible CLI.
 
 The `@n1creator/openacp-plugin-sdk` package provides all types, base classes, and testing utilities you need.
 
@@ -427,7 +430,11 @@ npm test
 npm publish --access public
 ```
 
-### How users install your plugin
+### Verify the public package
+
+The maintained fork does not currently operate a separate public plugin
+registry. Verify installation by the complete npm package name from a clean
+environment:
 
 ```bash
 openacp plugin install @myorg/hello-world
@@ -435,15 +442,8 @@ openacp plugin install @myorg/hello-world
 
 This downloads from npm into `~/.openacp/plugins/`, validates the plugin interface, and runs `install()` if defined.
 
-### List your plugin in the registry
-
-After publishing to npm, add your plugin to the [OpenACP Plugin Registry](https://github.com/Open-ACP/plugin-registry) so users can discover it via `openacp plugin search`:
-
-1. Fork [Open-ACP/plugin-registry](https://github.com/Open-ACP/plugin-registry)
-2. Create `plugins/myorg--hello-world.json` with your plugin metadata
-3. Submit a PR — CI auto-validates and auto-merges
-
-See [Contributing > Publishing a Plugin to the Registry](contributing.md#publishing-a-plugin-to-the-registry) for the full guide.
+See [Contributing > Publishing a Plugin](contributing.md#publishing-a-plugin)
+for the release checklist.
 
 ---
 

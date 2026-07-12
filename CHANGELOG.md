@@ -1,5 +1,23 @@
 ## Unreleased
 
+## 2026.712.12 - 2026-07-12
+
+### Documentation
+
+- Align the public README, contribution paths, generated plugin guides, and
+  community templates with the maintained `an1creator/OpenACP` repository and
+  `@n1creator` packages. Replace upstream GitBook/social references with
+  repository-owned documentation and remove instructions that depended on the
+  unavailable `Open-ACP/plugin-registry` repository.
+- Correct the active plugin-author contract for Node.js 20, calendar-versioned
+  CLI/SDK compatibility, public package imports, and `main`-targeted pull
+  requests. Document service-based adapter registration, restore enabled
+  Issues/Discussions routes, add a private conduct channel, and add a root
+  security policy with its private GitHub advisory route.
+- Align the plugin SDK test helper and active architecture references with the
+  current `InstallContext`, which no longer exposes a generic `legacyConfig`
+  field.
+
 ## 2026.712.11 - 2026-07-12
 
 ### Changed

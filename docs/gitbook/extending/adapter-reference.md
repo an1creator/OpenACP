@@ -152,17 +152,31 @@ interface ChannelConfig {
 Adapter plugins now implement the `OpenACPPlugin` interface. Instead of exporting an `AdapterFactory`, plugins register their adapter in the `setup()` method:
 
 ```typescript
-import type { OpenACPPlugin, PluginContext } from '@n1creator/openacp-plugin-sdk'
+import type {
+  OpenACPCore,
+  OpenACPPlugin,
+  PluginContext,
+} from '@n1creator/openacp-plugin-sdk'
 
 const plugin: OpenACPPlugin = {
-  name: '@openacp/adapter-myplatform',
+  name: '@myorg/adapter-myplatform',
   version: '1.0.0',
+  permissions: ['services:register', 'kernel:access'],
   async setup(ctx: PluginContext) {
-    const adapter = new MyPlatformAdapter(ctx)
-    ctx.registerAdapter('myplatform', adapter)
+    const core = ctx.core as OpenACPCore
+    const adapter = new MyPlatformAdapter(core, {
+      ...ctx.pluginConfig,
+      enabled: true,
+    })
+    ctx.registerService('adapter:myplatform', adapter)
   },
 }
 ```
+
+`services:register` permits adapter service registration. `kernel:access` is
+required here only because the constructor receives `ctx.core`; omit it when an
+adapter does not access kernel APIs. OpenACP discovers `adapter:*` services at
+startup and registers them with core.
 
 Adapter implementations should extend `MessagingAdapter` (for full-featured platforms with threads/topics) or `StreamAdapter` (for simpler stream-based integrations) from `@n1creator/openacp-plugin-sdk`.
 
@@ -173,7 +187,9 @@ Adapter implementations should extend `MessagingAdapter` (for full-featured plat
 ```
 new MyAdapter(core, config)
         ↓
-  core.registerAdapter(id, adapter)
+  ctx.registerService('adapter:<id>', adapter)
+        ↓
+  bootstrap calls core.registerAdapter(id, adapter)
         ↓
   core.start() → adapter.start()
         ↓

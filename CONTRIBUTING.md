@@ -52,7 +52,7 @@ src/
 │   └── setup/               # First-run setup wizard
 ├── plugins/                 # All platform adapters and service plugins
 │   ├── telegram/            # Telegram adapter (grammY)
-│   ├── speech/              # TTS/STT (Edge TTS, Groq STT)
+│   ├── speech/              # Native local/Groq STT and speech providers
 │   ├── tunnel/              # Port forwarding (Cloudflare, ngrok, Bore, Tailscale)
 │   ├── security/            # Access control, rate limiting
 │   ├── api-server/          # REST API + SSE
@@ -150,15 +150,26 @@ See [`packages/plugin-sdk/`](packages/plugin-sdk/) for the full API and [`src/cl
 
 ## Where to Start
 
-- Browse [`good first issue`](https://github.com/an1creator/OpenACP/labels/good%20first%20issue) for beginner-friendly tasks
-- Check [`help wanted`](https://github.com/an1creator/OpenACP/labels/help%20wanted) for tasks that need community help
-- Join [GitHub Discussions](https://github.com/an1creator/OpenACP/discussions) for questions and ideas
+- Read the project architecture and conventions in [`CLAUDE.md`](CLAUDE.md).
+- Review [open pull requests](https://github.com/an1creator/OpenACP/pulls) to avoid duplicate work.
+- Prefer a focused pull request with tests and documentation for a reproducible fix.
 
 ---
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/an1creator/OpenACP/issues) to report bugs or request features. Please check for existing issues before opening a new one and include reproduction steps where applicable.
+Use [GitHub Issues](https://github.com/an1creator/OpenACP/issues) for
+reproducible bugs and concrete feature requests. Search existing issues first;
+include the OpenACP version, environment, reproduction steps, expected result,
+and sanitized logs where relevant.
+
+Use [Discussions Q&A](https://github.com/an1creator/OpenACP/discussions/categories/q-a)
+for setup and usage questions, and [Discussions Ideas](https://github.com/an1creator/OpenACP/discussions/categories/ideas)
+for proposals that need exploration before implementation.
+
+Security vulnerabilities must follow [SECURITY.md](SECURITY.md). Never publish
+credentials, exploit details, or other sensitive information in an issue,
+discussion, or pull request.
 
 ---
 

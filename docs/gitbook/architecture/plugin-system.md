@@ -389,18 +389,14 @@ Within the same depth level, load order is determined by registration order.
 
 ---
 
-## Legacy Migration
+## Legacy Configuration Compatibility
 
-When upgrading from pre-plugin config.json (all settings in one file):
-
-1. Core detects: config.json has plugin fields AND plugins.json does not exist
-2. Create plugins.json, auto-register all built-in plugins
-3. For each built-in: extract legacy config, call `plugin.install()` with `legacyConfig`
-4. Plugin reads `legacyConfig` -> saves to settings.json (no interactive prompts)
-5. Strip plugin-specific fields from config.json
-6. Normal boot continues
-
-If migration fails for one plugin, legacy config is kept for retry on next boot.
+When `plugins.json` does not exist, OpenACP registers the built-in plugins and
+best-effort runs each missing plugin's `install()` hook with a silent terminal.
+`InstallContext` does not expose a generic `legacyConfig` field. During normal
+startup, an empty plugin settings file falls back to the corresponding legacy
+`config.json` block through `resolvePluginConfig()`; plugins that persist legacy
+fields into their new settings store do so explicitly in their own setup logic.
 
 ---
 

@@ -238,7 +238,6 @@ Creates a test-friendly `InstallContext` for unit-testing `install()`, `configur
 ```typescript
 interface TestInstallContextOpts {
   pluginName: string
-  legacyConfig?: Record<string, unknown>
   terminalResponses?: Record<string, unknown[]>
 }
 ```
@@ -246,7 +245,6 @@ interface TestInstallContextOpts {
 | Option | Type | Description |
 |---|---|---|
 | `pluginName` | `string` | Required. The plugin name. |
-| `legacyConfig` | `Record<string, unknown>` | Simulated legacy config data (for migration testing). |
 | `terminalResponses` | `Record<string, unknown[]>` | Auto-answers for terminal prompts, keyed by method name. |
 
 **Terminal auto-answering:**
@@ -307,19 +305,6 @@ describe('install flow', () => {
     ])
   })
 
-  it('handles legacy config migration', async () => {
-    const ctx = createTestInstallContext({
-      pluginName: '@myorg/my-plugin',
-      legacyConfig: {
-        oldApiKey: 'legacy-key',
-      },
-    })
-
-    await plugin.install!(ctx)
-
-    // Plugin should read legacyConfig and migrate to new settings format
-    expect(ctx.settingsData.has('apiKey')).toBe(true)
-  })
 })
 ```
 

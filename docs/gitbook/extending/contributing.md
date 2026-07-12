@@ -86,11 +86,11 @@ it('calls _processQueue internally', () => { ... })
 
 ### Mock at Boundaries
 
-Mock `AgentInstance`, `ChannelAdapter`, and `SessionStore` — not internal classes. Use `vi.fn()` for mocks. For event-driven mocks, use `TypedEmitter` from `openacp`:
+Mock `AgentInstance`, `ChannelAdapter`, and `SessionStore` — not internal classes. Use `vi.fn()` for mocks. For event-driven mocks, import the public CLI types actually exported by this repository:
 
 ```typescript
-import { TypedEmitter } from 'openacp'
-import type { AgentEvent } from 'openacp'
+import { TypedEmitter } from '@n1creator/openacp-cli'
+import type { AgentEvent } from '@n1creator/openacp-cli'
 
 function mockAgentInstance() {
   const emitter = new TypedEmitter<{ agent_event: (event: AgentEvent) => void }>()
@@ -157,10 +157,10 @@ afterEach(async () => {
 
 ## PR Process
 
-1. **Branch from `develop`**, not `main`:
+1. **Branch from `main`**:
    ```bash
-   git checkout develop
-   git pull upstream develop
+   git checkout main
+   git pull --ff-only origin main
    git checkout -b feat/my-feature
    ```
 
@@ -171,7 +171,7 @@ afterEach(async () => {
    pnpm build && pnpm test
    ```
 
-4. **Open a PR against `develop`**. In your PR description:
+4. **Open a PR against `main`**. In your PR description:
    - Explain what the change does and why.
    - List any breaking changes.
    - Note any backward compatibility considerations (see the `CLAUDE.md` backward-compat section for the full policy).
@@ -180,9 +180,11 @@ afterEach(async () => {
 
 ---
 
-## Publishing a Plugin to the Registry
+## Publishing a Plugin
 
-Built a plugin? Share it with the community by adding it to the [OpenACP Plugin Registry](https://github.com/Open-ACP/plugin-registry).
+Publish community plugins to npm under a package name you control. Users can
+install a published package by its complete npm name; no separate registry
+submission is currently available for this maintained fork.
 
 ### Step 1: Publish to npm
 
@@ -192,57 +194,20 @@ npm run build
 npm publish --access=public
 ```
 
-### Step 2: Create a registry entry
+### Step 2: Verify installation
 
-Fork [Open-ACP/plugin-registry](https://github.com/Open-ACP/plugin-registry) and create a JSON file in `plugins/`:
+Test the exact public package name from a clean environment:
 
-**Filename:** your npm package name with `@` removed and `/` replaced by `--`.
-- `@yourname/openacp-translator` → `yourname--openacp-translator.json`
-- `openacp-plugin-tts` → `openacp-plugin-tts.json`
-
-**Content:**
-
-```json
-{
-  "name": "my-plugin",
-  "displayName": "My Awesome Plugin",
-  "description": "What your plugin does in one line",
-  "npm": "@yourname/openacp-my-plugin",
-  "repository": "https://github.com/yourname/openacp-my-plugin",
-  "author": {
-    "name": "yourname",
-    "github": "yourname"
-  },
-  "version": "1.0.0",
-  "minCliVersion": "2026.0326.0",
-  "category": "utility",
-  "tags": ["keyword1", "keyword2"],
-  "icon": "🔧",
-  "license": "MIT",
-  "verified": false,
-  "featured": false,
-  "createdAt": "2026-03-27T00:00:00Z"
-}
+```bash
+openacp plugin install @yourname/openacp-my-plugin
 ```
 
-**Categories:** `adapter`, `utility`, `integration`, `ai`, `security`, `media`
+Document the package name, supported OpenACP version, permissions, settings,
+and uninstall behavior in the plugin repository.
 
-### Step 3: Submit a Pull Request
+### Package requirements
 
-Submit your PR to the registry repo. CI will automatically:
-1. Validate your JSON format
-2. Verify your npm package exists
-3. Auto-merge if everything passes
-
-### After submission
-
-- Your plugin appears in `openacp plugin search` within minutes
-- A daily CI job keeps the version synced with npm — no need to update manually
-- Maintainers may review your plugin and mark it as **verified** (✓)
-
-### Requirements
-
-- Plugin **must be published on npm** before submitting
+- Plugin **must be published on npm** before users install it
 - Plugin **must export a valid `OpenACPPlugin` interface**
 - Plugin **must have a README** with installation instructions
 - Plugin **must specify a license**

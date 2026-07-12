@@ -1,5 +1,9 @@
 # Security
 
+For an unpatched vulnerability, follow the repository [Security
+Policy](../../../SECURITY.md) and use GitHub Private Vulnerability Reporting.
+Never include secrets or exploit details in a public issue or pull request.
+
 ## User Allowlist
 
 By default, any user who can send messages to your bot can create sessions. To restrict access to a specific set of users, populate `security.allowedUserIds` in your config:

@@ -39,8 +39,13 @@ an individual is officially representing the community in public spaces.
 
 ## Enforcement
 
-Instances of unacceptable behavior may be reported to the community leaders
-responsible for enforcement at **conduct@openacp.ai** <!-- TODO: @0xmrpeter — please replace with your preferred private email for CoC enforcement -->.
+Instances of unacceptable behavior should be reported privately to the
+repository owner through [`@n1creator` on Telegram](https://t.me/n1creator).
+Do not include sensitive incident details in a public issue, discussion, or
+pull request.
+
+This conduct channel is not for security vulnerabilities. Report security
+issues through the private process in [SECURITY.md](SECURITY.md).
 
 All complaints will be reviewed and investigated promptly and fairly. All
 community leaders are obligated to respect the privacy and security of the

@@ -72,21 +72,6 @@ describe('createTestInstallContext', () => {
     expect(await ctx.settings.getAll()).toEqual({})
   })
 
-  it('passes legacyConfig', () => {
-    const legacy = { botToken: 'old-token', chatId: '123' }
-    const ctx = createTestInstallContext({
-      pluginName: 'test-plugin',
-      legacyConfig: legacy,
-    })
-
-    expect(ctx.legacyConfig).toBe(legacy)
-  })
-
-  it('legacyConfig is undefined when not provided', () => {
-    const ctx = createTestInstallContext({ pluginName: 'test-plugin' })
-    expect(ctx.legacyConfig).toBeUndefined()
-  })
-
   it('tracks terminal calls', async () => {
     const ctx = createTestInstallContext({
       pluginName: 'test-plugin',

@@ -29,8 +29,8 @@ body:
       description: Where is the documentation that needs updating?
       options:
         - README.md
-        - GitBook docs (openacp.gitbook.io)
-        - Contributing guide (GitBook)
+        - Repository docs (docs/gitbook)
+        - Contributing guide
         - CLI help text
         - Code comments / JSDoc
         - Other
@@ -42,7 +42,7 @@ body:
     attributes:
       label: Page URL or File Path
       description: Link to the specific page or file (if applicable)
-      placeholder: "e.g. https://openacp.gitbook.io/docs/getting-started"
+      placeholder: "e.g. docs/gitbook/getting-started/quick-start.md"
 
   - type: textarea
     id: description

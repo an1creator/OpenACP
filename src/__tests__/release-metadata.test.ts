@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 describe('release metadata', () => {
-  const version = '2026.712.11'
+  const version = '2026.712.12'
 
   it('keeps package, SDK peer floor, and changelog on the exact release', () => {
     const cli = JSON.parse(fs.readFileSync('package.json', 'utf8'))

@@ -334,9 +334,9 @@ interface InstallContext {
   pluginName: string
   terminal: TerminalIO        // interactive I/O (text, select, confirm, password)
   settings: SettingsAPI       // read/write plugin settings
-  legacyConfig?: Record<string, unknown>  // old config.json data for migration
   dataDir: string             // ~/.openacp/plugins/@scope/name/data/
   log: Logger
+  instanceRoot?: string       // current OpenACP instance root
 }
 ```
 

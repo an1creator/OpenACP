@@ -43,6 +43,9 @@
 - Keep the plugin SDK scoped-fetch body contract honest: portable text/form/blob
   bodies are supported, while Web stream request bodies are rejected instead of
   being silently serialized as `[object ReadableStream]`.
+- Gate Node's `--use-env-proxy` child option on runtime support so Node 20 ACP
+  processes retain HTTP(S) proxy variables without failing at startup, and move
+  CI actions to maintained Node 24-runtime majors without weakening the matrix.
 - Publish npm packages through supported OIDC-only `npm publish` operations in
   dependency order (CLI before its peer-dependent plugin SDK); remove unsupported
   automated dist-tag mutation and fail safely on non-latest immutable versions.

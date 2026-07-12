@@ -141,7 +141,11 @@ export class ProxyService {
   private policyGeneration = 0
   private readonly maxTransports = 128
 
-  constructor(instanceRoot: string, private readonly retiredLeaseTimeoutMs = 5 * 60_000) {
+  constructor(
+    instanceRoot: string,
+    private readonly retiredLeaseTimeoutMs = 5 * 60_000,
+    private readonly allowedNodeEnvironmentFlags: ReadonlySet<string> = process.allowedNodeEnvironmentFlags,
+  ) {
     this.store = new ProxyStore(instanceRoot)
     try {
       const config = this.store.load()
@@ -505,7 +509,10 @@ export class ProxyService {
       env.HTTP_PROXY = env.http_proxy = url
       env.HTTPS_PROXY = env.https_proxy = url
       env.NODE_USE_ENV_PROXY = '1'
-      if (process.allowedNodeEnvironmentFlags.has('--use-env-proxy')) {
+      // Node 20 rejects --use-env-proxy in NODE_OPTIONS. Gate on the target
+      // runtime capability so HTTP(S)_PROXY still reaches non-Node clients and
+      // older Node agents without making their process fail during startup.
+      if (this.allowedNodeEnvironmentFlags.has('--use-env-proxy')) {
         env.NODE_OPTIONS = [env.NODE_OPTIONS, '--use-env-proxy'].filter(Boolean).join(' ')
       }
     } else {

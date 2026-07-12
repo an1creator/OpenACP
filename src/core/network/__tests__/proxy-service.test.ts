@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fetchMock = vi.hoisted(() => vi.fn(async () => ({ ok: true, status: 200 })))
@@ -65,6 +66,7 @@ describe('ProxyService', () => {
   })
 
   it('injects standards-based HTTP child env without exposing credentials in status', async () => {
+    service = new ProxyService(root, undefined, new Set(['--use-env-proxy']))
     service.saveProfile({ id: 'usa', protocol: 'https', host: 'proxy.test', port: 8443, username: 'alice', password: 'topsecret' })
     await service.setRoute('agents.codex', 'profile:usa')
     const env = service.buildAgentEnv('codex', { PATH: '/bin' })
@@ -75,6 +77,40 @@ describe('ProxyService', () => {
     expect(serialized).not.toContain('topsecret')
     expect(serialized).not.toContain('alice:topsecret')
     expect(serialized).toContain('"hasCredentials":true')
+  })
+
+  it.each([
+    { runtime: 'Node 20', flags: new Set<string>(), expectsNodeOption: false },
+    { runtime: 'Node 24', flags: new Set(['--use-env-proxy']), expectsNodeOption: true },
+  ])('builds safe HTTP proxy child env for $runtime capability', async ({ flags, expectsNodeOption }) => {
+    service = new ProxyService(root, undefined, flags)
+    service.saveProfile({ id: 'compat', protocol: 'http', host: 'proxy.test', port: 8080 })
+    await service.setRoute('agents.codex', 'profile:compat')
+    const env = service.buildAgentEnv('codex', { PATH: process.env.PATH ?? '', NODE_OPTIONS: '--trace-warnings' })
+
+    expect(env.HTTP_PROXY).toBe('http://proxy.test:8080/')
+    expect(env.HTTPS_PROXY).toBe(env.HTTP_PROXY)
+    expect(env.NODE_USE_ENV_PROXY).toBe('1')
+    expect(env.NODE_OPTIONS).toContain('--trace-warnings')
+    expect(env.NODE_OPTIONS?.includes('--use-env-proxy')).toBe(expectsNodeOption)
+
+    if (!expectsNodeOption) {
+      const child = spawnSync(process.execPath, ['-e', 'process.exit(0)'], {
+        env: { ...process.env, ...env },
+      })
+      expect(child.status).toBe(0)
+      expect(child.stderr.toString()).toBe('')
+    }
+  })
+
+  it('uses the current Node runtime capability by default', async () => {
+    service.saveProfile({ id: 'runtime', protocol: 'http', host: 'proxy.test', port: 8080 })
+    await service.setRoute('agents.codex', 'profile:runtime')
+    const env = service.buildAgentEnv('codex', {})
+    expect(env.HTTP_PROXY).toBe('http://proxy.test:8080/')
+    expect(env.NODE_OPTIONS?.includes('--use-env-proxy') ?? false).toBe(
+      process.allowedNodeEnvironmentFlags.has('--use-env-proxy'),
+    )
   })
 
   it.each(['http', 'https', 'socks5', 'socks5h'] as const)('builds a real proxy-agent transport for %s', async (protocol) => {

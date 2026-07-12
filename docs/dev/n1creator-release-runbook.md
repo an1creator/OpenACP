@@ -53,9 +53,10 @@ provenance for the release.
 Push the verified commit to `main`, then create and push the matching tag:
 
 ```bash
-git tag v2026.712.1
+VERSION=2026.712.2
+git tag "v${VERSION}"
 git push origin main
-git push origin v2026.712.1
+git push origin "v${VERSION}"
 ```
 
 Confirm both packages have the expected version and provenance, then test a

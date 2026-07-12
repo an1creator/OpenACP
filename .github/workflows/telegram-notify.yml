@@ -29,6 +29,11 @@ jobs:
           COMPARE_URL: ${{ github.event.compare }}
           REPO: ${{ github.repository }}
         run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$TELEGRAM_TOPIC_ID" ]; then
+            echo "Telegram notification secrets are not configured; skipping."
+            exit 0
+          fi
+
           COMMITS=""
           COUNT=0
           for row in $(echo "$COMMITS_JSON" | jq -r '.[] | @base64'); do
@@ -71,6 +76,11 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref }}
           REPO: ${{ github.repository }}
         run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$TELEGRAM_TOPIC_ID" ]; then
+            echo "Telegram notification secrets are not configured; skipping."
+            exit 0
+          fi
+
           if [ "$ACTION" = "closed" ] && [ "$MERGED" = "true" ]; then
             EMOJI="✅"; STATUS="Merged"
           elif [ "$ACTION" = "closed" ]; then
@@ -106,6 +116,11 @@ jobs:
           REPO: ${{ github.repository }}
           AUTHOR: ${{ github.event.release.author.login }}
         run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$TELEGRAM_TOPIC_ID" ]; then
+            echo "Telegram notification secrets are not configured; skipping."
+            exit 0
+          fi
+
           TEXT="🚀 <b>New Release: ${TAG}</b>
           <b>${REPO}</b> — published by <a href=\"https://github.com/${AUTHOR}\"><b>${AUTHOR}</b></a>
 
@@ -132,6 +147,11 @@ jobs:
           REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$TELEGRAM_TOPIC_ID" ]; then
+            echo "Telegram notification secrets are not configured; skipping."
+            exit 0
+          fi
+
           SHORT_SHA=$(echo "$COMMIT_SHA" | cut -c1-7)
 
           TEXT="🔴 <b>CI Failed: ${WORKFLOW}</b>

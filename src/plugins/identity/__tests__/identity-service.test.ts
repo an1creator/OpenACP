@@ -143,10 +143,8 @@ describe('IdentityServiceImpl', () => {
     it('bumps updatedAt', async () => {
       const { user } = await service.createUserWithIdentity({ displayName: 'Alice', source: 'telegram', platformId: '1' })
       const before = user.updatedAt
-      // Tiny delay to ensure timestamp differs
-      await new Promise((r) => setTimeout(r, 1))
       const updated = await service.updateUser(user.userId, { displayName: 'Alicia' })
-      expect(updated.updatedAt).not.toBe(before)
+      expect(Date.parse(updated.updatedAt)).toBeGreaterThan(Date.parse(before))
     })
 
     it('throws for unknown userId', async () => {

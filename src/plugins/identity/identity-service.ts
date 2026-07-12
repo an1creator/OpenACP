@@ -10,6 +10,12 @@ import type {
   SessionInfo,
 } from './types.js'
 
+function nextIsoTimestamp(previous: string): string {
+  const now = Date.now()
+  const previousTime = Date.parse(previous)
+  return new Date(Number.isNaN(previousTime) ? now : Math.max(now, previousTime + 1)).toISOString()
+}
+
 /**
  * Core implementation of the identity service.
  *
@@ -182,7 +188,7 @@ export class IdentityServiceImpl implements IdentityService {
     const updated: UserRecord = {
       ...user,
       ...changes,
-      updatedAt: new Date().toISOString(),
+      updatedAt: nextIsoTimestamp(user.updatedAt),
     }
     await this.store.putUser(updated)
     this.emitEvent('identity:updated', { userId, changes: Object.keys(changes) })

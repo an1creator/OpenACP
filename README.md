@@ -1,10 +1,10 @@
-OpenACP — self-hosted bridge that connects 28+ AI coding agents (Claude Code, Codex, Gemini, Cursor) to Telegram, Discord & Slack. Your machine, your keys, your data.
+OpenACP — self-hosted bridge that connects 28+ AI coding agents (Claude Code, Codex, Gemini, Cursor) to chat, REST, and SSE, with native bridge-agnostic speech-to-text. Your machine, your keys, your data.
 
 <div align="center">
 
 # OpenACP
 
-**Control AI coding agents from Telegram, Discord & Slack**
+**Control AI coding agents from Telegram, Discord & Slack — or automate them through REST and SSE**
 
 Send a message. The agent writes code. You see everything — in real time.
 
@@ -25,18 +25,20 @@ Send a message. The agent writes code. You see everything — in real time.
 > **N1 Creator distribution.** This repository publishes the maintained fork as
 > `@n1creator/openacp-cli` and `@n1creator/openacp-plugin-sdk`. Existing OpenACP
 > workspaces remain compatible; migrate by replacing the global CLI package and
-> restarting the same instance.
+> restarting the same instance. The maintained CLI includes native local
+> faster-whisper STT and keeps the speech pipeline independent from any one
+> messaging adapter.
 
 ## What is OpenACP?
 
-OpenACP is a self-hosted bridge that connects AI coding agents to your messaging platforms. You chat with an AI agent through Telegram, Discord, or Slack — it reads your codebase, writes code, runs commands, and streams results back to you in real time.
+OpenACP is a self-hosted bridge that connects AI coding agents to messaging and automation channels. Chat through Telegram, Discord, or Slack, or send prompts and attachments through REST/SSE — the agent reads your codebase, writes code, runs commands, and streams results back in real time.
 
 Built on the open [Agent Client Protocol (ACP)](https://agentclientprotocol.org/). Your machine, your keys, your data.
 
 ```
-You (Telegram / Discord / Slack)
+You (Telegram / Discord / Slack / REST / SSE)
   ↓
-OpenACP (bridge + session manager)
+OpenACP (bridge + session manager + speech service)
   ↓
 AI Agent (Claude Code, Codex, Gemini, Cursor, ...)
   ↓
@@ -59,6 +61,7 @@ Your Codebase
 - **Team visibility** — Share a Discord channel where everyone sees what the AI agent is doing in real time — no more black-box coding sessions.
 - **Multi-agent workflows** — Start with Claude Code for planning, switch to Codex for implementation, use Gemini for review — all in one chat thread, no reconfiguration.
 - **CI/CD integration** — Trigger agent sessions from GitHub Actions or any issue tracker via the REST API.
+- **Voice-driven workflows** — Send audio from any compatible bridge; OpenACP transcribes it locally before the agent receives the prompt.
 - **Self-hosted AI gateway** — Keep API keys and code on your own infrastructure. No third-party cloud, no vendor lock-in.
 - **Local LLM support** — Run agents against self-hosted models (Ollama, LM Studio) via ACP-compatible adapters. Your models, your data.
 
@@ -145,13 +148,14 @@ That's it. Send a message to your bot and start coding.
 
 ## Features
 
-### Messaging Platforms
+### Channels and Bridges
 
 | Platform | Status | Highlights |
 |----------|--------|------------|
 | **Telegram** | Stable | Forum topics per session, streaming, permission buttons, voice |
 | **Discord** | Stable | Thread-based sessions, slash commands, button interactions |
 | **Slack** | Stable | Socket Mode, channel-based sessions, thread organization |
+| **REST API / SSE** | Stable | Session automation, base64 file/audio attachments, streamed events |
 
 ### Core
 
@@ -161,6 +165,8 @@ That's it. Send a message to your bot and start coding.
 - **Permission control** — Approve or deny agent actions via buttons, with optional auto-approve
 - **Real-time streaming** — See agent thinking, tool calls, and output as they happen
 - **Agent switching** — Switch agents mid-conversation with `/switch`; history carries over automatically
+- **Dynamic model options** — Model, mode, and reasoning choices come from each ACP agent at runtime instead of a hard-coded model list
+- **Agent-aware audio routing** — Pass audio directly to agents that support it; otherwise transcribe it through the shared STT service
 
 ### Developer Tools
 
@@ -168,14 +174,44 @@ That's it. Send a message to your bot and start coding.
 - **Built-in file viewer** — Monaco Editor with syntax highlighting, diffs, and markdown preview
 - **Session transfer** — Move sessions between terminal and chat (`/handoff`)
 - **Agent switch** — Change which AI agent handles your session mid-conversation (`/switch`)
-- **Voice & speech** — Native local faster-whisper or Groq STT, plus optional Edge TTS
+- **Voice & speech** — Bundled local faster-whisper or Groq STT for every compatible bridge, plus optional Edge TTS
 - **Usage tracking** — Token counts, cost reports, optional monthly budget limits
 - **Context resume** — Resume sessions with full conversation history
+
+### Native Speech-to-Text Across Bridges
+
+The maintained package includes the `local-whisper` provider in the built-in
+`@openacp/speech` service. STT runs in the shared session pipeline rather than
+inside Telegram, so the same behavior applies to Telegram voice messages,
+REST/SSE audio attachments, and external adapters that submit a standard
+attachment with `type: "audio"`.
+
+```text
+audio attachment from any compatible bridge
+  → agent supports native audio? send audio directly
+  → otherwise: local faster-whisper or Groq STT
+  → append transcript to the prompt and call the agent
+```
+
+- **Private local mode** — `local-whisper` runs on the OpenACP host with no API key.
+- **Bundled runtime** — The CLI ships the transcription script and reuses the model/venv cache at `~/.cache/codex/transcribe-voice`.
+- **Pluggable providers** — Select local Whisper or Groq, or register another STT provider through the plugin SDK.
+- **Safe fallback** — If transcription fails, OpenACP keeps the original audio attachment instead of discarding it.
+- **Audio-aware agents** — Agents advertising native audio capability receive the original attachment without unnecessary transcription.
+
+Local Whisper needs Python 3 plus `uv` or `python3-venv`; its environment and
+selected model are prepared on the first transcription. Configure it through
+`/settings`, the plugin settings API, or `openacp config`. See
+[Voice and Speech](docs/gitbook/using-openacp/voice-and-speech.md) for settings,
+formats, providers, and troubleshooting.
 
 ### Operations
 
 - **Daemon mode** — Run as a background service with auto-start on boot
 - **CLI API** — Full REST API for automation (`openacp api ...`)
+- **Fast first session** — A liveness-checked warm pool keeps the default agent ready, avoiding a full subprocess spawn on the first API session
+- **Consistent health reporting** — `/api/health` merges persisted and live-only sessions so active and total counts describe the same population
+- **Secret-safe agent inspection** — Agent list, reload, and detail API responses redact environment values while preserving variable names
 - **Plugin system** — Install adapters as npm packages
 - **Doctor diagnostics** — `openacp doctor` checks everything and suggests fixes
 - **Structured logging** — Pino with rotation, per-session log files
@@ -224,7 +260,11 @@ openacp doctor                     # System diagnostics
 # Sessions & API (requires running daemon)
 openacp api new [agent] [workspace]
 openacp api status
+openacp api health
 openacp api cancel <id>
+
+# Updates
+openacp update                    # Install the latest maintained npm release
 
 # Tunnels
 openacp tunnel add <port> [--label name]
@@ -272,6 +312,9 @@ Set a monthly budget limit in your config. OpenACP tracks token usage and cost i
 ### Can I use a local or self-hosted LLM?
 Yes, if the model has a compatible agent CLI. Any agent that implements the ACP protocol can be registered. Community adapters exist for Ollama and LM Studio — run `openacp agents` to browse available options.
 
+### Does speech input only work in Telegram?
+No. STT is part of the shared session pipeline. Telegram already converts voice and audio messages into standard audio attachments, while the REST API and SSE bridge accept base64 audio attachments. Any external adapter gets the same behavior when it submits an attachment with `type: "audio"`. If the selected agent supports native audio, OpenACP passes the audio through; otherwise it transcribes it with the configured STT provider.
+
 ### What happens if the agent gets stuck or the chat hangs?
 Use `/cancel` in your chat to stop the current session. Run `openacp doctor` to check for connectivity or configuration issues. OpenACP's session persistence means you can resume with full context intact after a restart.
 
@@ -288,6 +331,10 @@ Yes. OpenACP is MIT-licensed and free to self-host. You only pay for the AI prov
 ```bash
 openacp update
 ```
+
+On Telegram, administrators can also run `/update`; OpenACP waits for npm to
+finish and then requests a managed daemon restart. Do not run a second npm
+install or stop the service while that update is in progress.
 
 To migrate from the upstream npm package:
 

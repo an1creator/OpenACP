@@ -60,7 +60,8 @@ const publishPkg = {
   version: rootPkg.version,
   description: 'Self-hosted bridge for AI coding agents via ACP protocol',
   type: 'module',
-  bin: { openacp: './dist/cli.js' },
+  // npm 11 rejects a leading "./" in bin targets and removes the command.
+  bin: { openacp: 'dist/cli.js' },
   main: './dist/index.js',
   types: './dist/index.d.ts',
   exports: {
@@ -74,7 +75,7 @@ const publishPkg = {
   dependencies: publishDeps,
   repository: {
     type: 'git',
-    url: 'https://github.com/an1creator/OpenACP',
+    url: 'git+https://github.com/an1creator/OpenACP.git',
   },
   homepage: 'https://github.com/an1creator/OpenACP',
   author: {

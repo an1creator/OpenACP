@@ -4,8 +4,14 @@ OpenACP supports two speech features: speech-to-text (STT) for voice input and t
 
 ## Speech-to-text (STT)
 
-**Provider:** Groq (uses the Whisper large v3 turbo model)
-**Cost:** Free tier available at [console.groq.com](https://console.groq.com) — 28,800 seconds of audio per day
+OpenACP ships with two native STT providers:
+
+| Provider | Requirements | Notes |
+|---|---|---|
+| `local-whisper` | Python 3 plus `uv` or `python3-venv` | Runs locally with `faster-whisper`; no API key |
+| `groq` | Groq API key | Hosted Whisper API |
+
+`local-whisper` is the recommended private/offline option. On its first transcription, OpenACP creates a virtual environment, installs `faster-whisper`, and downloads the selected model. Later requests reuse the environment and model cache. The maintained package also reuses the former wrapper cache at `~/.cache/codex/transcribe-voice`, so upgrading does not redownload an existing model.
 
 When STT is configured, you can send voice messages to a session topic and OpenACP transcribes them before passing the text to the agent. The transcribed text appears in the topic as a system message:
 
@@ -19,28 +25,28 @@ The agent then receives the transcription as a normal text prompt. If the agent 
 
 ### Configuring STT
 
-Add your Groq API key to the config (see [Configuration](../self-hosting/configuration.md) for the full `speech` config reference):
+Use `/settings` in Telegram or the plugin settings API and select `local-whisper`. The equivalent persisted settings for the built-in `@openacp/speech` plugin are:
 
 ```json
 {
-  "speech": {
-    "stt": {
-      "provider": "groq",
-      "providers": {
-        "groq": {
-          "apiKey": "gsk_..."
-        }
-      }
-    }
-  }
+  "sttProvider": "local-whisper",
+  "localWhisperLanguage": "ru",
+  "localWhisperModel": "base",
+  "localWhisperBeamSize": 5,
+  "localWhisperVadFilter": false,
+  "localWhisperDevice": "cpu",
+  "localWhisperComputeType": "int8",
+  "localWhisperTimeoutMs": 120000
 }
 ```
 
-Or use `/settings` in Telegram — tap the STT provider field and the assistant will walk you through entering an API key.
+For Groq, select `groq` and set `groqApiKey`. The older behavior remains compatible: when a Groq key exists and `sttProvider` is unset, OpenACP activates Groq automatically.
+
+Advanced installations can set `localWhisperScriptPath` to a custom executable. Leave it unset to use the runtime bundled in `@n1creator/openacp-cli`.
 
 ### STT error handling
 
-If transcription fails (network issue, rate limit, invalid key), the audio attachment is kept and passed to the agent as-is, with an error message in the topic. The Groq free tier limit is 28,800 seconds per day; if exceeded, transcription fails gracefully.
+If transcription fails, the audio attachment is kept and passed to the agent as-is, with an error message in the topic. For local STT, check that Python can create virtual environments and that the first-run dependency/model download has network access. For Groq, check the API key, rate limit, and network access.
 
 ## Text-to-speech (TTS)
 
@@ -117,7 +123,7 @@ Set `provider` to `null` to disable TTS entirely.
 STT and TTS work independently. You can use either or both at the same time. A typical voice workflow:
 
 1. Send a voice message in a session topic
-2. OpenACP transcribes it via Groq STT
+2. OpenACP transcribes it via local Whisper or Groq STT
 3. The transcription appears as "You said: ..."
 4. The agent processes the text and responds
 5. If TTS is on, the response summary is synthesized and sent as audio

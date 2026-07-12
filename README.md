@@ -168,7 +168,7 @@ That's it. Send a message to your bot and start coding.
 - **Built-in file viewer** — Monaco Editor with syntax highlighting, diffs, and markdown preview
 - **Session transfer** — Move sessions between terminal and chat (`/handoff`)
 - **Agent switch** — Change which AI agent handles your session mid-conversation (`/switch`)
-- **Voice & speech** — Send voice messages, get spoken responses (Groq STT + Edge TTS)
+- **Voice & speech** — Native local faster-whisper or Groq STT, plus optional Edge TTS
 - **Usage tracking** — Token counts, cost reports, optional monthly budget limits
 - **Context resume** — Resume sessions with full conversation history
 

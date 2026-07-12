@@ -130,7 +130,7 @@ Text-to-speech and speech-to-text with pluggable providers.
 - **Optional dependencies**: none
 - **Permissions**: `services:register`, `services:use`, `commands:register`
 
-**What it does**: Provides TTS (text-to-speech) and STT (speech-to-text) capabilities. Ships with two built-in providers: Edge TTS and Groq STT. Community plugins can add more providers via `registerTTSProvider()` / `registerSTTProvider()`.
+**What it does**: Provides TTS (text-to-speech) and STT (speech-to-text) capabilities. It ships with native local faster-whisper and Groq STT providers. Edge TTS is installed as the optional `@openacp/msedge-tts-plugin`. Community plugins can add more providers via `registerTTSProvider()` / `registerSTTProvider()`.
 
 **Service interface**:
 
@@ -147,7 +147,7 @@ interface SpeechServiceInterface {
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `stt.provider` | string | STT provider name (default: `'groq'`) |
+| `stt.provider` | string | STT provider name (`'local-whisper'` or `'groq'`) |
 | `tts.provider` | string | TTS provider name (default: `'edge-tts'`) |
 
 **Commands**: `/tts on|off` -- toggle text-to-speech for the current session.

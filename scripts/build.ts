@@ -1,4 +1,4 @@
-import { mkdir, copyFile } from 'node:fs/promises'
+import { chmod, mkdir, copyFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
@@ -29,3 +29,8 @@ await copyFile(
   join(root, 'src', 'data', 'registry-snapshot.json'),
   join(root, 'dist', 'data', 'registry-snapshot.json'),
 )
+const speechScriptsDir = join(root, 'dist', 'plugins', 'speech', 'scripts')
+const speechScript = join(speechScriptsDir, 'transcribe_audio.sh')
+await mkdir(speechScriptsDir, { recursive: true })
+await copyFile(join(root, 'src', 'plugins', 'speech', 'scripts', 'transcribe_audio.sh'), speechScript)
+await chmod(speechScript, 0o755)

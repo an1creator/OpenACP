@@ -30,6 +30,7 @@ import { MiddlewareChain } from "./plugin/middleware-chain.js";
 import { ErrorTracker } from "./plugin/error-tracker.js";
 import { createChildLogger } from "./utils/log.js";
 import type { SpeechService } from "../plugins/speech/exports.js";
+import { buildSpeechServiceConfig } from "../plugins/speech/native-stt.js";
 import type { ContextManager } from "../plugins/context/context-manager.js";
 import type { InstanceContext } from "./instance/instance-context.js";
 import { Hook, BusEvent, SessionEv } from "./events.js";
@@ -213,21 +214,7 @@ export class OpenACPCore {
             const settingsMgr = this.settingsManager;
             if (settingsMgr) {
               const pluginCfg = await settingsMgr.loadSettings('@openacp/speech');
-              const groqApiKey = pluginCfg.groqApiKey as string | undefined;
-              const sttProviders: Record<string, { apiKey: string }> = {};
-              if (groqApiKey) {
-                sttProviders.groq = { apiKey: groqApiKey };
-              }
-              const newSpeechConfig = {
-                stt: {
-                  provider: groqApiKey ? 'groq' : null,
-                  providers: sttProviders,
-                },
-                tts: {
-                  provider: (pluginCfg.ttsProvider as string) ?? null,
-                  providers: {} as Record<string, never>,
-                },
-              };
+              const newSpeechConfig = buildSpeechServiceConfig(pluginCfg);
               speechSvc.refreshProviders(newSpeechConfig);
               log.info("Speech service config updated at runtime (from plugin settings)");
             }

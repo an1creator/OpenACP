@@ -42,4 +42,20 @@ describe("speech plugin setup()", () => {
 
     expect(getService()!.isSTTAvailable()).toBe(false);
   });
+
+  it("enables native local Whisper without an API key", async () => {
+    const { ctx, getService } = makePluginCtx({
+      pluginConfig: { sttProvider: "local-whisper", localWhisperModel: "base" },
+    });
+
+    await speechPlugin.setup!(ctx);
+
+    expect(getService()!.isSTTAvailable()).toBe(true);
+    expect(ctx.registerEditableFields).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'sttProvider', options: ['local-whisper', 'groq'] }),
+        expect.objectContaining({ key: 'localWhisperModel', hotReload: true }),
+      ]),
+    );
+  });
 });

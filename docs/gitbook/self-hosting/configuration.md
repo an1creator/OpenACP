@@ -215,9 +215,9 @@ Usage tracking. When `monthlyBudget` is set and usage reaches `warningThreshold`
 ```json
 "speech": {
   "stt": {
-    "provider": null,
+    "provider": "local-whisper",
     "providers": {
-      "groq": { "apiKey": "gsk_..." }
+      "local-whisper": { "apiKey": "local", "model": "base", "language": "ru" }
     }
   },
   "tts": {
@@ -227,7 +227,7 @@ Usage tracking. When `monthlyBudget` is set and usage reaches `warningThreshold`
 }
 ```
 
-Speech-to-text and text-to-speech configuration. Set `provider` to the key of a configured entry in `providers` to enable. `null` disables speech for that direction.
+Speech-to-text and text-to-speech service configuration. In current installations, edit these values through the built-in `@openacp/speech` plugin settings (`/settings` or the settings API). Native `local-whisper` requires no real API key; the internal `"local"` marker only enables the provider. `null` disables speech for that direction.
 
 ### `sessionStore`
 
@@ -268,6 +268,14 @@ The following environment variables override their corresponding config fields a
 | `OPENACP_TUNNEL_PROVIDER` | `tunnel.provider` |
 | `OPENACP_SPEECH_STT_PROVIDER` | `speech.stt.provider` |
 | `OPENACP_SPEECH_GROQ_API_KEY` | `speech.stt.providers.groq.apiKey` |
+| `OPENACP_SPEECH_LOCAL_WHISPER_LANGUAGE` | `@openacp/speech.localWhisperLanguage` |
+| `OPENACP_SPEECH_LOCAL_WHISPER_MODEL` | `@openacp/speech.localWhisperModel` |
+| `OPENACP_SPEECH_LOCAL_WHISPER_BEAM_SIZE` | `@openacp/speech.localWhisperBeamSize` |
+| `OPENACP_SPEECH_LOCAL_WHISPER_VAD_FILTER` | `@openacp/speech.localWhisperVadFilter` |
+| `OPENACP_SPEECH_LOCAL_WHISPER_DEVICE` | `@openacp/speech.localWhisperDevice` |
+| `OPENACP_SPEECH_LOCAL_WHISPER_COMPUTE_TYPE` | `@openacp/speech.localWhisperComputeType` |
+| `OPENACP_SPEECH_LOCAL_WHISPER_TIMEOUT_MS` | `@openacp/speech.localWhisperTimeoutMs` |
+| `OPENACP_SPEECH_LOCAL_WHISPER_SCRIPT_PATH` | `@openacp/speech.localWhisperScriptPath` |
 
 Environment variables are applied after the config file is read and before Zod validation. They take precedence over file values.
 

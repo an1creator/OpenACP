@@ -35,6 +35,14 @@ fs.mkdirSync(snapshotDataDir, { recursive: true })
 fs.copyFileSync(snapshotSrc, path.join(snapshotDataDir, 'registry-snapshot.json'))
 console.log('Copied registry-snapshot.json to dist-publish/dist/data/')
 
+// 3b. Copy the native local Whisper runtime next to the flat speech bundle.
+const speechDir = path.join(distDir, 'speech')
+const speechScript = path.join(speechDir, 'transcribe_audio.sh')
+fs.mkdirSync(speechDir, { recursive: true })
+fs.copyFileSync(path.join(root, 'src/plugins/speech/scripts/transcribe_audio.sh'), speechScript)
+fs.chmodSync(speechScript, 0o755)
+console.log('Copied native local Whisper runtime to dist-publish/dist/speech/')
+
 // 4. Add shebang to cli.js
 const cliPath = path.join(distDir, 'cli.js')
 const cliContent = fs.readFileSync(cliPath, 'utf-8')

@@ -305,6 +305,18 @@ describe('/tts command', () => {
       expect(service.isSTTAvailable()).toBe(false)
     })
 
+    it('configures native local Whisper without an API key', async () => {
+      const ctx = createTestContext({
+        pluginName: '@openacp/speech',
+        pluginConfig: { sttProvider: 'local-whisper', localWhisperLanguage: 'ru' },
+        permissions: speechPlugin.permissions,
+      })
+      await speechPlugin.setup(ctx as any)
+
+      const service = ctx.registeredServices.get('speech') as any
+      expect(service.isSTTAvailable()).toBe(true)
+    })
+
     it('reads ttsProvider from pluginConfig instead of hardcoding edge-tts', async () => {
       const ctx = createTestContext({
         pluginName: '@openacp/speech',

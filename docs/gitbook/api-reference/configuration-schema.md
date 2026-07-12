@@ -191,9 +191,11 @@ The workspace base directory is derived automatically from the instance root par
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `speech.stt.provider` | string \| null | `null` | Active STT provider name (e.g. `"groq"`) |
+| `speech.stt.provider` | string \| null | `null` | Active STT provider name (`"local-whisper"` or `"groq"`) |
 | `speech.stt.providers.<name>.apiKey` | string | — | API key for the named provider |
 | `speech.stt.providers.<name>.model` | string | — | Model identifier for the named provider |
+
+The built-in speech plugin persists its editable settings under `@openacp/speech`. Native local STT fields are `localWhisperLanguage` (`ru`), `localWhisperModel` (`base`), `localWhisperBeamSize` (`5`), `localWhisperVadFilter` (`false`), `localWhisperDevice` (`cpu`), `localWhisperComputeType` (`int8`), `localWhisperTimeoutMs` (`120000`), and optional `localWhisperScriptPath`.
 
 ### speech.tts.*
 

@@ -2,8 +2,13 @@ import path from 'node:path'
 import type { OpenACPPlugin, InstallContext, PluginContext } from '../../core/plugin/types.js'
 import type { OpenACPCore } from '../../core/core.js'
 import type { Session } from '../../core/sessions/session.js'
-import { SpeechService, GroqSTT } from './exports.js'
-import type { SpeechServiceConfig } from './exports.js'
+import { SpeechService } from './exports.js'
+import {
+  LOCAL_WHISPER_DEFAULTS,
+  LOCAL_WHISPER_PROVIDER,
+  buildSpeechServiceConfig,
+  createNativeSTTProviders,
+} from './native-stt.js'
 import { installNpmPlugin } from '../../core/plugin/plugin-installer.js'
 
 // TTS is provided by a separate optional plugin so the core speech plugin
@@ -32,11 +37,16 @@ const speechPlugin: OpenACPPlugin = {
 
     let sttProvider: string | null = null
     let groqApiKey = ''
+    let localWhisperLanguage: string = LOCAL_WHISPER_DEFAULTS.language
+    let localWhisperModel: string = LOCAL_WHISPER_DEFAULTS.model
 
     if (enableStt) {
       sttProvider = await terminal.select({
         message: 'STT provider:',
-        options: [{ value: 'groq', label: 'Groq (Whisper)', hint: 'Fast and affordable' }],
+        options: [
+          { value: LOCAL_WHISPER_PROVIDER, label: 'Local faster-whisper', hint: 'Private and offline after the first model download' },
+          { value: 'groq', label: 'Groq (Whisper)', hint: 'Hosted API, requires an API key' },
+        ],
       })
 
       if (sttProvider === 'groq') {
@@ -45,6 +55,15 @@ const speechPlugin: OpenACPPlugin = {
           validate: (v) => (!v.trim() ? 'API key cannot be empty' : undefined),
         })
         groqApiKey = groqApiKey.trim()
+      } else {
+        localWhisperLanguage = (await terminal.text({
+          message: 'Local Whisper language:',
+          defaultValue: LOCAL_WHISPER_DEFAULTS.language,
+        })).trim() || LOCAL_WHISPER_DEFAULTS.language
+        localWhisperModel = (await terminal.text({
+          message: 'Local Whisper model:',
+          defaultValue: LOCAL_WHISPER_DEFAULTS.model,
+        })).trim() || LOCAL_WHISPER_DEFAULTS.model
       }
     }
 
@@ -76,6 +95,13 @@ const speechPlugin: OpenACPPlugin = {
     await settings.setAll({
       sttProvider,
       groqApiKey,
+      localWhisperLanguage,
+      localWhisperModel,
+      localWhisperBeamSize: LOCAL_WHISPER_DEFAULTS.beamSize,
+      localWhisperVadFilter: LOCAL_WHISPER_DEFAULTS.vadFilter,
+      localWhisperDevice: LOCAL_WHISPER_DEFAULTS.device,
+      localWhisperComputeType: LOCAL_WHISPER_DEFAULTS.computeType,
+      localWhisperTimeoutMs: LOCAL_WHISPER_DEFAULTS.timeoutMs,
       ttsProvider: ttsProvider === 'none' ? null : ttsProvider,
       ttsVoice,
     })
@@ -96,13 +122,34 @@ const speechPlugin: OpenACPPlugin = {
     })
 
     if (choice === 'stt') {
-      const key = await terminal.text({
-        message: 'Groq API key (leave blank to disable STT):',
-        defaultValue: (current.groqApiKey as string) ?? '',
+      const provider = await terminal.select({
+        message: 'STT provider:',
+        options: [
+          { value: LOCAL_WHISPER_PROVIDER, label: 'Local faster-whisper', hint: 'Private and offline after the first model download' },
+          { value: 'groq', label: 'Groq (Whisper)', hint: 'Hosted API, requires an API key' },
+          { value: 'none', label: 'None (disable STT)' },
+        ],
       })
-      const trimmed = key.trim()
-      await settings.set('sttProvider', trimmed ? 'groq' : null)
-      await settings.set('groqApiKey', trimmed)
+      await settings.set('sttProvider', provider === 'none' ? null : provider)
+      if (provider === 'groq') {
+        const key = await terminal.text({
+          message: 'Groq API key:',
+          defaultValue: (current.groqApiKey as string) ?? '',
+          validate: (v) => (!v.trim() ? 'API key cannot be empty' : undefined),
+        })
+        await settings.set('groqApiKey', key.trim())
+      } else if (provider === LOCAL_WHISPER_PROVIDER) {
+        const language = await terminal.text({
+          message: 'Local Whisper language:',
+          defaultValue: (current.localWhisperLanguage as string) ?? LOCAL_WHISPER_DEFAULTS.language,
+        })
+        const model = await terminal.text({
+          message: 'Local Whisper model:',
+          defaultValue: (current.localWhisperModel as string) ?? LOCAL_WHISPER_DEFAULTS.model,
+        })
+        await settings.set('localWhisperLanguage', language.trim() || LOCAL_WHISPER_DEFAULTS.language)
+        await settings.set('localWhisperModel', model.trim() || LOCAL_WHISPER_DEFAULTS.model)
+      }
       terminal.log.success('STT settings updated')
     } else if (choice === 'tts') {
       const voice = await terminal.text({
@@ -123,46 +170,32 @@ const speechPlugin: OpenACPPlugin = {
 
   async setup(ctx) {
     ctx.registerEditableFields([
-      { key: 'sttProvider', displayName: 'Speech to Text', type: 'select', scope: 'safe', hotReload: true, options: ['groq'] },
-      { key: 'groqApiKey', displayName: 'STT API Key', type: 'string', scope: 'sensitive', hotReload: true },
+      { key: 'sttProvider', displayName: 'Speech to Text', type: 'select', scope: 'safe', hotReload: true, options: [LOCAL_WHISPER_PROVIDER, 'groq'] },
+      { key: 'groqApiKey', displayName: 'Groq STT API Key', type: 'string', scope: 'sensitive', hotReload: true },
+      { key: 'localWhisperLanguage', displayName: 'Local Whisper Language', type: 'string', scope: 'safe', hotReload: true },
+      { key: 'localWhisperModel', displayName: 'Local Whisper Model', type: 'string', scope: 'safe', hotReload: true },
+      { key: 'localWhisperBeamSize', displayName: 'Local Whisper Beam Size', type: 'number', scope: 'safe', hotReload: true },
+      { key: 'localWhisperVadFilter', displayName: 'Local Whisper VAD Filter', type: 'toggle', scope: 'safe', hotReload: true },
+      { key: 'localWhisperDevice', displayName: 'Local Whisper Device', type: 'select', scope: 'safe', hotReload: true, options: ['cpu', 'cuda', 'auto'] },
+      { key: 'localWhisperComputeType', displayName: 'Local Whisper Compute Type', type: 'string', scope: 'safe', hotReload: true },
+      { key: 'localWhisperTimeoutMs', displayName: 'Local Whisper Timeout (ms)', type: 'number', scope: 'safe', hotReload: true },
+      { key: 'localWhisperScriptPath', displayName: 'Local Whisper Script Path', type: 'string', scope: 'safe', hotReload: true },
       { key: 'ttsProvider', displayName: 'Text to Speech', type: 'select', scope: 'safe', hotReload: true, options: ['edge-tts'] },
     ])
 
     const pluginsDir = ctx.instanceRoot ? path.join(ctx.instanceRoot, 'plugins') : undefined
     const config = ctx.pluginConfig as Record<string, unknown>
-    const groqApiKey = config.groqApiKey as string | undefined
-
-    // STT provider is determined solely by whether an API key is present
-    const sttProvider = groqApiKey ? 'groq' : null
-    const speechConfig: SpeechServiceConfig = {
-      stt: {
-        provider: sttProvider,
-        providers: groqApiKey ? { groq: { apiKey: groqApiKey } } : {},
-      },
-      tts: {
-        provider: (config.ttsProvider as string) ?? 'edge-tts',
-        providers: {},
-      },
-    }
+    const speechConfig = buildSpeechServiceConfig(config)
 
     const service = new SpeechService(speechConfig)
-
-    if (groqApiKey) {
-      service.registerSTTProvider('groq', new GroqSTT(groqApiKey))
+    for (const [name, provider] of createNativeSTTProviders(speechConfig)) {
+      service.registerSTTProvider(name, provider)
     }
 
     // TTS provider is now registered by @openacp/msedge-tts-plugin (no EdgeTTS here)
 
     // Register provider factory for hot-reload (STT only — TTS providers are managed by external plugins)
-    service.setProviderFactory((cfg) => {
-      const sttMap = new Map()
-      const ttsMap = new Map()
-      const groqCfg = cfg.stt?.providers?.groq
-      if (groqCfg?.apiKey) {
-        sttMap.set('groq', new GroqSTT(groqCfg.apiKey, groqCfg.model))
-      }
-      return { stt: sttMap, tts: ttsMap }
-    })
+    service.setProviderFactory((cfg) => ({ stt: createNativeSTTProviders(cfg), tts: new Map() }))
 
     ctx.registerService('speech', service)
 

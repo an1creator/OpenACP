@@ -14,6 +14,10 @@ describe('applyEnvToPluginSettings', () => {
     for (const key of [
       'OPENACP_TUNNEL_ENABLED', 'OPENACP_TUNNEL_PORT', 'OPENACP_TUNNEL_PROVIDER',
       'OPENACP_API_PORT', 'OPENACP_SPEECH_STT_PROVIDER', 'OPENACP_SPEECH_GROQ_API_KEY',
+      'OPENACP_SPEECH_LOCAL_WHISPER_LANGUAGE', 'OPENACP_SPEECH_LOCAL_WHISPER_MODEL',
+      'OPENACP_SPEECH_LOCAL_WHISPER_BEAM_SIZE', 'OPENACP_SPEECH_LOCAL_WHISPER_VAD_FILTER',
+      'OPENACP_SPEECH_LOCAL_WHISPER_DEVICE', 'OPENACP_SPEECH_LOCAL_WHISPER_COMPUTE_TYPE',
+      'OPENACP_SPEECH_LOCAL_WHISPER_TIMEOUT_MS', 'OPENACP_SPEECH_LOCAL_WHISPER_SCRIPT_PATH',
       'OPENACP_TELEGRAM_BOT_TOKEN', 'OPENACP_TELEGRAM_CHAT_ID',
       'OPENACP_DISCORD_BOT_TOKEN', 'OPENACP_DISCORD_GUILD_ID',
       'OPENACP_SLACK_BOT_TOKEN', 'OPENACP_SLACK_APP_TOKEN', 'OPENACP_SLACK_SIGNING_SECRET',
@@ -59,6 +63,22 @@ describe('applyEnvToPluginSettings', () => {
       '@openacp/api-server',
       { port: 8080 },
     );
+  });
+
+  it('writes native local Whisper env vars with correct transforms', async () => {
+    process.env.OPENACP_SPEECH_STT_PROVIDER = 'local-whisper';
+    process.env.OPENACP_SPEECH_LOCAL_WHISPER_MODEL = 'small';
+    process.env.OPENACP_SPEECH_LOCAL_WHISPER_BEAM_SIZE = '3';
+    process.env.OPENACP_SPEECH_LOCAL_WHISPER_VAD_FILTER = 'true';
+
+    const sm = mockSettingsManager();
+    const cm = new ConfigManager('/tmp/nonexistent-config.json');
+    await cm.applyEnvToPluginSettings(sm as any);
+
+    expect(sm.updatePluginSettings).toHaveBeenCalledWith('@openacp/speech', { sttProvider: 'local-whisper' });
+    expect(sm.updatePluginSettings).toHaveBeenCalledWith('@openacp/speech', { localWhisperModel: 'small' });
+    expect(sm.updatePluginSettings).toHaveBeenCalledWith('@openacp/speech', { localWhisperBeamSize: 3 });
+    expect(sm.updatePluginSettings).toHaveBeenCalledWith('@openacp/speech', { localWhisperVadFilter: true });
   });
 
   it('does not write when env var is not set', async () => {

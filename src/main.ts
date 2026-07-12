@@ -431,13 +431,14 @@ export async function startServer(opts?: StartServerOptions) {
 
       log.info({ isDaemon, isDevLoop: !!process.env.OPENACP_DEV_LOOP, instanceRoot: ctx.root }, 'Restart: preparing respawn')
 
-      const managedBySystemd = isDaemon && Boolean(process.env.INVOCATION_ID)
+      const { getDaemonSupervisor } = await import('./cli/daemon.js')
+      const supervisor = getDaemonSupervisor()
 
-      if (managedBySystemd) {
-        // Let systemd restart through the configured ExecStart wrapper. A
-        // detached self-respawn would race systemd's Restart=on-failure and can
-        // leave duplicate agent subprocess trees or restart the pre-update path.
-        log.info('Restart: exiting for systemd to restart the daemon')
+      if (supervisor) {
+        // Let systemd/launchd restart through the configured service entry. A
+        // detached self-respawn would race the supervisor and can leave
+        // duplicate agent subprocess trees or restart the pre-update path.
+        log.info({ supervisor }, 'Restart: exiting for the supervisor to restart the daemon')
       } else if (isDaemon) {
         // Daemon mode: spawn detached child writing to log file
         const { spawn: spawnChild } = await import('node:child_process')

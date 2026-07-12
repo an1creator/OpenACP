@@ -5,8 +5,8 @@ import { resolveInstanceId } from '../resolve-instance-id.js'
 /**
  * `openacp stop` — Stop the running daemon.
  *
- * Sends SIGTERM and waits for the process to exit. Also uninstalls the autostart
- * service so the daemon stays stopped after the next login/reboot.
+ * Supervisor-managed instances are stopped through systemd/launchd while their
+ * enabled unit remains installed. Detached fallback daemons use PID/SIGTERM.
  */
 export async function cmdStop(args: string[] = [], instanceRoot?: string): Promise<void> {
   const json = isJsonMode(args)
@@ -28,16 +28,26 @@ Sends a stop signal to the running OpenACP daemon process.
 `)
     return
   }
-  const { stopDaemon, getPidPath } = await import('../daemon.js')
+  const { stopDaemon, getPidPath, readPidFile, clearRunning } = await import('../daemon.js')
+  const instanceId = resolveInstanceId(root)
+  const { getAutoStartState, controlAutoStart } = await import('../autostart.js')
+  const managed = getAutoStartState(instanceId)
+  if (managed.installed && managed.active) {
+    const pid = managed.pid ?? readPidFile(getPidPath(root)) ?? undefined
+    const stopped = controlAutoStart(instanceId, 'stop')
+    if (!stopped.success) {
+      if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, stopped.error ?? 'Failed to stop managed daemon')
+      console.error(stopped.error)
+      process.exit(1)
+    }
+    clearRunning(root)
+    if (json) jsonSuccess({ stopped: true, pid: pid ?? null, manager: managed.manager, serviceInstalled: true })
+    console.log(`OpenACP managed daemon stopped${pid ? ` (was PID ${pid})` : ''}; auto-start remains installed`)
+    return
+  }
   const result = await stopDaemon(getPidPath(root), root)
   if (result.stopped) {
-    // Remove autostart so daemon stays stopped after reboot
-    try {
-      const { uninstallAutoStart } = await import('../autostart.js')
-      uninstallAutoStart(resolveInstanceId(root))
-    } catch { /* non-fatal */ }
-
-    if (json) jsonSuccess({ stopped: true, pid: result.pid })
+    if (json) jsonSuccess({ stopped: true, pid: result.pid, serviceInstalled: managed.installed })
     console.log(`OpenACP daemon stopped (was PID ${result.pid})`)
   } else {
     if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, result.error ?? 'Daemon is not running.')

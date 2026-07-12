@@ -118,6 +118,28 @@ describe('/tts command', () => {
       expect((response as any)?.text).toMatch(/installed/i)
     })
 
+    it('resolves the current plugin-installer child env at each TTS install action', async () => {
+      const ctx = createTestContext({ pluginName: '@openacp/speech', pluginConfig: {}, permissions: speechPlugin.permissions })
+      let current = 'http://old.test:8080'
+      ;(ctx as any).core = {
+        proxyService: {
+          createFetch: vi.fn(() => globalThis.fetch),
+          buildChildEnv: vi.fn(() => ({ HTTPS_PROXY: current })),
+        },
+      }
+      mockInstallNpmPlugin.mockResolvedValue({ default: null })
+      await speechPlugin.setup(ctx as any)
+      await ctx.executeCommand('tts', { raw: 'install' })
+      current = 'http://new.test:8080'
+      await ctx.executeCommand('tts', { raw: 'install' })
+      expect(mockInstallNpmPlugin.mock.calls.map((call) => call[2]?.HTTPS_PROXY)).toEqual([
+        'http://old.test:8080', 'http://new.test:8080',
+      ])
+      expect((ctx as any).core.proxyService.buildChildEnv).toHaveBeenCalledWith(
+        'services.pluginInstaller', expect.anything(),
+      )
+    })
+
     it('returns an error response when installNpmPlugin throws', async () => {
       const ctx = createTestContext({
         pluginName: '@openacp/speech',

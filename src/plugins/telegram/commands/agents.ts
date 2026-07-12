@@ -242,6 +242,7 @@ async function installAgentWithProgress(ctx: Context, core: OpenACPCore, nameOrI
 
   // Auto-integrate handoff if agent supports it
   if (result.ok) {
+    core.proxyService.registerScope(`agents.${result.agentKey}`)
     const { getAgentCapabilities } = await import("../../../core/agents/agent-dependencies.js");
     const caps = getAgentCapabilities(result.agentKey);
     if (caps.integration) {

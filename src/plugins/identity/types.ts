@@ -26,6 +26,10 @@ export function parseIdentityId(id: IdentityId): { source: string; platformId: s
 
 /** Access level within the system. Blocked users are denied all operations. */
 export type UserRole = 'admin' | 'member' | 'viewer' | 'blocked'
+export type IdentityCapability = 'network:proxy:manage'
+export function hasIdentityCapability(role: UserRole, capability: IdentityCapability): boolean {
+  return role === 'admin' && capability === 'network:proxy:manage'
+}
 
 /**
  * Canonical user record. One user may have multiple identities across platforms.

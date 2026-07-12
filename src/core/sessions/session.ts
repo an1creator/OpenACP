@@ -940,6 +940,6 @@ export class Session extends TypedEmitter<SessionEvents> {
     // Clear queued prompts
     this.queue.clear();
     await this.agentInstance.destroy();
-    closeSessionLogger(this.log);
+    await closeSessionLogger(this.log);
   }
 }

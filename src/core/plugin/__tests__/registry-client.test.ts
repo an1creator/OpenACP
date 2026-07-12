@@ -37,6 +37,14 @@ describe('RegistryClient', () => {
     expect(mockFetch).toHaveBeenCalledWith('https://test.com/registry.json')
   })
 
+  it('uses an injected plugin-registry transport', async () => {
+    const scoped = vi.fn().mockResolvedValue({ ok: true, json: async () => mockRegistry })
+    const client = new RegistryClient('https://test.com/registry.json', scoped as typeof fetch)
+    await client.getRegistry()
+    expect(scoped).toHaveBeenCalledWith('https://test.com/registry.json')
+    expect(mockFetch).not.toHaveBeenCalled()
+  })
+
   it('caches registry for 1 minute', async () => {
     const client = new RegistryClient('https://test.com/registry.json')
     await client.getRegistry()

@@ -326,6 +326,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     agentDef: AgentDefinition,
     workingDirectory: string,
     allowedPaths: string[] = [],
+    environment?: Record<string, string>,
   ): Promise<AgentInstance> {
     const instance = new AgentInstance(agentDef.name);
     const resolved = resolveAgentCommand(agentDef.command);
@@ -353,7 +354,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
         cwd: workingDirectory,
         // envWhitelist from workspace.security.envWhitelist config would extend DEFAULT_ENV_WHITELIST.
         // Tracked as follow-up: pass workspace security config through spawn/resume call chain.
-        env: filterEnv(process.env as Record<string, string>, agentDef.env),
+        env: environment ?? filterEnv(process.env as Record<string, string>, agentDef.env),
       },
     );
 
@@ -549,11 +550,12 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     workingDirectory: string,
     mcpServers?: McpServerConfig[],
     allowedPaths?: string[],
+    environment?: Record<string, string>,
   ): Promise<AgentInstance> {
     log.debug({ agentName: agentDef.name, command: agentDef.command }, "Spawning agent");
     const spawnStart = Date.now();
 
-    const instance = await AgentInstance.spawnSubprocess(agentDef, workingDirectory, allowedPaths);
+    const instance = await AgentInstance.spawnSubprocess(agentDef, workingDirectory, allowedPaths, environment);
     await instance.claimForSession(workingDirectory, mcpServers, agentDef.initTimeoutMs);
 
     log.info(
@@ -583,6 +585,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     agentSessionId: string,
     mcpServers?: McpServerConfig[],
     allowedPaths?: string[],
+    environment?: Record<string, string>,
   ): Promise<AgentInstance> {
     log.debug({ agentName: agentDef.name, agentSessionId }, "Resuming agent");
     const spawnStart = Date.now();
@@ -591,6 +594,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
       agentDef,
       workingDirectory,
       allowedPaths,
+      environment,
     );
 
     const resolvedMcp = AgentInstance.mcpManager.resolve(mcpServers);

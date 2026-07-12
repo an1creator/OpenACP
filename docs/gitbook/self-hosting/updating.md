@@ -29,6 +29,14 @@ systemd invoke the configured `ExecStart` wrapper again. This ensures wrapper
 environment variables and the newly installed package path are used and avoids
 creating a competing detached daemon.
 
+Manual `openacp restart` follows the same ownership rule. Verify after update:
+
+```bash
+systemctl --user is-active <openacp-unit>
+systemctl --user is-enabled <openacp-unit>
+systemctl --user show <openacp-unit> -p MainPID
+```
+
 You can also update directly:
 
 ```bash
@@ -54,10 +62,11 @@ openacp --dir ~/openacp-workspace restart
 openacp --dir ~/openacp-workspace status
 ```
 
-If `openacp` is a wrapper, verify that it ultimately executes the global
-`openacp` binary from the same npm prefix you updated. Keep proxy and other
-required environment setup in the wrapper or systemd drop-in rather than in the
-package directory, because npm replaces package files during upgrades.
+If `openacp` is a wrapper, verify that it ultimately executes the global binary
+from the npm prefix you updated. For native scoped proxy routing, remove legacy
+proxy sourcing from both the wrapper and OpenACP-specific systemd drop-ins only
+after profile/routes pass acceptance. Keep unrelated host application proxy
+configuration untouched.
 
 If you are running from source, pull and rebuild:
 
@@ -122,3 +131,21 @@ For plugin adapters installed under `<instance-root>/plugins/`, re-install them 
 ```bash
 openacp install @openacp/adapter-discord
 ```
+
+## Maintainer release recovery
+
+The release workflow verifies Node 20 and 24, checks that the versioned tag is
+reachable from `main`, and requires the tag, both package manifests, and the
+CHANGELOG release heading to match. It packs both npm artifacts before making a
+registry change. With npm trusted-publishing OIDC it publishes the CLI and then
+the peer-dependent SDK directly to `latest`; OIDC supports `npm publish`, but
+not later `npm dist-tag` promotion.
+
+If SDK publication fails after CLI succeeds, do not publish a new CLI version.
+Fix registry/authentication state and rerun the same tagged workflow; it skips
+an existing exact version only when that version is current `latest`, then
+publishes the missing SDK. This is not cross-package atomic—CLI `latest` can
+briefly lead, which is compatible because the CLI does not depend on the SDK.
+An exact version that is not current `latest` stops the workflow and requires an
+account owner's interactive npm 2FA recovery because OIDC cannot mutate
+dist-tags.

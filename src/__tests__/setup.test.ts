@@ -28,7 +28,7 @@ describe('validateBotToken', () => {
       }),
     }))
 
-    const result = await validateBotToken('123:ABC')
+    const result = await validateBotToken('123:ABC', globalThis.fetch)
     expect(result).toEqual({ ok: true, botName: 'TestBot', botUsername: 'test_bot' })
   })
 
@@ -41,14 +41,14 @@ describe('validateBotToken', () => {
       }),
     }))
 
-    const result = await validateBotToken('bad-token')
+    const result = await validateBotToken('bad-token', globalThis.fetch)
     expect(result).toEqual({ ok: false, error: 'Unauthorized' })
   })
 
   it('returns error on network failure', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')))
 
-    const result = await validateBotToken('123:ABC')
+    const result = await validateBotToken('123:ABC', globalThis.fetch)
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.error).toContain('Network error')
   })
@@ -66,7 +66,7 @@ describe('validateChatId', () => {
       }),
     }))
 
-    const result = await validateChatId('token', -1001234)
+    const result = await validateChatId('token', -1001234, globalThis.fetch)
     expect(result).toEqual({ ok: true, title: 'My Group', isForum: true })
   })
 
@@ -79,7 +79,7 @@ describe('validateChatId', () => {
       }),
     }))
 
-    const result = await validateChatId('token', -1001234)
+    const result = await validateChatId('token', -1001234, globalThis.fetch)
     expect(result).toEqual({ ok: true, title: 'My Group', isForum: false })
   })
 
@@ -92,7 +92,7 @@ describe('validateChatId', () => {
       }),
     }))
 
-    const result = await validateChatId('token', 12345)
+    const result = await validateChatId('token', 12345, globalThis.fetch)
     expect(result.ok).toBe(false)
   })
 })

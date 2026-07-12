@@ -15,8 +15,8 @@ import { randomUUID } from 'node:crypto'
  * a daemon that was started with `openacp start` (runMode='foreground') from accidentally
  * restarting in foreground mode.
  *
- * When restarting as daemon, reinstalls autostart to refresh the node path (handles nvm
- * version changes between restarts).
+ * A supervisor-managed daemon is always refreshed/restarted through its manager;
+ * a detached competitor must never be spawned beside an inactive enabled unit.
  */
 export async function cmdRestart(args: string[] = [], instanceRoot?: string): Promise<void> {
   const json = isJsonMode(args)
@@ -49,20 +49,13 @@ Stops the running daemon (if any) and starts a new one.
   const forceForeground = args.includes('--foreground')
   const forceDaemon = args.includes('--daemon')
 
-  const { stopDaemon, startDaemon, getPidPath, markRunning } = await import('../daemon.js')
+  const { stopDaemon, startDaemon, getPidPath, markRunning, isProcessRunning, readPidFile } = await import('../daemon.js')
   const { ConfigManager } = await import('../../core/config/config.js')
   const { checkAndPromptUpdate } = await import('../version.js')
 
-  await checkAndPromptUpdate()
+  await checkAndPromptUpdate(root)
 
   const pidPath = getPidPath(root)
-
-  // Stop existing daemon (ignore errors — it may not be running)
-  if (!json) console.log('Stopping...')
-  const stopResult = await stopDaemon(pidPath, root)
-  if (!json && stopResult.stopped) {
-    console.log(`Stopped daemon (was PID ${stopResult.pid})`)
-  }
 
   const cm = new ConfigManager(path.join(root, 'config.json'))
   if (!(await cm.exists())) {
@@ -73,6 +66,68 @@ Stops the running daemon (if any) and starts a new one.
 
   await cm.load()
   const config = cm.get()
+  const instanceId = resolveInstanceId(root)
+  const { getAutoStartState, controlAutoStart, installAutoStart } = await import('../autostart.js')
+  const managed = getAutoStartState(instanceId)
+
+  // A supervisor-owned instance must be restarted by its supervisor. Starting a
+  // detached child here creates a PPID-1 competitor while the unit stays inactive.
+  if (managed.installed && !forceForeground) {
+    if (!json) console.log(`Restarting through ${managed.manager}...`)
+    const trackedPid = readPidFile(pidPath)
+    const detachedCompetitor = isProcessRunning(pidPath) && (
+      !managed.active || (managed.pid !== undefined && trackedPid !== managed.pid)
+    )
+    if (detachedCompetitor) {
+      // Repair a legacy/broken state where an enabled unit coexists with a detached daemon.
+      const legacyStop = await stopDaemon(pidPath, root)
+      if (!legacyStop.stopped && isProcessRunning(pidPath)) {
+        const message = legacyStop.error ?? 'Could not stop detached daemon competitor'
+        if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, message)
+        console.error(message)
+        process.exit(1)
+      }
+    }
+    const { removeStalePortFile, waitForApiReady } = await import('../api-client.js')
+    // Set intent before refreshing the supervisor definition: launchd may start
+    // the child during bootstrap, before controlAutoStart('restart') is reached.
+    markRunning(root)
+    removeStalePortFile(undefined, root)
+    const refreshed = installAutoStart(config.logging.logDir, root, instanceId)
+    if (!refreshed.success) {
+      if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, refreshed.error ?? 'Failed to refresh managed service')
+      console.error(`Failed to refresh managed service: ${refreshed.error}`)
+      process.exit(1)
+    }
+    const restarted = controlAutoStart(instanceId, 'restart')
+    if (!restarted.success) {
+      if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, restarted.error ?? 'Managed restart failed')
+      console.error(`Managed restart failed: ${restarted.error}`)
+      process.exit(1)
+    }
+    const port = await waitForApiReady(root, instanceId)
+    const state = getAutoStartState(instanceId)
+    const pid = state.pid ?? readPidFile(pidPath) ?? undefined
+    if (port === null || !state.active || !state.pid) {
+      const reason = !state.active
+        ? 'managed service became inactive during restart'
+        : !state.pid
+          ? 'managed service has no running process'
+          : 'daemon API did not become ready'
+      if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, `Failed to restart OpenACP: ${reason}`)
+      console.error(`Failed to restart OpenACP: ${reason}`)
+      process.exit(1)
+    }
+    if (json) jsonSuccess({ pid: pid ?? null, instanceId, dir: root, port, manager: state.manager, managed: true })
+    printInstanceHint(root)
+    console.log(`OpenACP restarted through ${state.manager}${pid ? ` (PID ${pid})` : ''}`)
+    return
+  }
+
+  // Non-managed or explicit foreground transition: stop the PID-tracked process.
+  if (!json) console.log('Stopping...')
+  const stopResult = await stopDaemon(pidPath, root)
+  if (!json && stopResult.stopped) console.log(`Stopped daemon (was PID ${stopResult.pid})`)
 
   // Determine mode: explicit flag > was-running-as-daemon > config
   // If a daemon was running (PID exists), restart as daemon to preserve the current mode.
@@ -87,7 +142,6 @@ Stops the running daemon (if any) and starts a new one.
     // surprise the user by relaunching a daemon on next login
     try {
       const { uninstallAutoStart, isAutoStartInstalled } = await import('../autostart.js')
-      const instanceId = resolveInstanceId(root)
       if (isAutoStartInstalled(instanceId)) uninstallAutoStart(instanceId)
     } catch { /* non-fatal */ }
 
@@ -104,6 +158,8 @@ Stops the running daemon (if any) and starts a new one.
     })
     await startServer({ instanceContext: ctx })
   } else {
+    const { removeStalePortFile, waitForApiReady } = await import('../api-client.js')
+    removeStalePortFile(undefined, root)
     const result = startDaemon(pidPath, config.logging.logDir, root)
     if ('error' in result) {
       if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, result.error)
@@ -112,7 +168,6 @@ Stops the running daemon (if any) and starts a new one.
     }
     // Reinstall autostart to refresh node path (e.g. after nvm version change),
     // but only if autostart was already installed before this restart
-    const instanceId = resolveInstanceId(root)
     try {
       const { installAutoStart, isAutoStartInstalled } = await import('../autostart.js')
       if (isAutoStartInstalled(instanceId)) {
@@ -121,7 +176,14 @@ Stops the running daemon (if any) and starts a new one.
       }
     } catch { /* non-fatal */ }
 
-    if (json) jsonSuccess({ pid: result.pid, instanceId, dir: root })
+    const port = await waitForApiReady(root, instanceId)
+    if (port === null || !isProcessRunning(pidPath)) {
+      if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, 'Daemon process exited before its API became ready')
+      console.error('Daemon process exited before its API became ready')
+      process.exit(1)
+    }
+
+    if (json) jsonSuccess({ pid: result.pid, instanceId, dir: root, port })
     printInstanceHint(root)
     console.log(`OpenACP daemon started (PID ${result.pid})`)
   }

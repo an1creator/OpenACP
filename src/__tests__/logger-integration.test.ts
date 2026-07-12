@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { initLogger, shutdownLogger, createChildLogger, createSessionLogger, cleanupOldSessionLogs, log } from '../core/utils/log.js'
+import { initLogger, shutdownLogger, createChildLogger, createSessionLogger, closeSessionLogger, cleanupOldSessionLogs, log } from '../core/utils/log.js'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -29,8 +29,10 @@ describe('logger integration', () => {
     sessionLog.warn('something iffy')
     sessionLog.error({ err: new Error('test error') }, 'Prompt failed')
 
-    // 4. Wait for flush (pino transports run in worker threads, need time to flush)
-    await new Promise(r => setTimeout(r, 1500))
+    // 4. Close the per-session destination and root worker deterministically.
+    await closeSessionLogger(sessionLog)
+    await cleanupOldSessionLogs(30)
+    await shutdownLogger()
 
     // 5. Verify combined log
     const combinedFile = fs.readdirSync(logDir).find(f => f.startsWith('openacp'))
@@ -47,12 +49,8 @@ describe('logger integration', () => {
     expect(sessionContent).toContain('Prompt queued')
     expect(sessionContent).toContain('integration-sess')
 
-    // 7. Cleanup (should not delete fresh file)
-    await cleanupOldSessionLogs(30)
+    // 7. Cleanup ran before shutdown and should not delete the fresh file.
     expect(fs.existsSync(sessionFile)).toBe(true)
-
-    // 8. Shutdown
-    await shutdownLogger()
   })
 
   it('gracefully degrades if log dir is not writable', () => {

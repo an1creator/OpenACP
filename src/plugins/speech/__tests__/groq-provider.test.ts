@@ -32,6 +32,26 @@ describe("GroqSTT", () => {
     expect(opts.body).toBeInstanceOf(FormData);
   });
 
+  it('uses the injected speech-download transport instead of global fetch', async () => {
+    const scoped = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ text: 'scoped' }) })
+    const forbidden = vi.fn().mockRejectedValue(new Error('global fetch used'))
+    global.fetch = forbidden
+    const provider = new GroqSTT('gsk_test', 'whisper-large-v3-turbo', scoped as typeof fetch)
+    await expect(provider.transcribe(Buffer.from('audio'), 'audio/ogg')).resolves.toMatchObject({ text: 'scoped' })
+    expect(scoped).toHaveBeenCalledOnce(); expect(forbidden).not.toHaveBeenCalled()
+  })
+
+  it('resolves the scoped fetch again for every transcription after route rotation', async () => {
+    const oldFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ text: 'old' }) })
+    const newFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ text: 'new' }) })
+    let current = oldFetch as typeof fetch
+    const provider = new GroqSTT('gsk_test', 'whisper-large-v3-turbo', current, () => current)
+    await expect(provider.transcribe(Buffer.from('one'), 'audio/ogg')).resolves.toMatchObject({ text: 'old' })
+    current = newFetch as typeof fetch
+    await expect(provider.transcribe(Buffer.from('two'), 'audio/ogg')).resolves.toMatchObject({ text: 'new' })
+    expect(oldFetch).toHaveBeenCalledOnce(); expect(newFetch).toHaveBeenCalledOnce()
+  })
+
   it("passes language option when provided", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: true,

@@ -284,7 +284,9 @@ async function installPlugin(input: string, instanceRoot?: string, json = false)
 
   // Try resolve from registry
   const { RegistryClient } = await import('../../core/plugin/registry-client.js')
-  const client = new RegistryClient()
+  const { ProxyService } = await import('../../core/network/proxy-service.js')
+  const proxyService = new ProxyService(root)
+  const client = new RegistryClient(undefined, proxyService.createFetch('services.pluginInstaller'))
   let registryPlugin: any = null
   try {
     const registry = await client.getRegistry()
@@ -342,6 +344,7 @@ async function installPlugin(input: string, instanceRoot?: string, json = false)
     execFileSync('npm', ['install', installSpec, '--prefix', pluginsDir, '--save'], {
       stdio: json ? 'pipe' : 'inherit',
       timeout: 60000,
+      env: proxyService.buildChildEnv('services.pluginInstaller', process.env as Record<string, string>),
     })
   } catch {
     if (json) jsonError(ErrorCodes.INSTALL_FAILED, `Failed to install ${installSpec}`)

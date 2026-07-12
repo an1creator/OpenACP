@@ -4,6 +4,10 @@ Config is stored at `<workspace>/.openacp/config.json` (e.g. `~/openacp-workspac
 
 Edit interactively with `openacp config`, or set individual values with `openacp config set <path> <value>`.
 
+Proxy profiles and routes intentionally do not live in `config.json`. They use
+the protected instance files `proxy.json` and `proxy-secrets.json`; manage them
+with `openacp proxy` or `/api/v1/proxy`. See [Scoped Proxy Routing](../features/proxy-routing.md).
+
 ---
 
 ## channels

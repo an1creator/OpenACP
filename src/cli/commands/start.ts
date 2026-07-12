@@ -8,9 +8,8 @@ import path from 'node:path'
 /**
  * `openacp start` — Start the daemon in the background.
  *
- * Forks a detached child process via startDaemon(), installs the login-time autostart
- * service, then returns immediately. In JSON mode, waits for the daemon to write api.port
- * before outputting the result so callers get the actual bound port.
+ * Installs and starts the per-instance systemd/launchd service when supported.
+ * Detached startDaemon() is retained only as a supervisor-unavailable fallback.
  */
 export async function cmdStart(args: string[] = [], instanceRoot?: string): Promise<void> {
   const json = isJsonMode(args)
@@ -39,8 +38,8 @@ Requires an existing config — run 'openacp' first to set up.
 `)
     return
   }
-  await checkAndPromptUpdate()
-  const { startDaemon, getPidPath, isProcessRunning } = await import('../daemon.js')
+  await checkAndPromptUpdate(root)
+  const { startDaemon, getPidPath, isProcessRunning, markRunning, readPidFile } = await import('../daemon.js')
   const { ConfigManager } = await import('../../core/config/config.js')
   const cm = new ConfigManager(path.join(root, 'config.json'))
   if (await cm.exists()) {
@@ -52,26 +51,70 @@ Requires an existing config — run 'openacp' first to set up.
       console.error('OpenACP daemon is already running. Use "openacp restart" to restart it.')
       process.exit(1)
     }
+    const instanceId = resolveInstanceId(root)
+    // Prefer the OS supervisor. Installing a unit and then spawning a detached
+    // competitor leaves systemd inactive and breaks future restart/update flows.
+    try {
+      const { installAutoStart, controlAutoStart, getAutoStartState } = await import('../autostart.js')
+      const { removeStalePortFile, waitForApiReady } = await import('../api-client.js')
+      // Explicit start always restores runtime intent before installAutoStart():
+      // launchd bootstrap may launch the child as part of installation.
+      markRunning(root)
+      removeStalePortFile(undefined, root)
+      const autoResult = installAutoStart(config.logging.logDir, root, instanceId)
+      if (autoResult.success) {
+        const controlled = controlAutoStart(instanceId, 'start')
+        if (!controlled.success) {
+          if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, controlled.error ?? 'Failed to start managed service')
+          console.error(`Failed to start managed service: ${controlled.error}`)
+          process.exit(1)
+        }
+        const port = await waitForApiReady(root, instanceId)
+        const state = getAutoStartState(instanceId)
+        const pid = state.pid ?? readPidFile(pidPath) ?? undefined
+        if (port === null || !state.active || !state.pid) {
+          const reason = !state.active
+            ? 'managed service became inactive during startup'
+            : !state.pid
+              ? 'managed service has no running process'
+              : 'daemon API did not become ready'
+          if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, `Failed to start OpenACP: ${reason}`)
+          console.error(`Failed to start OpenACP: ${reason}`)
+          process.exit(1)
+        }
+        if (json) jsonSuccess({ pid: pid ?? null, instanceId, name: config.instanceName ?? null, directory: path.dirname(root), dir: root, port, manager: state.manager, managed: true })
+        printInstanceHint(root)
+        console.log(`OpenACP managed daemon started through ${state.manager}${pid ? ` (PID ${pid})` : ''}`)
+        return
+      }
+      console.warn(`Warning: auto-start not enabled: ${autoResult.error}`)
+      if (getAutoStartState(instanceId).installed) {
+        if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, 'Managed service installation is partial; refusing detached fallback')
+        console.error('Managed service installation is partial; refusing detached fallback')
+        process.exit(1)
+      }
+    } catch (e) {
+      if ((e as Error).message?.startsWith('process.exit')) throw e
+      console.warn(`Warning: auto-start not enabled: ${(e as Error).message}`)
+    }
+
+    // Unsupported/failed supervisor setup: preserve the detached daemon fallback.
     const result = startDaemon(pidPath, config.logging.logDir, root)
     if ('error' in result) {
       if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, result.error)
       console.error(result.error)
       process.exit(1)
     }
-    // Install autostart before JSON output (jsonSuccess exits)
-    // instanceId is resolved here so installAutoStart can use it for per-instance
-    // service naming — each workspace gets its own launchd/systemd service entry.
-    const instanceId = resolveInstanceId(root)
-    try {
-      const { installAutoStart } = await import('../autostart.js')
-      const autoResult = installAutoStart(config.logging.logDir, root, instanceId)
-      if (!autoResult.success) console.warn(`Warning: auto-start not enabled: ${autoResult.error}`)
-    } catch (e) { console.warn(`Warning: auto-start not enabled: ${(e as Error).message}`) }
+
+    const { waitForApiReady } = await import('../api-client.js')
+    const port = await waitForApiReady(root, instanceId)
+    if (port === null || !isProcessRunning(pidPath)) {
+      if (json) jsonError(ErrorCodes.DAEMON_NOT_RUNNING, 'Daemon process exited before its API became ready')
+      console.error('Daemon process exited before its API became ready')
+      process.exit(1)
+    }
 
     if (json) {
-      // Wait for the daemon to write api.port (up to 5 seconds)
-      const { waitForPortFile } = await import('../api-client.js')
-      const port = await waitForPortFile(path.join(root, 'api.port')) ?? 21420
       jsonSuccess({
         pid: result.pid,
         instanceId,

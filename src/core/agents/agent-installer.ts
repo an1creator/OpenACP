@@ -206,6 +206,7 @@ export async function installAgent(
   store: AgentStore,
   progress?: InstallProgress,
   agentsDir?: string,
+  scopedFetch: typeof fetch = globalThis.fetch,
 ): Promise<InstallResult> {
   const agentKey = getAgentAlias(agent.id);
   await progress?.onStart(agent.id, agent.name);
@@ -235,7 +236,7 @@ export async function installAgent(
 
   if (dist.type === "binary") {
     try {
-      binaryPath = await downloadAndExtract(agent.id, dist.archive, progress, agentsDir);
+      binaryPath = await downloadAndExtract(agent.id, dist.archive, progress, agentsDir, scopedFetch);
     } catch (err) {
       const msg = `Failed to download ${agent.name}. Please try again or install manually.`;
       await progress?.onError(msg);
@@ -264,6 +265,7 @@ async function downloadAndExtract(
   archiveUrl: string,
   progress?: InstallProgress,
   agentsDir?: string,
+  scopedFetch: typeof fetch = globalThis.fetch,
 ): Promise<string> {
   const destDir = path.join(agentsDir ?? DEFAULT_AGENTS_DIR, agentId);
   fs.mkdirSync(destDir, { recursive: true });
@@ -271,7 +273,7 @@ async function downloadAndExtract(
   await progress?.onStep("Downloading...");
   log.info({ agentId, url: archiveUrl }, "Downloading agent binary");
 
-  const response = await fetch(archiveUrl);
+  const response = await scopedFetch(archiveUrl);
   if (!response.ok) {
     throw new Error(`Download failed: ${response.status} ${response.statusText}`);
   }
@@ -298,7 +300,7 @@ async function downloadAndExtract(
  * in memory before checking the size.
  */
 export async function readResponseWithProgress(
-  response: Response,
+  response: Pick<Response, 'body' | 'arrayBuffer'>,
   contentLength: number,
   progress?: InstallProgress,
 ): Promise<Buffer> {
@@ -307,21 +309,37 @@ export async function readResponseWithProgress(
     return Buffer.from(arrayBuffer);
   }
 
-  const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let received = 0;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    if (received > MAX_DOWNLOAD_SIZE) {
-      throw new Error(`Download exceeds size limit of ${MAX_DOWNLOAD_SIZE} bytes`);
+  const consume = async (value: Uint8Array) => {
+    chunks.push(value); received += value.length
+    if (received > MAX_DOWNLOAD_SIZE) throw new Error(`Download exceeds size limit of ${MAX_DOWNLOAD_SIZE} bytes`)
+    if (contentLength > 0) await progress?.onDownloadProgress(Math.min(100, Math.round((received / contentLength) * 100)))
+  }
+
+  const body = response.body as unknown as {
+    getReader?: () => ReadableStreamDefaultReader<Uint8Array>
+    destroy?: (error?: Error) => void
+    [Symbol.asyncIterator]?: () => AsyncIterator<Uint8Array | Buffer>
+  }
+  if (typeof body.getReader === 'function') {
+    const reader = body.getReader()
+    try {
+      while (true) { const { done, value } = await reader.read(); if (done) break; await consume(value) }
+    } catch (error) {
+      await reader.cancel?.(error).catch(() => {})
+      throw error
+    } finally { reader.releaseLock?.() }
+  } else if (body[Symbol.asyncIterator]) {
+    try {
+      for await (const value of body as AsyncIterable<Uint8Array | Buffer>) await consume(new Uint8Array(value))
+    } catch (error) {
+      body.destroy?.(error instanceof Error ? error : undefined)
+      throw error
     }
-    if (contentLength > 0) {
-      await progress?.onDownloadProgress(Math.round((received / contentLength) * 100));
-    }
+  } else {
+    return Buffer.from(await response.arrayBuffer())
   }
 
   return Buffer.concat(chunks);

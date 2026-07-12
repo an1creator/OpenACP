@@ -133,3 +133,10 @@ export type {
   FieldDef, MiddlewarePayloadMap, MiddlewareHook,
 } from './plugin/types.js'
 export { PRODUCT_GUIDE } from '../data/product-guide.js'
+
+// ─── Scoped network policy ─────────────────────────────────────────────────
+export { ProxyService, PROXY_ENV_KEYS } from './network/proxy-service.js'
+export type {
+  ProxyProtocol, ProxyRoute, ProxyProfileInput, ProxyProfile,
+  ProxyRoutingConfig, ProxyStatus, ProxyRouteResolution, ProxyRouteChangeResult,
+} from './network/proxy-types.js'

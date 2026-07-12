@@ -6,13 +6,37 @@ on:
       - 'v*'
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 24]
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '${{ matrix.node-version }}', cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm build
+      - if: matrix.node-version == 24
+        run: pnpm verify:publish-artifacts
+      - name: Verify tag provenance and release metadata
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "const fs=require('fs'); const v='$VERSION'; for(const f of ['package.json','packages/plugin-sdk/package.json']) { const p=JSON.parse(fs.readFileSync(f)); if(p.version!==v) throw Error(f+' version '+p.version+' != tag '+v) } const c=fs.readFileSync('CHANGELOG.md','utf8'); if(!c.includes('## '+v+' ')) throw Error('CHANGELOG missing release '+v)"
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
       - uses: pnpm/action-setup@v4
 
@@ -26,32 +50,51 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Set version from tag
+      - name: Verify release version from tag
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-          node -e "
-            const fs = require('fs');
-            for (const file of ['package.json', 'packages/plugin-sdk/package.json']) {
-              const pkg = JSON.parse(fs.readFileSync(file, 'utf-8'));
-              pkg.version = '$VERSION';
-              if (file.includes('plugin-sdk')) {
-                pkg.peerDependencies['@n1creator/openacp-cli'] = '>=' + '$VERSION';
-              }
-              fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
-            }
-          "
+          node -e "for(const f of ['package.json','packages/plugin-sdk/package.json']){const p=require('./'+f);if(p.version!=='$VERSION')throw Error(f+' does not match tag')}"
 
       - name: Build CLI types (needed by SDK)
         run: pnpm build
 
       - run: pnpm build:publish
 
-      - name: Publish @n1creator/openacp-cli
-        working-directory: dist-publish
-        run: npm publish --access=public --provenance
+      - name: Pack and verify both artifacts before registry mutation
+        run: |
+          npm pack --dry-run ./dist-publish
+          npm pack --dry-run ./dist-publish-sdk
 
-      - name: Publish @n1creator/openacp-plugin-sdk
+      # The SDK declares the CLI as a peer dependency; the CLI has no runtime
+      # dependency on the SDK. Publish CLI first so SDK latest is always usable.
+      - name: Publish @n1creator/openacp-cli to latest
+        working-directory: dist-publish
+        run: |
+          if npm view "@n1creator/openacp-cli@${VERSION}" version >/dev/null 2>&1; then
+            LATEST="$(npm view "@n1creator/openacp-cli" dist-tags.latest)"
+            if [ "$LATEST" = "$VERSION" ]; then
+              echo "@n1creator/openacp-cli@${VERSION} is already latest; resuming partial release"
+            else
+              echo "::error::@n1creator/openacp-cli@${VERSION} exists but latest is ${LATEST}. Immutable versions cannot be republished and OIDC cannot repair dist-tags. Follow the interactive 2FA recovery runbook."
+              exit 1
+            fi
+          else
+            npm publish --access=public --tag latest
+          fi
+
+      - name: Publish @n1creator/openacp-plugin-sdk to latest
         if: hashFiles('dist-publish-sdk/package.json') != ''
         working-directory: dist-publish-sdk
-        run: npm publish --access=public --provenance
+        run: |
+          if npm view "@n1creator/openacp-plugin-sdk@${VERSION}" version >/dev/null 2>&1; then
+            LATEST="$(npm view "@n1creator/openacp-plugin-sdk" dist-tags.latest)"
+            if [ "$LATEST" = "$VERSION" ]; then
+              echo "@n1creator/openacp-plugin-sdk@${VERSION} is already latest; resuming partial release"
+            else
+              echo "::error::@n1creator/openacp-plugin-sdk@${VERSION} exists but latest is ${LATEST}. Immutable versions cannot be republished and OIDC cannot repair dist-tags. Follow the interactive 2FA recovery runbook."
+              exit 1
+            fi
+          else
+            npm publish --access=public --tag latest
+          fi

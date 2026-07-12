@@ -41,7 +41,7 @@ export class RegistryClient {
   private cache: { data: Registry; fetchedAt: number } | null = null
   private registryUrl: string
 
-  constructor(registryUrl?: string) {
+  constructor(registryUrl?: string, private scopedFetch: typeof fetch = globalThis.fetch) {
     this.registryUrl = registryUrl ?? REGISTRY_URL
   }
 
@@ -50,7 +50,7 @@ export class RegistryClient {
     if (this.cache && Date.now() - this.cache.fetchedAt < CACHE_TTL) {
       return this.cache.data
     }
-    const res = await fetch(this.registryUrl)
+    const res = await this.scopedFetch(this.registryUrl)
     if (!res.ok) throw new Error(`Failed to fetch registry: ${res.status}`)
     const data = await res.json() as Registry
     this.cache = { data, fetchedAt: Date.now() }

@@ -33,6 +33,9 @@ export class BadRequestError extends Error {
     this.name = 'BadRequestError';
   }
 }
+export class ConflictError extends Error {
+  constructor(public code: string, message: string) { super(message); this.name = 'ConflictError' }
+}
 
 /** Thrown when a required backing service (e.g. file-service) is not loaded (→ 503). */
 export class ServiceUnavailableError extends Error {
@@ -99,6 +102,9 @@ export function globalErrorHandler(
       },
     });
     return;
+  }
+  if (error instanceof ConflictError) {
+    reply.status(409).send({ error: { code: error.code, message: error.message, statusCode: 409 } }); return;
   }
 
   if (error instanceof NotFoundError) {

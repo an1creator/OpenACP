@@ -84,4 +84,25 @@ describe('logger', () => {
     expect(content).not.toContain('should not appear')
     expect(content).toContain('should appear')
   })
+
+  it('redacts network credentials from structured errors, URLs, and headers', async () => {
+    const logDir = path.join(tmpDir, 'logs')
+    initLogger({ level: 'info', logDir, maxFileSize: '10m', maxFiles: 7, sessionLogRetentionDays: 30 })
+    const token = '123456789:AALogSecret_123'
+    const child = createChildLogger({ module: 'security-test' })
+    child.error({
+      err: new Error(`request to https://api.telegram.org/bot${token}/getMe failed`),
+      url: 'http://proxy-user:proxy-pass@proxy.example:8080/?api_key=query-secret',
+      headers: { authorization: 'Bearer header-secret', cookie: 'session=cookie-secret' },
+    }, 'network failure')
+    await shutdownLogger()
+
+    const file = fs.readdirSync(logDir).find((name) => name.startsWith('openacp'))!
+    const content = fs.readFileSync(path.join(logDir, file), 'utf8')
+    for (const secret of [token, 'proxy-user', 'proxy-pass', 'query-secret', 'header-secret', 'cookie-secret']) {
+      expect(content).not.toContain(secret)
+    }
+    expect(content).toContain('api.telegram.org/bot<redacted>/getMe')
+    expect(content).toContain('proxy.example:8080')
+  })
 })

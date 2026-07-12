@@ -293,6 +293,8 @@ function createApiServerPlugin(): OpenACPPlugin {
         getIdentityService: () => ctx.getService<{ getUser(userId: string): Promise<{ displayName: string } | undefined> }>('identity') ?? undefined,
       }))
       server.registerPlugin('/api/v1/plugins', async (app) => pluginRoutes(app, deps))
+      const { proxyRoutes } = await import('./routes/proxy.js')
+      server.registerPlugin('/api/v1/proxy', async (app) => proxyRoutes(app, deps))
       const appConfig = core.configManager.get()
       const workspaceName = (appConfig as Record<string, unknown>).instanceName as string ?? 'Main'
       const workspaceDir = path.dirname(instanceRoot)

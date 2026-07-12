@@ -43,6 +43,9 @@ export const ErrorCodes = {
   UNKNOWN_COMMAND: 'UNKNOWN_COMMAND',
   ALREADY_EXISTS: 'ALREADY_EXISTS',
   UNKNOWN_ERROR: 'UNKNOWN_ERROR',
+  PROXY_ERROR: 'PROXY_ERROR',
+  PROXY_TEST_FAILED: 'PROXY_TEST_FAILED',
+  PROXY_ROUTE_TEST_FAILED: 'PROXY_ROUTE_TEST_FAILED',
 } as const
 
 export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes]

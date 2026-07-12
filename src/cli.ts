@@ -47,6 +47,7 @@ import {
   cmdSetup,
   cmdAutostart,
   cmdChannels,
+  cmdProxy,
 } from './cli/commands/index.js'
 import { resolveInstanceRoot } from './core/instance/instance-context.js'
 
@@ -142,7 +143,7 @@ const noInstanceCommands: Record<string, () => Promise<void>> = {
   '-h': async () => printHelp(),
   '--version': () => cmdVersion(args),
   '-v': () => cmdVersion(args),
-  'update': () => cmdUpdate(args),
+  'update': () => cmdUpdate(args, resolvedInstanceRoot ?? undefined),
   'adopt': () => cmdAdopt(args),
   'channels': () => cmdChannels(args),
   'instances': async () => cmdInstances(args, flags),
@@ -210,6 +211,7 @@ async function main() {
     'doctor': (r) => cmdDoctor(args, r),
     'agents': (r) => cmdAgents(args, r),
     'tunnel': (r) => cmdTunnel(args, r),
+    'proxy': (r) => cmdProxy(args, r, flags.name),
     'onboard': (r) => cmdOnboard(r),
     'attach': (r) => cmdAttach(args, r),
     'remote': (r) => cmdRemote(args, r),

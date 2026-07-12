@@ -5,13 +5,21 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(__dirname, '..')
+const cliPublishDir = path.join(root, 'dist-publish')
+const sdkPublishDir = path.join(root, 'dist-publish-sdk')
+
+// Publish builds must never inherit files from an earlier local or CI build.
+// In particular, copying an SDK dist directory into an existing destination
+// used to create dist/dist on the second run and could ship stale declarations.
+fs.rmSync(cliPublishDir, { recursive: true, force: true })
+fs.rmSync(sdkPublishDir, { recursive: true, force: true })
 
 // 1. Run tsup
 console.log('Building with tsup...')
 execSync('pnpm tsup --config tsup.config.ts', { cwd: root, stdio: 'inherit' })
 
 // 2. Rename .mjs → .js and .d.mts → .d.ts, update internal imports
-const distDir = path.join(root, 'dist-publish/dist')
+const distDir = path.join(cliPublishDir, 'dist')
 const files = fs.readdirSync(distDir)
 for (const file of files) {
   const filePath = path.join(distDir, file)
@@ -95,14 +103,14 @@ const publishPkg = {
 }
 
 fs.writeFileSync(
-  path.join(root, 'dist-publish/package.json'),
+  path.join(cliPublishDir, 'package.json'),
   JSON.stringify(publishPkg, null, 2) + '\n'
 )
 
 // 5. Copy README
 fs.copyFileSync(
   path.join(root, 'README.md'),
-  path.join(root, 'dist-publish/README.md')
+  path.join(cliPublishDir, 'README.md')
 )
 
 // 6. Verify: every external import in the bundle must be a Node builtin or a published dependency
@@ -161,7 +169,8 @@ if (fs.existsSync(sdkDir)) {
   }
 
   console.log('\nBuilding @n1creator/openacp-plugin-sdk...')
-  execSync('npx tsc', { cwd: sdkDir, stdio: 'inherit' })
+  fs.rmSync(path.join(sdkDir, 'dist'), { recursive: true, force: true })
+  execSync('pnpm build', { cwd: sdkDir, stdio: 'inherit' })
 
   // Generate SDK publish package.json (replace workspace:* with actual version)
   const sdkPkg = JSON.parse(fs.readFileSync(path.join(sdkDir, 'package.json'), 'utf-8'))
@@ -170,11 +179,10 @@ if (fs.existsSync(sdkDir)) {
   delete sdkPkg.devDependencies
   // peerDependencies already uses @n1creator/openacp-cli (not workspace protocol)
 
-  const sdkPublishDir = path.join(root, 'dist-publish-sdk')
   fs.mkdirSync(sdkPublishDir, { recursive: true })
 
   // Copy dist
-  execSync(`cp -r ${path.join(sdkDir, 'dist')} ${sdkPublishDir}/dist`, { stdio: 'inherit' })
+  fs.cpSync(path.join(sdkDir, 'dist'), path.join(sdkPublishDir, 'dist'), { recursive: true })
 
   // Write package.json
   fs.writeFileSync(

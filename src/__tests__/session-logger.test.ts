@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { initLogger, shutdownLogger, createChildLogger, createSessionLogger } from '../core/utils/log.js'
+import { initLogger, shutdownLogger, createChildLogger, createSessionLogger, closeSessionLogger } from '../core/utils/log.js'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -24,7 +24,7 @@ describe('session logger', () => {
     const sessionLog = createSessionLogger('test-session-123', parentLog)
     sessionLog.info('session started')
 
-    await new Promise(r => setTimeout(r, 200))
+    await closeSessionLogger(sessionLog)
 
     const sessionFile = path.join(logDir, 'sessions', 'test-session-123.log')
     expect(fs.existsSync(sessionFile)).toBe(true)
@@ -41,7 +41,7 @@ describe('session logger', () => {
     const sessionLog = createSessionLogger('abc123', parentLog)
     sessionLog.info('prompt queued')
 
-    await new Promise(r => setTimeout(r, 200))
+    await closeSessionLogger(sessionLog)
 
     const sessionFile = path.join(logDir, 'sessions', 'abc123.log')
     const content = fs.readFileSync(sessionFile, 'utf-8')
@@ -49,20 +49,23 @@ describe('session logger', () => {
     expect(entry.sessionId).toBe('abc123')
   })
 
-  it('also writes to combined log', async () => {
+  it.each([1, 2, 3])('also writes to combined log deterministically (run %s)', async (run) => {
     const logDir = path.join(tmpDir, 'logs')
     initLogger({ level: 'info', logDir, maxFileSize: '10m', maxFiles: 7, sessionLogRetentionDays: 30 })
 
     const parentLog = createChildLogger({ module: 'session' })
-    const sessionLog = createSessionLogger('dual-write-test', parentLog)
-    sessionLog.info('dual write message')
+    const sessionLog = createSessionLogger(`dual-write-test-${run}`, parentLog)
+    sessionLog.info(`dual write message ${run}`)
 
-    await new Promise(r => setTimeout(r, 200))
+    await closeSessionLogger(sessionLog)
+    // The session destination and combined worker are independent. Closing the
+    // session file cannot prove that the root transport has flushed, so await
+    // the production shutdown lifecycle before inspecting the combined file.
+    await shutdownLogger()
 
     const combinedFile = fs.readdirSync(logDir).find(f => f.startsWith('openacp'))
-    if (combinedFile) {
-      const content = fs.readFileSync(path.join(logDir, combinedFile), 'utf-8')
-      expect(content).toContain('dual write message')
-    }
+    expect(combinedFile).toBeDefined()
+    const content = fs.readFileSync(path.join(logDir, combinedFile!), 'utf-8')
+    expect(content).toContain(`dual write message ${run}`)
   })
 })

@@ -36,6 +36,38 @@ export async function waitForPortFile(
 }
 
 /**
+ * Wait until the daemon API is accepting requests and identifies itself as the
+ * expected instance. Unlike waitForPortFile(), this cannot report success from
+ * a stale api.port file left by a child that exited during startup.
+ */
+export async function waitForApiReady(
+  instanceRoot: string,
+  expectedInstanceId: string,
+  timeoutMs = 10_000,
+  intervalMs = 100,
+): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const port = readApiPort(undefined, instanceRoot)
+    if (port !== null) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/api/v1/system/health`, {
+          signal: AbortSignal.timeout(Math.max(intervalMs, 250)),
+        })
+        if (response.ok) {
+          const body = await response.json() as { status?: string; instanceId?: string }
+          if (body.status === 'ok' && body.instanceId === expectedInstanceId) return port
+        }
+      } catch {
+        // The process may still be binding the API port. Poll until the deadline.
+      }
+    }
+    await sleep(intervalMs)
+  }
+  return null
+}
+
+/**
  * Read the daemon's API port from the port file.
  * Returns null if the file doesn't exist or contains an invalid value,
  * which indicates the daemon is not running.

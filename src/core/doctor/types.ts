@@ -29,6 +29,8 @@ export interface DoctorContext {
   portFilePath: string;
   pluginsDir: string;
   logsDir: string;
+  /** Resolve external requests through the authoritative scoped proxy policy. */
+  fetchForScope(scope: string): typeof fetch;
 }
 
 /** Result of a single diagnostic check within a category. */

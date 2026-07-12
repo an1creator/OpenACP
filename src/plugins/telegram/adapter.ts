@@ -77,9 +77,10 @@ interface UsageMetadata {
  * from the polyfilled signal object before forwarding the request.
  */
 function patchedFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit,
-): Promise<Response> {
+  input: any,
+  init: any | undefined,
+  delegate: any,
+): Promise<any> {
   if (init?.signal && !(init.signal instanceof AbortSignal)) {
     const nativeController = new AbortController();
     const polyfillSignal = init.signal as unknown as {
@@ -93,7 +94,7 @@ function patchedFetch(
     }
     init = { ...init, signal: nativeController.signal };
   }
-  return fetch(input, init);
+  return delegate(input, init);
 }
 
 /**
@@ -170,6 +171,11 @@ export class TelegramAdapter extends MessagingAdapter {
   private _prerequisiteWatcher: ReturnType<typeof setTimeout> | null = null;
   /** Set during normal shutdown so bot.stop() does not trigger a self-restart. */
   private _stopping = false;
+  private unregisterProxyTester?: () => void;
+
+  private telegramFetch(): typeof fetch {
+    return this.core.proxyService.createFetch('channels.telegram');
+  }
 
   /** Returns the configured Telegram supergroup chat ID. */
   getChatId(): number {
@@ -255,6 +261,16 @@ export class TelegramAdapter extends MessagingAdapter {
     this.core = core;
     this.telegramConfig = config;
     this.saveTopicIds = saveTopicIds;
+    this.unregisterProxyTester = this.core.proxyService.registerRouteTester(
+      'channels.telegram',
+      async (fetcher) => {
+        const response = await fetcher(`https://api.telegram.org/bot${this.telegramConfig.botToken}/getMe`, {
+          signal: AbortSignal.timeout(10_000),
+        })
+        const body = await response.json().catch(() => null) as { ok?: boolean } | null
+        if (!response.ok || !body?.ok) throw new Error('Telegram rejected the candidate proxy route')
+      },
+    );
   }
 
   /**
@@ -268,7 +284,11 @@ export class TelegramAdapter extends MessagingAdapter {
     this.bot = new Bot(this.telegramConfig.botToken, {
       client: {
         baseFetchConfig: { duplex: "half" } as RequestInit,
-        fetch: patchedFetch,
+        fetch: (input, init) => patchedFetch(
+          input,
+          init,
+          this.telegramFetch(),
+        ),
       },
     });
     this.fileService = this.core.fileService;
@@ -669,6 +689,7 @@ export class TelegramAdapter extends MessagingAdapter {
     const prereqResult = await checkTopicsPrerequisites(
       this.telegramConfig.botToken,
       this.telegramConfig.chatId,
+      this.telegramFetch(),
     );
 
     if (prereqResult.ok) {
@@ -952,6 +973,7 @@ export class TelegramAdapter extends MessagingAdapter {
     const result = await checkTopicsPrerequisites(
       this.telegramConfig.botToken,
       this.telegramConfig.chatId,
+      this.telegramFetch(),
     );
 
     if (result.ok) {
@@ -1004,6 +1026,7 @@ export class TelegramAdapter extends MessagingAdapter {
       const result = await checkTopicsPrerequisites(
         this.telegramConfig.botToken,
         this.telegramConfig.chatId,
+        this.telegramFetch(),
       );
 
       if (result.ok) {
@@ -1048,6 +1071,8 @@ export class TelegramAdapter extends MessagingAdapter {
    */
   async stop(): Promise<void> {
     this._stopping = true;
+    this.unregisterProxyTester?.();
+    this.unregisterProxyTester = undefined;
 
     // Cancel background prerequisite watcher if running
     if (this._prerequisiteWatcher !== null) {
@@ -1944,7 +1969,7 @@ export class TelegramAdapter extends MessagingAdapter {
       const file = await this.bot.api.getFile(fileId);
       if (!file.file_path) return null;
       const url = `https://api.telegram.org/file/bot${this.telegramConfig.botToken}/${file.file_path}`;
-      const response = await fetch(url);
+      const response = await this.telegramFetch()(url);
       if (!response.ok) return null;
       const buffer = Buffer.from(await response.arrayBuffer());
       return { buffer, filePath: file.file_path };

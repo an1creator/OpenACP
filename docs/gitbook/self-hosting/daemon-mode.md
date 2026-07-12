@@ -1,5 +1,8 @@
 # Daemon Mode
 
+The supervisor ownership decision is recorded in
+[ADR 0002](../../adr/0002-supervisor-owned-daemon-lifecycle.md).
+
 ## Foreground vs Daemon
 
 OpenACP can run in two modes, controlled by the `runMode` config field.
@@ -13,7 +16,7 @@ OpenACP can run in two modes, controlled by the `runMode` config field.
 All daemon commands use the `openacp` CLI:
 
 ```bash
-openacp start       # Start (foreground or daemon depending on runMode config)
+openacp start       # Start as a background daemon
 openacp stop        # Send SIGTERM to the daemon, wait up to 5 s, then SIGKILL
 openacp status      # Print running/stopped and PID if running
 openacp logs        # Tail the daemon log file
@@ -23,19 +26,33 @@ openacp attach      # Connect to running daemon: show status + tail logs
 
 ### `openacp start`
 
-When `runMode` is `daemon`, this spawns a detached child process (`--daemon-child` flag) and returns immediately. The child writes its PID to the PID file and begins accepting messages.
+On supported Linux/macOS hosts, this installs and starts the per-instance
+systemd/launchd service. It does not also create a detached process. A detached
+`--daemon-child` remains only as fallback when supervisor setup is unavailable.
+Service updates are transactional: systemd restores the previous unit on
+reload/enable failure; launchd validates a temporary plist and restores plus
+re-bootstraps the previous job if validation, bootout, or bootstrap fails. If a
+partial managed entry remains, OpenACP refuses detached fallback to avoid split
+brain.
 
-When `runMode` is `foreground`, this runs the server in the current process.
+An explicit start restores the running marker before activating the supervisor.
+The command reports success only after the managed service has a live process and
+the instance-specific API health check responds. This makes `stop` followed by
+`start` safe even though `stop` deliberately leaves the enabled unit installed.
 
 ### `openacp stop`
 
-Reads the PID file and sends `SIGTERM`. Polls every 100 ms for up to 5 seconds waiting for the process to exit. If the process does not exit within 5 seconds, `SIGKILL` is sent. The PID file is removed after a successful stop.
+For a managed instance, delegates stop to systemd/launchd and leaves the enabled
+unit installed. Use `openacp autostart uninstall` only when registration should
+be removed. Detached fallback mode reads the PID file and uses SIGTERM/SIGKILL.
 
-Calling `stop` also removes the running marker file (`<instance-root>/running`), which suppresses autostart on the next boot.
+Calling `stop` also removes the running marker file.
 
 ### `openacp restart`
 
-Equivalent to `stop` followed by `start`. If no daemon is running, it skips the stop step and starts a new one. Useful after updating OpenACP to pick up the new version without manually stopping first.
+Managed instances refresh their unit and use the supervisor's restart command.
+This prevents an inactive unit plus detached PPID-1 competitor. Non-managed
+instances preserve the PID-based stop/start fallback.
 
 ### `openacp status`
 

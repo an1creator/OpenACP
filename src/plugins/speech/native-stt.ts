@@ -62,10 +62,15 @@ export function buildSpeechServiceConfig(raw: Record<string, unknown>): SpeechSe
 }
 
 /** Instantiate all native STT providers described by a service config. */
-export function createNativeSTTProviders(config: SpeechServiceConfig): Map<string, STTProvider> {
+export interface SpeechNetworkResolver {
+  getFetch: () => typeof fetch
+  getChildEnv: () => Record<string, string>
+}
+
+export function createNativeSTTProviders(config: SpeechServiceConfig, network?: SpeechNetworkResolver): Map<string, STTProvider> {
   const providers = new Map<string, STTProvider>()
   const groq = config.stt.providers.groq
-  if (groq?.apiKey) providers.set('groq', new GroqSTT(groq.apiKey, groq.model))
+  if (groq?.apiKey) providers.set('groq', new GroqSTT(groq.apiKey, groq.model, network?.getFetch(), network?.getFetch))
 
   const local = config.stt.providers[LOCAL_WHISPER_PROVIDER]
   if (local?.apiKey !== undefined) {
@@ -78,6 +83,7 @@ export function createNativeSTTProviders(config: SpeechServiceConfig): Map<strin
       device: readOptionalString(local.device),
       computeType: readOptionalString(local.computeType),
       timeoutMs: readOptionalNumber(local.timeoutMs),
+      getChildEnv: network?.getChildEnv,
     }))
   }
   return providers

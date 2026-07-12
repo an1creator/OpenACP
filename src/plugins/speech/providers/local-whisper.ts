@@ -21,6 +21,8 @@ export interface LocalWhisperSTTOptions {
   computeType?: string
   timeoutMs?: number
   tempRoot?: string
+  childEnv?: Record<string, string>
+  getChildEnv?: () => Record<string, string>
 }
 
 export const LOCAL_WHISPER_DEFAULTS = {
@@ -37,8 +39,10 @@ export const LOCAL_WHISPER_DEFAULTS = {
 export class LocalWhisperSTT implements STTProvider {
   readonly name = LOCAL_WHISPER_PROVIDER
   private readonly config: Required<Omit<LocalWhisperSTTOptions, 'tempRoot'>> & Pick<LocalWhisperSTTOptions, 'tempRoot'>
+  private readonly getChildEnv?: () => Record<string, string>
 
   constructor(options: LocalWhisperSTTOptions = {}) {
+    this.getChildEnv = options.getChildEnv
     this.config = {
       scriptPath: options.scriptPath ?? resolveLocalWhisperScriptPath(),
       language: options.language ?? LOCAL_WHISPER_DEFAULTS.language,
@@ -49,6 +53,8 @@ export class LocalWhisperSTT implements STTProvider {
       computeType: options.computeType ?? LOCAL_WHISPER_DEFAULTS.computeType,
       timeoutMs: options.timeoutMs ?? LOCAL_WHISPER_DEFAULTS.timeoutMs,
       tempRoot: options.tempRoot,
+      childEnv: options.childEnv ?? process.env as Record<string, string>,
+      getChildEnv: options.getChildEnv ?? (() => options.childEnv ?? process.env as Record<string, string>),
     }
   }
 
@@ -61,6 +67,7 @@ export class LocalWhisperSTT implements STTProvider {
       const { stdout, stderr } = await execFileAsync(this.config.scriptPath, this.buildArgs(audioPath, options), {
         timeout: this.config.timeoutMs,
         maxBuffer: 10 * 1024 * 1024,
+        env: this.getChildEnv?.() ?? this.config.childEnv,
       })
       const text = stdout.trim()
       if (!text) throw new Error('Local Whisper returned an empty transcript')

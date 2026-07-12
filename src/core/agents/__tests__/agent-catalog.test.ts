@@ -113,4 +113,20 @@ describe("AgentCatalog", () => {
       expect(claudeItem?.installed).toBe(true);
     });
   });
+
+  it("uses the injected scoped transport for the ACP registry", async () => {
+    const scopedFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ agents: [] }),
+    })
+    const store = new AgentStore("/tmp/test/.openacp/agents.json")
+    const scopedCatalog = new AgentCatalog(
+      store,
+      "/tmp/test/.openacp/registry-cache.json",
+      undefined,
+      scopedFetch as typeof fetch,
+    )
+    await scopedCatalog.fetchRegistry()
+    expect(scopedFetch).toHaveBeenCalledWith("https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json")
+  })
 });

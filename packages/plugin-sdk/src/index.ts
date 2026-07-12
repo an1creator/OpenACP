@@ -27,6 +27,12 @@ export type {
   UsageService, TunnelServiceInterface, ContextService,
 } from '@n1creator/openacp-cli'
 
+export type {
+  ProxyService, ProxyProtocol, ProxyRoute, ProxyProfileInput, ProxyProfile,
+  ProxyStatus, ProxyRouteResolution, ProxyRouteChangeResult,
+  ScopedFetch, ScopedRequestBody, ScopedRequestInit,
+} from './proxy-types.js'
+
 // --- Speech types (self-contained, no @n1creator/openacp-cli dependency) ---
 export type {
   TTSProvider, TTSOptions, TTSResult,

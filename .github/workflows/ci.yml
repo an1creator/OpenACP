@@ -33,4 +33,4 @@ jobs:
 
       - name: Verify publish artifacts
         if: matrix.node-version == 24
-        run: pnpm build:publish
+        run: pnpm verify:publish-artifacts

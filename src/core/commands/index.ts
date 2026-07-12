@@ -6,6 +6,7 @@ import { registerHelpCommand } from './help.js'
 import { registerMenuCommand } from './menu.js'
 import { registerSwitchCommands } from './switch.js'
 import { registerConfigCommands } from './config.js'
+import { registerProxyCommand } from './proxy.js'
 
 /**
  * Register all built-in system commands with the command registry.
@@ -21,4 +22,5 @@ export function registerSystemCommands(registry: CommandRegistry, core: unknown)
   registerMenuCommand(registry, core)
   registerSwitchCommands(registry, core)
   registerConfigCommands(registry, core)
+  registerProxyCommand(registry, core)
 }

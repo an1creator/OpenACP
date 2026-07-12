@@ -73,6 +73,8 @@ describe('autostart', () => {
       expect(plist).toContain('<key>EnvironmentVariables</key>')
       expect(plist).toContain('<key>OPENACP_INSTANCE_ROOT</key>')
       expect(plist).toContain('<string>/Users/test/workspace/.openacp</string>')
+      expect(plist).toContain('<key>OPENACP_SUPERVISOR</key>')
+      expect(plist).toContain('<string>launchd</string>')
     })
 
     it('uses per-instance label with instanceId', async () => {
@@ -136,6 +138,7 @@ describe('autostart', () => {
       )
       expect(unit).toContain('OPENACP_INSTANCE_ROOT=')
       expect(unit).toContain('/home/user/.openacp')
+      expect(unit).toContain('Environment=OPENACP_SUPERVISOR=systemd')
     })
 
     it('escapes special characters in paths', async () => {

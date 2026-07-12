@@ -46,6 +46,7 @@
 * [Agent Switch](features/agent-switch.md)
 * [Workspaces](features/multi-instance.md)
 * [App Connectivity](features/app-connectivity.md)
+* [Scoped Proxy Routing](features/proxy-routing.md)
 * [Doctor Diagnostics](features/doctor.md)
 * [Assistant Mode](features/assistant-mode.md)
 

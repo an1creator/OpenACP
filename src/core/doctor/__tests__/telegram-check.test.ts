@@ -17,6 +17,7 @@ function makeContext(overrides: Partial<DoctorContext> = {}): DoctorContext {
     portFilePath: '/tmp/port',
     pluginsDir: '/tmp/plugins',
     logsDir: '/tmp/logs',
+    fetchForScope: () => globalThis.fetch,
     ...overrides,
   }
 }

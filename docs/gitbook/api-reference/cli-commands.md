@@ -977,6 +977,36 @@ openacp uninstall @openacp/adapter-discord --json
 
 Checks npm for the latest version of `@n1creator/openacp-cli` and installs it if an update is available.
 
+---
+
+## proxy
+
+Manages scoped proxy profiles and routes through the running daemon. Responses
+are redacted; credential values are accepted only through a protected env file
+or write-only REST fields.
+
+```bash
+openacp proxy status [--json]
+openacp proxy import <id> --env-file <0600-file> [--name <label>]
+openacp proxy set <scope|global> <direct|inherit|profile:id>
+openacp proxy clear <scope>
+openacp proxy test --scope <scope> [--url <https-url>]
+openacp proxy test --profile <id> [--url <https-url>]
+openacp proxy delete <id>
+```
+
+`--url` is administrative and accepts only the built-in public diagnostic
+hosts (`api.ipify.org`, `ifconfig.me`, or `httpbin.org`); arbitrary URLs are
+rejected by the daemon's SSRF guard.
+
+Changing an agent route affects new ACP processes and rebuilds the idle warm
+pool; active sessions continue on their existing process.
+
+Connectivity failure exits non-zero. With `--json`, failures use
+`success:false` and stable codes such as `PROXY_TEST_FAILED` and
+`PROXY_ROUTE_TEST_FAILED`. A rejected transactional channel route explicitly
+states that the previous route was not changed.
+
 **Usage**
 ```
 openacp update

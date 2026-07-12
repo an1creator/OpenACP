@@ -781,6 +781,79 @@ Returns `401` if the code is expired or already used.
 
 ---
 
+## Proxy routing
+
+All proxy endpoints require authentication. Reads and tests require
+`config:read`; mutations require `network:proxy:manage` (admin-only in built-in
+roles). Responses
+never include credential values.
+
+### `GET /api/v1/proxy`
+
+Returns profiles with `hasCredentials`, routing rules, registered scopes, and
+redacted capability diagnostics. The `revision` field is the current optimistic
+concurrency token.
+
+### `POST /api/v1/proxy/profiles`
+
+Creates or updates a profile. `username` and `password` are write-only.
+
+```json
+{
+  "id": "usa",
+  "protocol": "http",
+  "host": "proxy.example",
+  "port": 8080,
+  "username": "write-only",
+  "password": "write-only",
+  "noProxy": ["localhost", "127.0.0.1", "::1"],
+  "failClosed": true,
+  "expectedRevision": 12
+}
+```
+
+### `POST /api/v1/proxy/profiles/import-env`
+
+Imports a mode-0600 env file visible to the daemon:
+
+```json
+{ "id": "usa", "envFile": "/protected/path/proxy.env", "name": "USA", "expectedRevision": 12 }
+```
+
+### `PUT /api/v1/proxy/routes/:scope`
+
+```json
+{ "route": "profile:usa", "expectedRevision": 12 }
+```
+
+Use `direct` or `inherit` instead of a profile as needed. Delete the endpoint to
+remove an exact/category override. Telegram-affecting changes are tested before
+they are persisted. Rejection returns HTTP 400 with code
+`PROXY_ROUTE_TEST_FAILED` and confirms that the old route remains active.
+An `expectedRevision` mismatch returns HTTP 409 with
+`PROXY_REVISION_CONFLICT`; read status again before retrying. Profile/route
+validation errors are HTTP 400 and a corrupt fail-closed policy store is HTTP
+503.
+
+### `POST /api/v1/proxy/test`
+
+Test exactly one scope or profile:
+
+```json
+{ "scope": "channels.telegram" }
+```
+
+```json
+{ "profile": "usa", "targetUrl": "https://api.ipify.org?format=json" }
+```
+
+The response contains only `ok`, optional HTTP status/error, and the redacted
+scope/profile identifier. The default target is fixed and needs only
+`config:read`. Supplying `targetUrl` requires `network:proxy:manage`; it must be
+HTTPS without credentials, use an approved diagnostic host (`api.ipify.org`,
+`ifconfig.me`, or `httpbin.org`), and must not resolve to private, loopback,
+link-local, CGNAT, reserved, or metadata space.
+
 ## Server-Sent Events
 
 ### GET /api/events

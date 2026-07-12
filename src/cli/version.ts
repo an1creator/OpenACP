@@ -1,8 +1,21 @@
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
+import { ProxyService } from '../core/network/proxy-service.js'
 
 export const NPM_PACKAGE = '@n1creator/openacp-cli'
+
+export function getUpdateNetwork(instanceRoot?: string): { fetcher?: typeof fetch; environment?: NodeJS.ProcessEnv } {
+  if (!instanceRoot) return {}
+  const proxy = new ProxyService(instanceRoot)
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  )
+  return {
+    fetcher: proxy.createFetch('services.npmUpdate'),
+    environment: proxy.buildChildEnv('services.npmUpdate', inherited),
+  }
+}
 
 // Walk up from the current module's directory to find package.json.
 // Necessary because the compiled output lives in dist/ but package.json is at the root.
@@ -38,9 +51,9 @@ export function getCurrentVersion(): string {
  * Returns null on any error (network failure, rate limit, etc.) — callers treat null as "unknown".
  * Timeout is 5 seconds to avoid blocking the CLI on slow connections.
  */
-export async function getLatestVersion(): Promise<string | null> {
+export async function getLatestVersion(fetcher: typeof fetch = globalThis.fetch): Promise<string | null> {
   try {
-    const res = await fetch(`https://registry.npmjs.org/${NPM_PACKAGE}/latest`, {
+    const res = await fetcher(`https://registry.npmjs.org/${NPM_PACKAGE}/latest`, {
       signal: AbortSignal.timeout(5000),
     })
     if (!res.ok) return null
@@ -69,12 +82,13 @@ export function compareVersions(current: string, latest: string): -1 | 0 | 1 {
  * Install the latest n1creator OpenACP release as a global package.
  * Forwards signals to the child so Ctrl+C during update cancels cleanly.
  */
-export async function runUpdate(): Promise<boolean> {
+export async function runUpdate(environment?: NodeJS.ProcessEnv): Promise<boolean> {
   const { spawn } = await import('node:child_process')
   return new Promise((resolve) => {
     const child = spawn('npm', ['install', '-g', `${NPM_PACKAGE}@latest`], {
       stdio: 'inherit',
       shell: false,
+      env: environment,
     })
     const onSignal = () => {
       child.kill('SIGTERM')
@@ -97,13 +111,14 @@ export async function runUpdate(): Promise<boolean> {
  * After a successful update the process exits with 0 — the user must re-run their command
  * against the newly installed binary.
  */
-export async function checkAndPromptUpdate(): Promise<void> {
+export async function checkAndPromptUpdate(instanceRoot?: string): Promise<void> {
   if (process.env.OPENACP_DEV_LOOP || process.env.OPENACP_SKIP_UPDATE_CHECK || !process.stdin.isTTY) return
 
   const current = getCurrentVersion()
   if (current === '0.0.0-dev') return
 
-  const latest = await getLatestVersion()
+  const network = getUpdateNetwork(instanceRoot)
+  const latest = await getLatestVersion(network.fetcher)
   if (!latest || compareVersions(current, latest) >= 0) return
 
   console.log(`\x1b[33mUpdate available: v${current} → v${latest}\x1b[0m`)
@@ -114,7 +129,7 @@ export async function checkAndPromptUpdate(): Promise<void> {
   if (clack.isCancel(yes) || !yes) {
     return
   }
-  const ok = await runUpdate()
+  const ok = await runUpdate(network.environment)
   if (ok) {
     console.log(`\x1b[32m✓ Updated to v${latest}. Please re-run your command.\x1b[0m`)
     process.exit(0)

@@ -27,6 +27,18 @@ export function getRunningMarker(root: string): string {
   return path.join(root, 'running')
 }
 
+/** Explicit supervisor ownership marker; managed children never self-respawn. */
+export function getDaemonSupervisor(
+  argv: readonly string[] = process.argv,
+  env: NodeJS.ProcessEnv = process.env,
+): 'systemd' | 'launchd' | null {
+  if (!argv.includes('--daemon-child')) return null
+  if (env.OPENACP_SUPERVISOR === 'systemd' || env.OPENACP_SUPERVISOR === 'launchd') return env.OPENACP_SUPERVISOR
+  if (env.INVOCATION_ID) return 'systemd'
+  return null
+}
+export const isSystemdManagedDaemon = (argv: readonly string[] = process.argv, env: NodeJS.ProcessEnv = process.env) => getDaemonSupervisor(argv, env) === 'systemd'
+
 /** Write a PID file, creating the parent directory if needed. */
 export function writePidFile(pidPath: string, pid: number): void {
   const dir = path.dirname(pidPath)

@@ -76,6 +76,9 @@ Connect messaging platforms (Telegram, Discord) to 28+ AI coding agents via ACP 
   openacp tunnel list                       List active tunnels           \x1b[2m[--json]\x1b[0m
   openacp tunnel stop <port>                Stop a tunnel                 \x1b[2m[--json]\x1b[0m
   openacp tunnel stop-all                   Stop all user tunnels         \x1b[2m[--json]\x1b[0m
+  openacp proxy status                      Show redacted proxy routing   \x1b[2m[--json]\x1b[0m
+  openacp proxy set <scope> <route>         Set a scoped proxy route
+  openacp proxy test --scope <scope>        Test a scoped route
 
 \x1b[1mDaemon API:\x1b[0m \x1b[2m(requires running daemon)\x1b[0m
   openacp api status                   Active sessions     \x1b[2m[--json]\x1b[0m

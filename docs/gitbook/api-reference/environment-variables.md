@@ -51,6 +51,16 @@ These remain functional for backward compatibility but are read by each plugin r
 
 ## Notes
 
+### Host proxy environment
+
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` are not config
+overrides. They are consumed only by a scope whose route is `inherit`. OpenACP
+does not install them as a global dispatcher. A `direct` ACP-agent route removes
+both upper/lowercase variants and Node proxy flags from the child environment.
+Use `openacp proxy import <id> --env-file <file>` to migrate an existing proxy
+environment into a protected profile without exposing credentials in arguments
+or output.
+
 - **`OPENACP_DEBUG`** is a convenience shorthand. Setting `OPENACP_LOG_LEVEL=debug` is equivalent and takes precedence.
 - **`OPENACP_CONFIG_PATH`** does not correspond to a config field; it controls where the config file is read from and is evaluated before any config is loaded.
 - Numeric fields (including local Whisper beam size and timeout) are converted to numbers automatically.

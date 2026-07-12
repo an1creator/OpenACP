@@ -35,6 +35,7 @@ import type { ContextManager } from "../plugins/context/context-manager.js";
 import type { InstanceContext } from "./instance/instance-context.js";
 import { Hook, BusEvent, SessionEv } from "./events.js";
 import { extractSender, type TurnContext, type TurnRouting } from "./sessions/turn-context.js";
+import { ProxyService } from './network/proxy-service.js';
 const log = createChildLogger({ module: "core" });
 
 /**
@@ -70,6 +71,8 @@ export class OpenACPCore {
   readonly menuRegistry = new MenuRegistry();
   readonly assistantRegistry = new AssistantRegistry();
   assistantManager!: AssistantManager;
+  /** Scoped proxy policy shared by transports, agent spawns, API and commands. */
+  readonly proxyService: ProxyService;
 
   // Services (security, notifications, speech, etc.) are provided by plugins that
   // register during boot. Core accesses them lazily via ServiceRegistry so it doesn't
@@ -126,14 +129,22 @@ export class OpenACPCore {
     this.configManager = configManager;
     this.instanceContext = ctx;
     const config = configManager.get();
+    this.proxyService = new ProxyService(ctx.root);
     this.agentCatalog = new AgentCatalog(
       new AgentStore(ctx.paths.agents),
       ctx.paths.registryCache,
       ctx.paths.agentsDir,
+      this.proxyService.createFetch('services.agentRegistry'),
     );
     this.agentCatalog.load();
 
-    this.agentManager = new AgentManager(this.agentCatalog);
+    this.agentManager = new AgentManager(this.agentCatalog, this.proxyService);
+    this.proxyService.onRouteChanged(async (scope) => {
+      if (scope === 'global' || scope === 'agents.default' || scope.startsWith('agents.')) {
+        await this.agentManager.destroyWarm();
+        log.info({ scope }, 'Proxy route changed; idle agent warm pool invalidated')
+      }
+    });
     const storePath = ctx.paths.sessions;
     this.sessionStore = new JsonFileSessionStore(
       storePath,
@@ -167,6 +178,9 @@ export class OpenACPCore {
       instanceRoot: ctx.root,
       log: createChildLogger({ module: "plugin" }),
     });
+    // Plugins can opt into scoped routing through ctx.getService('proxy') and
+    // register `plugins.<pluginName>.<flow>` scopes without global network hooks.
+    this.lifecycleManager.serviceRegistry.register('proxy', this.proxyService, '@openacp/core');
 
     // Wire middleware chain to session factory and session manager
     this.sessionFactory.middlewareChain = this.lifecycleManager.middlewareChain;

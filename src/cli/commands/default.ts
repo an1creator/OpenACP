@@ -45,7 +45,7 @@ export async function cmdDefault(command: string | undefined, instanceRoot?: str
     process.exit(1)
   }
 
-  await checkAndPromptUpdate()
+  await checkAndPromptUpdate(root)
 
   const { ConfigManager } = await import('../../core/config/config.js')
   const configPath = path.join(root, 'config.json')

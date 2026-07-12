@@ -71,6 +71,21 @@ describe('AgentManager warm-pool', () => {
   // ── 1. prewarm schedules a single warm entry; concurrent calls are deduped ──
 
   describe('prewarm()', () => {
+    it('passes the per-agent proxy environment to the ACP subprocess boundary', async () => {
+      const catalog = mockCatalog({ codex: { command: 'codex-acp' } })
+      const proxyService = {
+        buildAgentEnv: vi.fn((_name, env) => ({ ...env, HTTPS_PROXY: 'http://scoped-proxy:8080' })),
+      }
+      const manager = new AgentManager(catalog, proxyService as any)
+      manager.prewarm('codex', '/workspace')
+      await vi.waitFor(() => expect(AgentInstance.spawnSubprocess).toHaveBeenCalledOnce())
+      expect(proxyService.buildAgentEnv).toHaveBeenCalledWith('codex', expect.any(Object))
+      expect(AgentInstance.spawnSubprocess).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'codex' }), '/workspace', [],
+        expect.objectContaining({ HTTPS_PROXY: 'http://scoped-proxy:8080' }),
+      )
+    })
+
     it('spawns a subprocess for the named agent in the background', async () => {
       const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
       const manager = new AgentManager(catalog)
@@ -316,6 +331,26 @@ describe('AgentManager warm-pool', () => {
       // Fell through to full spawn
       expect(AgentInstance.spawn).toHaveBeenCalledOnce()
     })
+  })
+
+  it('rejects a warm process created under an older proxy policy generation', async () => {
+    const catalog = mockCatalog({ codex: { command: 'codex-acp' } })
+    let generation = 1
+    const proxyService = {
+      registerScope: vi.fn(),
+      getPolicyGeneration: () => generation,
+      buildAgentEnv: vi.fn((_name, env) => env),
+    }
+    const warm = fakeWarmInstance()
+    vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warm as any)
+    const manager = new AgentManager(catalog, proxyService as any)
+    manager.prewarm('codex', '/workspace')
+    await vi.waitFor(() => expect(AgentInstance.spawnSubprocess).toHaveBeenCalledOnce())
+    generation++
+    await manager.spawn('codex', '/workspace')
+    expect(warm.claimForSession).not.toHaveBeenCalled()
+    expect(warm.destroy).toHaveBeenCalled()
+    expect(AgentInstance.spawn).toHaveBeenCalledOnce()
   })
 
   // ── Review fix: dead warm instance must be destroy()ed (not just orphaned) ──

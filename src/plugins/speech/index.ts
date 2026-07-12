@@ -28,6 +28,9 @@ const speechPlugin: OpenACPPlugin = {
   async install(ctx: InstallContext) {
     const { terminal, settings } = ctx
     const pluginsDir = ctx.instanceRoot ? path.join(ctx.instanceRoot, 'plugins') : undefined
+    const installEnv = ctx.instanceRoot
+      ? new (await import('../../core/network/proxy-service.js')).ProxyService(ctx.instanceRoot).buildChildEnv('services.pluginInstaller', process.env as Record<string, string>)
+      : undefined
 
     // Interactive setup
     const enableStt = await terminal.confirm({
@@ -79,7 +82,7 @@ const speechPlugin: OpenACPPlugin = {
     if (ttsProvider === 'edge-tts') {
       terminal.log.info('Installing Edge TTS plugin...')
       try {
-        await installNpmPlugin(EDGE_TTS_PLUGIN, pluginsDir)
+        await installNpmPlugin(EDGE_TTS_PLUGIN, pluginsDir, installEnv)
         terminal.log.success('Edge TTS plugin installed')
       } catch (err) {
         terminal.log.warning(`Failed to install Edge TTS plugin: ${err}. You can install it later with: openacp plugin install ${EDGE_TTS_PLUGIN}`)
@@ -186,16 +189,27 @@ const speechPlugin: OpenACPPlugin = {
     const pluginsDir = ctx.instanceRoot ? path.join(ctx.instanceRoot, 'plugins') : undefined
     const config = ctx.pluginConfig as Record<string, unknown>
     const speechConfig = buildSpeechServiceConfig(config)
+    const core = ctx.core as OpenACPCore | undefined
+    // `ctx.core` is absent in standalone plugin validation and older embedding
+    // hosts. A normal OpenACP boot always supplies ProxyService; corruption still
+    // throws here and remains fail-closed rather than falling through.
+    const network = core?.proxyService ? {
+      getFetch: () => core.proxyService.createFetch('services.speechDownloads'),
+      getChildEnv: () => core.proxyService.buildChildEnv('services.speechDownloads', process.env as Record<string, string>),
+    } : undefined
+    const pluginInstallEnv = core?.proxyService
+      ? () => core.proxyService.buildChildEnv('services.pluginInstaller', process.env as Record<string, string>)
+      : undefined
 
     const service = new SpeechService(speechConfig)
-    for (const [name, provider] of createNativeSTTProviders(speechConfig)) {
+    for (const [name, provider] of createNativeSTTProviders(speechConfig, network)) {
       service.registerSTTProvider(name, provider)
     }
 
     // TTS provider is now registered by @openacp/msedge-tts-plugin (no EdgeTTS here)
 
     // Register provider factory for hot-reload (STT only — TTS providers are managed by external plugins)
-    service.setProviderFactory((cfg) => ({ stt: createNativeSTTProviders(cfg), tts: new Map() }))
+    service.setProviderFactory((cfg) => ({ stt: createNativeSTTProviders(cfg, network), tts: new Map() }))
 
     ctx.registerService('speech', service)
 
@@ -235,7 +249,9 @@ const speechPlugin: OpenACPPlugin = {
 
         if (mode === 'install') {
           try {
-            const mod = await installNpmPlugin(EDGE_TTS_PLUGIN, pluginsDir)
+            const mod = pluginInstallEnv
+              ? await installNpmPlugin(EDGE_TTS_PLUGIN, pluginsDir, pluginInstallEnv())
+              : await installNpmPlugin(EDGE_TTS_PLUGIN, pluginsDir)
             const plugin = mod.default
             if (plugin && ctx.core) {
               // Boot the newly installed plugin without restarting the process

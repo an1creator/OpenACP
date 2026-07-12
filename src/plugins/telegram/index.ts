@@ -35,6 +35,9 @@ function createTelegramPlugin(): OpenACPPlugin {
       const { terminal, settings } = ctx
 
       const { validateBotToken, validateChatId, validateBotAdmin } = await import('./validators.js')
+      if (!ctx.instanceRoot) throw new Error('Telegram installation requires an OpenACP instance root')
+      const { ProxyService } = await import('../../core/network/proxy-service.js')
+      const telegramFetch = new ProxyService(ctx.instanceRoot).createFetch('channels.telegram')
 
       let botToken = ''
       while (true) {
@@ -49,7 +52,7 @@ function createTelegramPlugin(): OpenACPPlugin {
 
         const spin = terminal.spinner()
         spin.start('Validating token...')
-        const result = await validateBotToken(botToken)
+        const result = await validateBotToken(botToken, telegramFetch)
         if (result.ok) {
           spin.stop(`Connected to @${result.botUsername}`)
           break
@@ -96,12 +99,12 @@ function createTelegramPlugin(): OpenACPPlugin {
       } else {
         // Simple polling-based detection
         terminal.log.step('Open Telegram, go to your group (Topics enabled), and send any message. Waiting up to 4 minutes...')
-        chatId = await detectChatIdViaPolling(botToken, terminal)
+        chatId = await detectChatIdViaPolling(botToken, terminal, telegramFetch)
       }
 
       // Validate chat ID
       const pendingIssues: string[] = []
-      const chatResult = await validateChatId(botToken, chatId)
+      const chatResult = await validateChatId(botToken, chatId, telegramFetch)
       if (chatResult.ok) {
         terminal.log.success(`Group: ${chatResult.title}`)
         if (!chatResult.isForum) {
@@ -128,7 +131,7 @@ function createTelegramPlugin(): OpenACPPlugin {
       }
 
       // Validate admin
-      const adminResult = await validateBotAdmin(botToken, chatId)
+      const adminResult = await validateBotAdmin(botToken, chatId, telegramFetch)
       if (adminResult.ok) {
         terminal.log.success('Bot has admin privileges')
         if (!adminResult.canManageTopics) {
@@ -286,10 +289,11 @@ function createTelegramPlugin(): OpenACPPlugin {
 async function detectChatIdViaPolling(
   token: string,
   terminal: InstallContext['terminal'],
+  telegramFetch: typeof fetch,
 ): Promise<number> {
   let lastUpdateId = 0
   try {
-    const clearRes = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1`)
+    const clearRes = await telegramFetch(`https://api.telegram.org/bot${token}/getUpdates?offset=-1`)
     const clearData = (await clearRes.json()) as { ok: boolean; result?: Array<{ update_id: number }> }
     if (clearData.ok && clearData.result?.length) {
       lastUpdateId = clearData.result[clearData.result.length - 1].update_id
@@ -304,7 +308,7 @@ async function detectChatIdViaPolling(
   for (let i = 0; i < MAX_ATTEMPTS; i++) {
     try {
       const offset = lastUpdateId ? lastUpdateId + 1 : 0
-      const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=2`)
+      const res = await telegramFetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=2`)
       const data = (await res.json()) as {
         ok: boolean
         result?: Array<{

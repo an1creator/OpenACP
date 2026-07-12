@@ -18,7 +18,10 @@ const mockUseAfterStartError = 'REGRESSION: bot.use() called after bot.start() â
 
 class MockBot {
   static startImplementation: ((opts?: { onStart?: () => void; allowed_updates?: string[] }) => Promise<void>) | null = null
+  static instances: MockBot[] = []
   private _started = false
+  callbackHandlers: Array<{ filter: unknown; handler: (ctx: any) => Promise<void> }> = []
+  constructor() { MockBot.instances.push(this) }
   api = {
     config: { use: vi.fn() },
     setMyCommands: vi.fn().mockResolvedValue({ ok: true }),
@@ -33,7 +36,11 @@ class MockBot {
   use(..._args: unknown[]) { this._assertNotStarted('use'); return this }
   on(_filter: unknown, ..._handlers: unknown[]) { this._assertNotStarted('on'); return this }
   command(_cmd: unknown, ..._handlers: unknown[]) { this._assertNotStarted('command'); return this }
-  callbackQuery(_filter: unknown, ..._handlers: unknown[]) { this._assertNotStarted('callbackQuery'); return this }
+  callbackQuery(filter: unknown, ...handlers: unknown[]) {
+    this._assertNotStarted('callbackQuery')
+    for (const handler of handlers) this.callbackHandlers.push({ filter, handler: handler as (ctx: any) => Promise<void> })
+    return this
+  }
   filter(_filter: unknown, ..._handlers: unknown[]) { this._assertNotStarted('filter'); return this }
   lazy(_factory: unknown) { this._assertNotStarted('lazy'); return this }
   branch(_pred: unknown, ..._handlers: unknown[]) { this._assertNotStarted('branch'); return this }
@@ -93,6 +100,10 @@ function makeMockCore() {
   }
   const lifecycleManager = { serviceRegistry: { get: vi.fn().mockReturnValue(null) } }
   const fileService = {}
+  const proxyService = {
+    createFetch: vi.fn().mockReturnValue(globalThis.fetch),
+    registerRouteTester: vi.fn().mockReturnValue(vi.fn()),
+  }
 
   return {
     eventBus,
@@ -102,6 +113,7 @@ function makeMockCore() {
     assistantManager,
     lifecycleManager,
     fileService,
+    proxyService,
   } as unknown as import('../../../core/index.js').OpenACPCore
 }
 
@@ -121,6 +133,7 @@ describe('TelegramAdapter startup sequence', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     MockBot.startImplementation = null
+    MockBot.instances = []
   })
 
   it('registers all handlers before calling bot.start() â€” no grammy "augment after start" error', async () => {
@@ -221,5 +234,35 @@ describe('TelegramAdapter startup sequence', () => {
     await new Promise<void>((resolve) => setImmediate(resolve))
 
     expect(core.requestRestart).not.toHaveBeenCalled()
+  })
+
+  it('re-checks proxy capability when a Telegram command button callback is pressed', async () => {
+    const { checkTopicsPrerequisites } = await import('../validators.js')
+    vi.mocked(checkTopicsPrerequisites).mockResolvedValue({ ok: true })
+    const { CommandRegistry } = await import('../../../core/command-registry.js')
+    const { registerProxyCommand } = await import('../../../core/commands/proxy.js')
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    const registry = new CommandRegistry()
+    const setRoute = vi.fn()
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'member' }) }
+    core.lifecycleManager.serviceRegistry.get = vi.fn((name: string) => name === 'command-registry' ? registry : name === 'identity' ? identity : null)
+    core.proxyService.setRoute = setRoute
+    registerProxyCommand(registry, core)
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+    await adapter.start()
+    const bot = MockBot.instances.at(-1)!
+    const callback = bot.callbackHandlers.find(({ filter }) => filter instanceof RegExp && filter.test('c//proxy set agents.codex direct'))
+    expect(callback).toBeDefined()
+    const editMessageText = vi.fn().mockResolvedValue(undefined)
+    await callback!.handler({
+      chat: { id: makeTelegramConfig().chatId },
+      from: { id: 77 },
+      callbackQuery: { data: 'c//proxy set agents.codex direct', message: {} },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText,
+    })
+    expect(setRoute).not.toHaveBeenCalled()
+    expect(editMessageText).toHaveBeenCalledWith(expect.stringContaining('network:proxy:manage'), expect.any(Object))
   })
 })

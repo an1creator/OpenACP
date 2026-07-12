@@ -5,10 +5,6 @@ import { requireScopes } from '../middleware/auth.js'
 import { corePlugins } from '../../../plugins/core-plugins.js'
 import { RegistryClient } from '../../../core/plugin/registry-client.js'
 
-// Singleton so the 1-minute TTL cache is shared across requests to avoid
-// hammering the remote registry on every marketplace page load.
-const registryClient = new RegistryClient()
-
 /**
  * Plugin management routes under `/api/v1/plugins`.
  *
@@ -24,6 +20,15 @@ export async function pluginRoutes(
   deps: RouteDeps,
 ): Promise<void> {
   const { lifecycleManager } = deps
+  // Partial RouteDeps are supported by isolated API-plugin embedders/tests. A
+  // normal daemon always supplies core.proxyService and therefore uses the
+  // authoritative scoped transport; a corrupt policy throws and never falls
+  // back silently.
+  const proxyService = deps.core?.proxyService
+  const registryClient = new RegistryClient(
+    undefined,
+    proxyService?.createFetch('services.pluginInstaller') ?? globalThis.fetch,
+  )
   const admin = [requireScopes('system:admin')]
 
   // GET /plugins — list all installed plugins with runtime state

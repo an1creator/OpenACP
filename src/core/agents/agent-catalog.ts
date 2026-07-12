@@ -44,7 +44,13 @@ export class AgentCatalog {
   /** Directory where binary agent archives are extracted to. */
   private agentsDir: string | undefined;
 
-  constructor(store: AgentStore, cachePath: string, agentsDir?: string) {
+  constructor(
+    store: AgentStore,
+    cachePath: string,
+    agentsDir?: string,
+    private scopedFetch: typeof fetch = globalThis.fetch,
+    private registryUrl: string = REGISTRY_URL,
+  ) {
     this.store = store;
     this.cachePath = cachePath;
     this.agentsDir = agentsDir;
@@ -68,7 +74,7 @@ export class AgentCatalog {
   async fetchRegistry(): Promise<void> {
     try {
       log.info("Fetching agent registry from CDN...");
-      const response = await fetch(REGISTRY_URL);
+      const response = await this.scopedFetch(this.registryUrl);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json() as { agents: RegistryAgent[] };
       this.registryAgents = data.agents ?? [];
@@ -225,7 +231,7 @@ export class AgentCatalog {
       return { ok: false, agentKey, error: msg };
     }
 
-    return installAgent(agent, this.store, progress, this.agentsDir);
+    return installAgent(agent, this.store, progress, this.agentsDir, this.scopedFetch);
   }
 
   /**

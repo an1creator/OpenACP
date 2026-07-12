@@ -20,7 +20,9 @@ npm pack --dry-run ./dist-publish-sdk
 ```
 
 The root and SDK versions must match the release tag. Version format is
-`YYYY.MMDD.patch`.
+`YYYY.MMDD.patch`. `CHANGELOG.md` must contain a heading beginning with the
+exact version (for example, `## 2026.712.9 - 2026-07-12`). The tag commit must be
+reachable from `origin/main`.
 
 ## First publication
 
@@ -53,7 +55,7 @@ provenance for the release.
 Push the verified commit to `main`, then create and push the matching tag:
 
 ```bash
-VERSION=2026.712.8
+VERSION=2026.712.9
 git tag "v${VERSION}"
 git push origin main
 git push origin "v${VERSION}"
@@ -61,6 +63,31 @@ git push origin "v${VERSION}"
 
 Confirm both packages have the expected version and provenance, then test a
 clean global install before updating a production daemon.
+
+The workflow uses npm trusted publishing (OIDC) and only invokes operations that
+npm officially supports with OIDC: `npm publish`. After both packs verify, it
+publishes dependency-first to `latest`: CLI, then the plugin SDK that declares
+the CLI as its peer dependency. `npm dist-tag` and
+staged approval are deliberately absent because they require interactive
+authentication/2FA. See [npm trusted publishing limitations](https://docs.npmjs.com/trusted-publishers/#limitations-and-future-improvements).
+
+### Resume a partial registry release
+
+If the CLI was published and the SDK failed, leave the immutable CLI version in
+place. Correct the npm trusted-publisher or registry issue and rerun the same Git
+tag: an existing exact version is skipped only when it is already the package's
+current `latest`, then the missing SDK is published.
+Cross-package atomic publication is not available through npm's OIDC-only
+contract, so during this failure window CLI `latest` may be newer than SDK
+`latest`; that state is compatible because the CLI does not depend on the SDK.
+
+If an exact version exists but is not current `latest`, the workflow fails
+instead of silently skipping it. npm versions are immutable and trusted
+publishing does not authorize `npm dist-tag`, so the account owner must inspect
+the package and repair `latest` interactively with 2FA: use the npmjs.com package
+settings or run `npm dist-tag add <package>@<version> latest` from an
+authenticated local terminal. Verify the resulting `dist-tags.latest`, then
+rerun the same tag. Never add a write token to Actions as a workaround.
 
 ## Host rollout
 

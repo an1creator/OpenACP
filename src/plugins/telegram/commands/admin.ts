@@ -439,7 +439,8 @@ export async function handleUpdate(
     { parse_mode: "HTML" },
   );
 
-  const latest = await getLatestVersion();
+  const updateFetch = core.proxyService.createFetch('services.npmUpdate');
+  const latest = await getLatestVersion(updateFetch);
   if (!latest) {
     await ctx.api.editMessageText(
       ctx.chat!.id,
@@ -467,7 +468,11 @@ export async function handleUpdate(
     { parse_mode: "HTML" },
   );
 
-  const ok = await runUpdate();
+  const updateEnv = core.proxyService.buildChildEnv(
+    'services.npmUpdate',
+    Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+  );
+  const ok = await runUpdate(updateEnv);
   if (!ok) {
     await ctx.api.editMessageText(
       ctx.chat!.id,

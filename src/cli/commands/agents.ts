@@ -5,9 +5,18 @@ import { isJsonMode, jsonSuccess, jsonError, ErrorCodes, muteForJson } from '../
 async function createCatalog(instanceRoot: string) {
   const { AgentCatalog } = await import("../../core/agents/agent-catalog.js");
   const { AgentStore } = await import("../../core/agents/agent-store.js");
+  const { ProxyService } = await import('../../core/network/proxy-service.js')
   const pathMod = await import('node:path');
   const store = new AgentStore(pathMod.join(instanceRoot, 'agents.json'));
-  return new AgentCatalog(store, pathMod.join(instanceRoot, 'registry-cache.json'), pathMod.join(instanceRoot, 'agents'));
+  const proxyService = new ProxyService(instanceRoot)
+  const catalog = new AgentCatalog(
+    store,
+    pathMod.join(instanceRoot, 'registry-cache.json'),
+    pathMod.join(instanceRoot, 'agents'),
+    proxyService.createFetch('services.agentRegistry'),
+    process.env.OPENACP_AGENT_REGISTRY_URL,
+  )
+  return { catalog, proxyService }
 }
 
 /**
@@ -88,7 +97,7 @@ bypassing the normal staleness check.
 
 async function agentsList(instanceRoot?: string, json = false): Promise<void> {
   if (json) await muteForJson()
-  const catalog = await createCatalog(instanceRoot!);
+  const { catalog } = await createCatalog(instanceRoot!);
   catalog.load();
   await catalog.refreshRegistryIfStale();
 
@@ -188,7 +197,7 @@ Run 'openacp agents' to see available agents.
     return
   }
 
-  const catalog = await createCatalog(instanceRoot!);
+  const { catalog, proxyService } = await createCatalog(instanceRoot!);
   catalog.load();
   await catalog.refreshRegistryIfStale();
 
@@ -236,6 +245,7 @@ Run 'openacp agents' to see available agents.
     const installed = catalog.getInstalledAgent(result.agentKey)
     jsonSuccess({ key: result.agentKey, version: installed?.version ?? 'unknown', installed: true })
   }
+  proxyService.registerScope(`agents.${result.agentKey}`)
 
   // Auto-integrate handoff if agent supports it
   const { getAgentCapabilities } = await import("../../core/agents/agent-dependencies.js");
@@ -288,7 +298,7 @@ async function agentsUninstall(name: string | undefined, help = false, instanceR
     return
   }
 
-  const catalog = await createCatalog(instanceRoot!);
+  const { catalog } = await createCatalog(instanceRoot!);
   catalog.load();
 
   const result = await catalog.uninstall(name);
@@ -317,7 +327,7 @@ async function agentsUninstall(name: string | undefined, help = false, instanceR
 }
 
 async function agentsRefresh(instanceRoot?: string): Promise<void> {
-  const catalog = await createCatalog(instanceRoot!);
+  const { catalog } = await createCatalog(instanceRoot!);
   catalog.load();
   console.log("\n  Updating agent list...");
   await catalog.fetchRegistry();
@@ -356,7 +366,7 @@ whether the agent is installed or available from the registry.
     return
   }
 
-  const catalog = await createCatalog(instanceRoot!);
+  const { catalog } = await createCatalog(instanceRoot!);
   catalog.load();
 
   const { getAgentSetup } = await import("../../core/agents/agent-dependencies.js");
@@ -459,7 +469,7 @@ ACP-specific flags are automatically stripped.
     return;
   }
 
-  const catalog = await createCatalog(instanceRoot!);
+  const { catalog } = await createCatalog(instanceRoot!);
   catalog.load();
 
   const installed = catalog.getInstalledAgent(nameOrId);

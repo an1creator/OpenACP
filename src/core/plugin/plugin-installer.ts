@@ -56,7 +56,7 @@ const VALID_NPM_NAME = /^(@[a-z0-9][\w.-]*\/)?[a-z0-9][\w.-]*(@[\w.^~>=<|-]+)?$/
  * to avoid version conflicts with core dependencies. Uses `--ignore-scripts` for security.
  * Tries to import first (already installed case) before running npm install.
  */
-export async function installNpmPlugin(packageName: string, pluginsDir?: string): Promise<any> {
+export async function installNpmPlugin(packageName: string, pluginsDir?: string, childEnv?: Record<string, string>): Promise<any> {
   if (!VALID_NPM_NAME.test(packageName)) {
     throw new Error(`Invalid package name: "${packageName}". Must be a valid npm package name.`);
   }
@@ -72,6 +72,7 @@ export async function installNpmPlugin(packageName: string, pluginsDir?: string)
 
   await execFileAsync('npm', ['install', packageName, '--prefix', dir, '--save', '--ignore-scripts'], {
     timeout: 60000,
+    env: childEnv,
   })
 
   return await importFromDir(packageName, dir)

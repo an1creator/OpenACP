@@ -108,6 +108,24 @@ Do not expose the API port externally. The default `host: "127.0.0.1"` binding e
 
 For remote access, use a tunnel instead of exposing the port directly. The tunnel provides HTTPS encryption and access control via one-time codes.
 
+OpenACP sanitizes network failures before they are returned by the proxy REST API or CLI and before structured data is written to logs. Credentials embedded in proxy URLs, Telegram Bot API paths, query parameters, authorization/API-key headers, and cookies are replaced with `<redacted>`. Hostnames and non-secret path segments remain visible for diagnosis. This is a safety boundary, not a substitute for keeping log files and the instance directory private.
+
+Proxy management uses the dedicated `network:proxy:manage` capability. Built-in
+admin credentials have it; operator/viewer tokens do not. Status and fixed
+connectivity tests need `config:read`. A custom proxy test URL additionally
+requires proxy-management access, must be HTTPS without URL credentials, and is
+restricted to the built-in diagnostic host allowlist. It is also rejected when
+DNS resolves to loopback, private, link-local, carrier-grade NAT, reserved, or
+metadata address space. This keeps the test endpoint from becoming a generic
+authenticated SSRF primitive or a DNS-rebinding target.
+
+Proxy policy and credentials are a fail-closed security boundary. If
+`proxy.json`, `proxy-secrets.json`, or a pending transaction is invalid, OpenACP
+preserves the original, creates a mode-0600 `.corrupt.*` quarantine, and refuses
+network transport resolution. Do not delete the broken file merely to make the
+daemon start: inspect it and `proxy-lkg.json`, restore a reviewed consistent
+metadata+secret pair, then run `openacp doctor`.
+
 ## Bypass Permissions
 
 Some agent operations (file writes, command execution) require explicit user approval via permission request buttons in the chat. This is the default behavior. For details on how permissions work from a user's perspective, see [Permissions](../using-openacp/permissions.md).
@@ -129,3 +147,8 @@ If an agent is configured to run without permission prompts (agent-side configur
 6. **Use daemon mode with autostart** for persistent deployments so the server does not silently go offline after a reboot.
 
 7. **Revoke unused JWT tokens** periodically. Use `GET /api/v1/auth/tokens` to list active tokens and their last-used timestamps. Revoke any you no longer need.
+
+8. **Do not enable proxy-library debug namespaces in production.** OpenACP
+removes proxy-specific `DEBUG` namespaces from spawned ACP/npm/model-download
+processes and centrally redacts application logs, but third-party debug output
+may bypass structured logging.

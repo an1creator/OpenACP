@@ -29,6 +29,7 @@ jobs:
           COMPARE_URL: ${{ github.event.compare }}
           REPO: ${{ github.repository }}
         run: |
+          html() { printf '%s' "$1" | jq -Rr '@html'; }
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$TELEGRAM_TOPIC_ID" ]; then
             echo "Telegram notification secrets are not configured; skipping."
             exit 0
@@ -37,8 +38,8 @@ jobs:
           COMMITS=""
           COUNT=0
           for row in $(echo "$COMMITS_JSON" | jq -r '.[] | @base64'); do
-            MSG=$(echo "$row" | base64 -d | jq -r '.message' | head -1)
-            AUTHOR=$(echo "$row" | base64 -d | jq -r '.author.username')
+            MSG=$(html "$(echo "$row" | base64 -d | jq -r '.message' | head -1)")
+            AUTHOR=$(html "$(echo "$row" | base64 -d | jq -r '.author.username')")
             SHORT=$(echo "$row" | base64 -d | jq -r '.id' | cut -c1-7)
             COMMITS="${COMMITS}<code>${SHORT}</code> ${MSG} — <a href=\"https://github.com/${AUTHOR}\"><b>${AUTHOR}</b></a>"$'\n'
             COUNT=$((COUNT + 1))
@@ -46,6 +47,7 @@ jobs:
 
           [ -z "$COMMITS" ] && exit 0
 
+          REPO=$(html "$REPO"); BRANCH=$(html "$BRANCH")
           TEXT="🔀 <b>${REPO}</b> — <code>${BRANCH}</code>
           ${COUNT} new commit(s)
 
@@ -76,6 +78,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.ref }}
           REPO: ${{ github.repository }}
         run: |
+          html() { printf '%s' "$1" | jq -Rr '@html'; }
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$TELEGRAM_TOPIC_ID" ]; then
             echo "Telegram notification secrets are not configured; skipping."
             exit 0
@@ -91,6 +94,7 @@ jobs:
             EMOJI="📬"; STATUS="Opened"
           fi
 
+          PR_TITLE=$(html "$PR_TITLE"); HEAD=$(html "$HEAD"); BASE=$(html "$BASE"); REPO=$(html "$REPO"); AUTHOR=$(html "$AUTHOR")
           TEXT="${EMOJI} <b>${STATUS}: #${PR_NUM} ${PR_TITLE}</b>
           <b>${REPO}</b> — <code>${HEAD}</code> → <code>${BASE}</code>
           by <a href=\"https://github.com/${AUTHOR}\"><b>${AUTHOR}</b></a>
@@ -116,11 +120,13 @@ jobs:
           REPO: ${{ github.repository }}
           AUTHOR: ${{ github.event.release.author.login }}
         run: |
+          html() { printf '%s' "$1" | jq -Rr '@html'; }
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$TELEGRAM_TOPIC_ID" ]; then
             echo "Telegram notification secrets are not configured; skipping."
             exit 0
           fi
 
+          TAG=$(html "$TAG"); REPO=$(html "$REPO"); AUTHOR=$(html "$AUTHOR")
           TEXT="🚀 <b>New Release: ${TAG}</b>
           <b>${REPO}</b> — published by <a href=\"https://github.com/${AUTHOR}\"><b>${AUTHOR}</b></a>
 
@@ -147,12 +153,14 @@ jobs:
           REPO: ${{ github.repository }}
           COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
+          html() { printf '%s' "$1" | jq -Rr '@html'; }
           if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$TELEGRAM_TOPIC_ID" ]; then
             echo "Telegram notification secrets are not configured; skipping."
             exit 0
           fi
 
           SHORT_SHA=$(echo "$COMMIT_SHA" | cut -c1-7)
+          WORKFLOW=$(html "$WORKFLOW"); BRANCH=$(html "$BRANCH"); AUTHOR=$(html "$AUTHOR"); REPO=$(html "$REPO")
 
           TEXT="🔴 <b>CI Failed: ${WORKFLOW}</b>
           <b>${REPO}</b> — <code>${BRANCH}</code> @ <code>${SHORT_SHA}</code>

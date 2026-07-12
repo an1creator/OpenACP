@@ -1,6 +1,6 @@
 {
   "name": "@n1creator/openacp-plugin-sdk",
-  "version": "2026.712.8",
+  "version": "2026.712.9",
   "description": "SDK for building OpenACP plugins — types, base classes, and testing utilities",
   "type": "module",
   "exports": {
@@ -25,11 +25,12 @@
     "dist/"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "pnpm test:types && tsc",
+    "test:types": "tsc -p tsconfig.type-tests.json --noEmit",
     "test": "vitest run"
   },
   "peerDependencies": {
-    "@n1creator/openacp-cli": ">=2026.712.8"
+    "@n1creator/openacp-cli": ">=2026.712.9"
   },
   "devDependencies": {
     "@n1creator/openacp-cli": "workspace:*",

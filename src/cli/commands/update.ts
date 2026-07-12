@@ -1,11 +1,11 @@
-import { getCurrentVersion, getLatestVersion, compareVersions, runUpdate } from '../version.js'
+import { getCurrentVersion, getLatestVersion, compareVersions, runUpdate, getUpdateNetwork } from '../version.js'
 import { wantsHelp } from './helpers.js'
 
 /**
  * `openacp update` — Check for a newer CLI version and install it.
  * Exits with code 1 if the registry cannot be reached or the update fails.
  */
-export async function cmdUpdate(args: string[] = []): Promise<void> {
+export async function cmdUpdate(args: string[] = [], instanceRoot?: string): Promise<void> {
   if (wantsHelp(args)) {
     console.log(`
 \x1b[1mopenacp update\x1b[0m — Update to latest version
@@ -18,8 +18,9 @@ installs it globally if an update is available.
 `)
     return
   }
+  const network = getUpdateNetwork(instanceRoot)
   const current = getCurrentVersion()
-  const latest = await getLatestVersion()
+  const latest = await getLatestVersion(network.fetcher)
   if (!latest) {
     console.error('Could not check for updates. Check your internet connection.')
     process.exit(1)
@@ -29,7 +30,7 @@ installs it globally if an update is available.
     return
   }
   console.log(`Update available: v${current} → v${latest}`)
-  const ok = await runUpdate()
+  const ok = await runUpdate(network.environment)
   if (ok) {
     console.log(`\x1b[32m✓ Updated to v${latest}\x1b[0m`)
   } else {

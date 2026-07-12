@@ -2,6 +2,8 @@ import type { AgentDefinition } from "../types.js";
 import { AgentInstance } from "./agent-instance.js";
 import type { AgentCatalog } from "./agent-catalog.js";
 import { createChildLogger } from "../utils/log.js";
+import { filterEnv } from '../security/env-filter.js';
+import type { ProxyService } from '../network/proxy-service.js';
 
 const log = createChildLogger({ module: "agent-manager" });
 
@@ -18,6 +20,7 @@ interface WarmEntry {
   allowedPaths: readonly string[];
   instance: AgentInstance;
   createdAt: number;
+  policyGeneration: number;
 }
 
 /**
@@ -54,7 +57,18 @@ export class AgentManager {
   /** In-flight prewarm promise — guards against concurrent prewarm calls. */
   private warming: Promise<void> | null = null;
 
-  constructor(private catalog: AgentCatalog) {}
+  constructor(private catalog: AgentCatalog, private proxyService?: ProxyService) {
+    if (proxyService?.registerScope) for (const name of Object.keys(catalog.getInstalledEntries())) proxyService.registerScope(`agents.${name}`)
+  }
+  private currentPolicyGeneration(): number {
+    return typeof this.proxyService?.getPolicyGeneration === 'function' ? this.proxyService.getPolicyGeneration() : 0
+  }
+
+  private childEnv(agentDef: AgentDefinition, routeName = agentDef.name): Record<string, string> | undefined {
+    if (!this.proxyService) return undefined
+    const filtered = filterEnv(process.env as Record<string, string>, agentDef.env)
+    return this.proxyService.buildAgentEnv(routeName, filtered)
+  }
 
   /** Return definitions for all installed agents. */
   getAvailableAgents(): AgentDefinition[] {
@@ -109,11 +123,15 @@ export class AgentManager {
       log.debug({ agentName }, "prewarm: agent not installed, skipping");
       return;
     }
+    const policyGeneration = this.currentPolicyGeneration()
     this.warming = (async () => {
       try {
-        const instance = await AgentInstance.spawnSubprocess(agentDef, workingDir, [...allowedPaths]);
+        const environment = this.childEnv(agentDef, agentName)
+        const instance = environment
+          ? await AgentInstance.spawnSubprocess(agentDef, workingDir, [...allowedPaths], environment)
+          : await AgentInstance.spawnSubprocess(agentDef, workingDir, [...allowedPaths]);
         // If someone else set warmEntry while we were warming (unlikely), destroy ours.
-        if (this.warmEntry) {
+        if (this.warmEntry || this.currentPolicyGeneration() !== policyGeneration) {
           await instance.destroy().catch(() => {});
           return;
         }
@@ -123,6 +141,7 @@ export class AgentManager {
           allowedPaths: [...allowedPaths],
           instance,
           createdAt: Date.now(),
+          policyGeneration,
         };
         log.info({ agentName, workingDir }, "Agent warm-pool: instance ready");
       } catch (err) {
@@ -139,6 +158,12 @@ export class AgentManager {
    * Best-effort — errors are swallowed since shutdown should not fail.
    */
   async destroyWarm(): Promise<void> {
+    // A route/config change may race with an in-flight prewarm. Wait for that
+    // spawn to settle so the old-policy process cannot repopulate the slot.
+    const inFlight = this.warming;
+    if (inFlight) {
+      try { await inFlight; } catch { /* prewarm already logs failures */ }
+    }
     const entry = this.warmEntry;
     this.warmEntry = null;
     if (entry) {
@@ -164,6 +189,9 @@ export class AgentManager {
     const entry = this.warmEntry;
     if (!entry) return null;
     if (entry.agentName !== agentName || entry.workingDir !== workingDir) return null;
+    if (entry.policyGeneration !== this.currentPolicyGeneration()) {
+      this.warmEntry = null; entry.instance.destroy().catch(() => {}); return null;
+    }
     if (!pathListsEqual(entry.allowedPaths, allowedPaths)) {
       // Security-relevant mismatch: PathGuard differs. Discard and clear.
       log.debug(
@@ -231,7 +259,10 @@ export class AgentManager {
       }
     }
 
-    return AgentInstance.spawn(agentDef, workingDirectory, undefined, allowedPaths);
+    const environment = this.childEnv(agentDef, agentName)
+    return environment
+      ? AgentInstance.spawn(agentDef, workingDirectory, undefined, allowedPaths, environment)
+      : AgentInstance.spawn(agentDef, workingDirectory, undefined, allowedPaths);
   }
 
   /**
@@ -252,6 +283,9 @@ export class AgentManager {
         `Agent "${agentName}" is not installed. Run "openacp agents install ${agentName}" to add it.`,
       );
     }
-    return AgentInstance.resume(agentDef, workingDirectory, agentSessionId, undefined, allowedPaths);
+    const environment = this.childEnv(agentDef, agentName)
+    return environment
+      ? AgentInstance.resume(agentDef, workingDirectory, agentSessionId, undefined, allowedPaths, environment)
+      : AgentInstance.resume(agentDef, workingDirectory, agentSessionId, undefined, allowedPaths);
   }
 }

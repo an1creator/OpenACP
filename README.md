@@ -167,6 +167,7 @@ That's it. Send a message to your bot and start coding.
 - **Agent switching** — Switch agents mid-conversation with `/switch`; history carries over automatically
 - **Dynamic model options** — Model, mode, and reasoning choices come from each ACP agent at runtime instead of a hard-coded model list
 - **Agent-aware audio routing** — Pass audio directly to agents that support it; otherwise transcribe it through the shared STT service
+- **Scoped proxy routing** — Route Telegram, individual ACP agents, services, or plugin flows independently through HTTP, HTTPS, SOCKS5, or SOCKS5H profiles
 
 ### Developer Tools
 
@@ -204,6 +205,31 @@ selected model are prepared on the first transcription. Configure it through
 `/settings`, the plugin settings API, or `openacp config`. See
 [Voice and Speech](docs/gitbook/using-openacp/voice-and-speech.md) for settings,
 formats, providers, and troubleshooting.
+
+### Scoped Proxy Routing
+
+OpenACP can proxy only the flows that need it instead of exporting one proxy for
+the whole daemon. Profiles (where to connect) are separate from routes (what uses
+the profile), and every route is `direct`, `inherit`, or `profile:<id>`.
+
+```text
+global: direct
+channels.telegram: profile:usa
+agents.codex: profile:usa
+agents.cursor: direct
+services.default: direct
+```
+
+Telegram polling, outgoing Bot API calls, and Telegram file downloads share the
+`channels.telegram` route. ACP subprocesses receive a per-agent environment;
+`direct` explicitly removes inherited proxy variables. Local REST/SSE traffic is
+not globally intercepted. Credentials live in a separate mode-0600 secret store
+and never appear in route files, agent definitions, status responses, or
+structured OpenACP logs.
+
+Manage routes from any connector with `/proxy`, from the CLI with
+`openacp proxy`, or through `/api/v1/proxy`. Channel changes are tested before
+they are saved. See [Scoped Proxy Routing](docs/gitbook/features/proxy-routing.md).
 
 ### Operations
 
@@ -269,6 +295,13 @@ openacp update                    # Install the latest maintained npm release
 # Tunnels
 openacp tunnel add <port> [--label name]
 openacp tunnel list
+
+# Scoped proxy routing (requires running daemon)
+openacp proxy status
+openacp proxy import usa --env-file ~/.openacp/secrets/proxy.env
+openacp proxy set channels.telegram profile:usa
+openacp proxy set agents.codex profile:usa
+openacp proxy test --scope channels.telegram
 ```
 
 > **Full CLI reference** — [CLI Commands](https://openacp.gitbook.io/docs/api-reference/cli-commands)

@@ -1,5 +1,12 @@
 import { createChildLogger } from '../../core/utils/log.js'
+import { redactNetworkSecrets } from '../../core/security/network-redaction.js'
 const log = createChildLogger({ module: 'telegram-validators' })
+
+export type TelegramFetch = typeof fetch
+
+function safeNetworkError(error: unknown): string {
+  return redactNetworkSecrets(error instanceof Error ? error.message : String(error))
+}
 
 /**
  * Validate a bot token by calling the Telegram `getMe` API.
@@ -7,12 +14,13 @@ const log = createChildLogger({ module: 'telegram-validators' })
  */
 export async function validateBotToken(
   token: string,
+  telegramFetch: TelegramFetch,
 ): Promise<
   | { ok: true; botName: string; botUsername: string }
   | { ok: false; error: string }
 > {
   try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const res = await telegramFetch(`https://api.telegram.org/bot${token}/getMe`);
     const data = (await res.json()) as {
       ok: boolean;
       result?: { first_name: string; username: string };
@@ -27,7 +35,7 @@ export async function validateBotToken(
     }
     return { ok: false, error: data.description || "Invalid token" };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    return { ok: false, error: safeNetworkError(err) };
   }
 }
 
@@ -38,11 +46,12 @@ export async function validateBotToken(
 export async function validateChatId(
   token: string,
   chatId: number,
+  telegramFetch: TelegramFetch,
 ): Promise<
   { ok: true; title: string; isForum: boolean } | { ok: false; error: string }
 > {
   try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
+    const res = await telegramFetch(`https://api.telegram.org/bot${token}/getChat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId }),
@@ -68,7 +77,7 @@ export async function validateChatId(
       isForum: data.result.is_forum === true,
     };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    return { ok: false, error: safeNetworkError(err) };
   }
 }
 
@@ -79,10 +88,11 @@ export async function validateChatId(
 export async function validateBotAdmin(
   token: string,
   chatId: number,
+  telegramFetch: TelegramFetch,
 ): Promise<{ ok: true; canManageTopics: boolean } | { ok: false; error: string }> {
   try {
     // Get bot's own user ID
-    const meRes = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const meRes = await telegramFetch(`https://api.telegram.org/bot${token}/getMe`);
     const meData = (await meRes.json()) as {
       ok: boolean;
       result?: { id: number };
@@ -91,7 +101,7 @@ export async function validateBotAdmin(
       return { ok: false, error: "Could not retrieve bot info" };
     }
 
-    const res = await fetch(
+    const res = await telegramFetch(
       `https://api.telegram.org/bot${token}/getChatMember`,
       {
         method: "POST",
@@ -128,7 +138,7 @@ export async function validateBotAdmin(
       error: `Bot is "${status}" in this group — it must be an admin. Ask a group admin to go to Group Settings → Administrators → add the bot → tap Save/Done. Note: only existing admins can promote the bot.`,
     };
   } catch (err) {
-    return { ok: false, error: (err as Error).message };
+    return { ok: false, error: safeNetworkError(err) };
   }
 }
 
@@ -144,6 +154,7 @@ export async function validateBotAdmin(
 export async function checkTopicsPrerequisites(
   token: string,
   chatId: number,
+  telegramFetch: TelegramFetch,
 ): Promise<{ ok: true } | { ok: false; issues: string[] }> {
   const issues: string[] = [];
 
@@ -151,7 +162,7 @@ export async function checkTopicsPrerequisites(
 
   // Check 1: Topics enabled
   try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
+    const res = await telegramFetch(`https://api.telegram.org/bot${token}/getChat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ chat_id: chatId }),
@@ -175,7 +186,7 @@ export async function checkTopicsPrerequisites(
   }
 
   // Check 2 & 3: Bot is admin + can_manage_topics
-  const adminResult = await validateBotAdmin(token, chatId);
+  const adminResult = await validateBotAdmin(token, chatId, telegramFetch);
   log.info(
     { chatId, adminOk: adminResult.ok, canManageTopics: adminResult.ok ? adminResult.canManageTopics : undefined, error: !adminResult.ok ? adminResult.error : undefined },
     'checkTopicsPrerequisites: validateBotAdmin result',

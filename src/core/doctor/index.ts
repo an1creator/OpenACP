@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { DoctorCheck, DoctorContext, DoctorReport, CategoryResult, PendingFix, CheckResult } from "./types.js";
 import { ConfigManager, expandHome } from "../config/config.js";
+import { ProxyService } from "../network/proxy-service.js";
 
 import { configCheck } from "./checks/config.js";
 import { agentsCheck } from "./checks/agents.js";
@@ -11,6 +12,7 @@ import { workspaceCheck } from "./checks/workspace.js";
 import { pluginsCheck } from "./checks/plugins.js";
 import { daemonCheck } from "./checks/daemon.js";
 import { tunnelCheck } from "./checks/tunnel.js";
+import { proxyCheck } from './checks/proxy.js';
 
 /** All registered checks, sorted by order before execution. */
 const ALL_CHECKS: DoctorCheck[] = [
@@ -22,6 +24,7 @@ const ALL_CHECKS: DoctorCheck[] = [
   pluginsCheck,
   daemonCheck,
   tunnelCheck,
+  proxyCheck,
 ];
 
 /** Per-check timeout — prevents a single hanging check from blocking the entire run. */
@@ -37,10 +40,18 @@ const CHECK_TIMEOUT_MS = 10_000;
 export class DoctorEngine {
   private dryRun: boolean;
   private dataDir: string;
+  private proxyService: Pick<ProxyService, "createFetch">;
 
-  constructor(options?: { dryRun?: boolean; dataDir?: string }) {
+  constructor(options?: {
+    dryRun?: boolean;
+    dataDir?: string;
+    proxyService?: Pick<ProxyService, "createFetch">;
+  }) {
     this.dryRun = options?.dryRun ?? false;
     this.dataDir = options!.dataDir!;
+    // Standalone diagnostics own only the scoped network policy. Bootstrapping
+    // OpenACPCore or a channel plugin here would invert the lifecycle layers.
+    this.proxyService = options?.proxyService ?? new ProxyService(this.dataDir);
   }
 
   /**
@@ -136,6 +147,7 @@ export class DoctorEngine {
       portFilePath: path.join(dataDir, "api.port"),
       pluginsDir: path.join(dataDir, "plugins"),
       logsDir,
+      fetchForScope: (scope) => this.proxyService.createFetch(scope),
     };
   }
 }

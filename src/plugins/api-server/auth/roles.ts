@@ -15,7 +15,7 @@ export const ROLES = {
 // agents:write grants access to agent catalog management (e.g. reload).
 export const KNOWN_SCOPES = [
   'sessions:read', 'sessions:write', 'sessions:prompt', 'sessions:permission', 'sessions:dangerous',
-  'agents:read', 'agents:write', 'commands:execute', 'system:health', 'config:read',
+  'agents:read', 'agents:write', 'commands:execute', 'system:health', 'config:read', 'proxy:write', 'network:proxy:manage',
 ] as const;
 
 export type RoleName = keyof typeof ROLES;

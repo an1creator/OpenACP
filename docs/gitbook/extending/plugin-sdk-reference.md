@@ -1,5 +1,25 @@
 # Plugin SDK Reference
 
+## Scoped network transport
+
+Plugins with service access can resolve `ProxyService` from the SDK, register a
+stable scope, and retain the returned fetch facade:
+
+```typescript
+const proxy = ctx.getService<ProxyService>('proxy')
+proxy.registerScope('plugins.example.api')
+const fetchApi = proxy.createFetch('plugins.example.api')
+```
+
+The SDK intentionally exposes the portable subset that OpenACP guarantees:
+`string | URL` input; `string`, `URLSearchParams`, `Blob`, or `FormData` request
+bodies; standard request options; a native `Response`; and Web `ReadableStream`
+response bodies. Web streams are deliberately excluded from request bodies
+because the internal node-fetch transport does not consume them safely. OpenACP
+may use Node streams internally, but normalizes responses at this boundary. Each
+call resolves the latest route; consumers must consume or cancel response bodies
+so retired transports can be released promptly.
+
 The `@n1creator/openacp-plugin-sdk` package provides types, base classes, adapter primitives, and testing utilities for building OpenACP plugins.
 
 ---

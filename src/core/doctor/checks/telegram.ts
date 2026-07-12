@@ -12,6 +12,7 @@
 
 import * as path from "node:path";
 import type { DoctorCheck, CheckResult } from "../types.js";
+import { redactNetworkSecrets } from "../../security/network-redaction.js";
 
 /** Telegram bot tokens follow the pattern: <bot_id>:<alphanumeric_secret> */
 const BOT_TOKEN_REGEX = /^\d+:[A-Za-z0-9_-]{35,}$/;
@@ -46,9 +47,18 @@ export const telegramCheck: DoctorCheck = {
     }
     results.push({ status: "pass", message: "Bot token format valid" });
 
+    let telegramFetch: typeof fetch;
+    try {
+      telegramFetch = ctx.fetchForScope("channels.telegram");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      results.push({ status: "fail", message: `Cannot initialize Telegram transport: ${redactNetworkSecrets(message)}` });
+      return results;
+    }
+
     let botId: number | undefined;
     try {
-      const res = await fetch(`https://api.telegram.org/bot${botToken}/getMe`);
+      const res = await telegramFetch(`https://api.telegram.org/bot${botToken}/getMe`);
       const data = (await res.json()) as { ok: boolean; result?: { id: number; username: string }; description?: string };
       if (data.ok && data.result) {
         botId = data.result.id;
@@ -58,7 +68,8 @@ export const telegramCheck: DoctorCheck = {
         return results;
       }
     } catch (err) {
-      results.push({ status: "fail", message: `Cannot reach Telegram API: ${err instanceof Error ? err.message : String(err)}` });
+      const message = err instanceof Error ? err.message : String(err);
+      results.push({ status: "fail", message: `Cannot reach Telegram API: ${redactNetworkSecrets(message)}` });
       return results;
     }
 
@@ -68,7 +79,7 @@ export const telegramCheck: DoctorCheck = {
     }
 
     try {
-      const res = await fetch(`https://api.telegram.org/bot${botToken}/getChat`, {
+      const res = await telegramFetch(`https://api.telegram.org/bot${botToken}/getChat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chat_id: chatId }),
@@ -92,12 +103,13 @@ export const telegramCheck: DoctorCheck = {
         results.push({ status: "pass", message: `Chat is supergroup with topics ("${data.result.title}")` });
       }
     } catch (err) {
-      results.push({ status: "fail", message: `Cannot validate chat: ${err instanceof Error ? err.message : String(err)}` });
+      const message = err instanceof Error ? err.message : String(err);
+      results.push({ status: "fail", message: `Cannot validate chat: ${redactNetworkSecrets(message)}` });
       return results;
     }
 
     try {
-      const res = await fetch(`https://api.telegram.org/bot${botToken}/getChatMember`, {
+      const res = await telegramFetch(`https://api.telegram.org/bot${botToken}/getChatMember`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chat_id: chatId, user_id: botId }),
@@ -114,7 +126,8 @@ export const telegramCheck: DoctorCheck = {
         });
       }
     } catch (err) {
-      results.push({ status: "fail", message: `Admin check failed: ${err instanceof Error ? err.message : String(err)}` });
+      const message = err instanceof Error ? err.message : String(err);
+      results.push({ status: "fail", message: `Admin check failed: ${redactNetworkSecrets(message)}` });
     }
 
     return results;

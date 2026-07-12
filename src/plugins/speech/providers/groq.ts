@@ -18,6 +18,8 @@ export class GroqSTT implements STTProvider {
   constructor(
     private apiKey: string,
     private defaultModel: string = "whisper-large-v3-turbo",
+    private scopedFetch: typeof fetch = globalThis.fetch,
+    private getScopedFetch?: () => typeof fetch,
   ) {}
 
   /**
@@ -37,7 +39,7 @@ export class GroqSTT implements STTProvider {
       form.append("language", options.language);
     }
 
-    const resp = await fetch(GROQ_API_URL, {
+    const resp = await (this.getScopedFetch?.() ?? this.scopedFetch)(GROQ_API_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.apiKey}` },
       body: form,

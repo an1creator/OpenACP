@@ -1,5 +1,28 @@
 # Core Design
 
+## Scoped network policy
+
+The durable decision records are [ADR 0001](../../adr/0001-scoped-proxy-routing.md)
+and [ADR 0003](../../adr/0003-transactional-proxy-policy-store.md).
+
+`ProxyService` is a core service registered in the service registry as `proxy`.
+It owns profile/routing resolution but never mutates `process.env` or a global
+HTTP dispatcher. Internal consumers request a fetch implementation for a named
+scope; `AgentManager` asks it to construct the final child environment at the
+ACP spawn boundary. This keeps channel, agent, service, and plugin traffic
+independent.
+
+`createFetch(scope)` returns a stable facade that resolves the current route on
+every call. Policy mutations are serialized, journal both public and secret
+state, and advance a revision used for REST compare-and-swap writes. Dynamic
+plugin/channel scopes are persisted so management state survives when a plugin
+is disabled or the daemon restarts.
+
+Plugins with `services:use` may obtain the service, register an extensible
+`plugins.<name>.<flow>` scope, and request scoped transports. Exact routes win
+over category defaults and the global default. Secrets are isolated in a
+mode-0600 store and are absent from the public profile type.
+
 This document covers the core modules that form OpenACP's kernel -- the infrastructure that exists before any plugin loads.
 
 ---

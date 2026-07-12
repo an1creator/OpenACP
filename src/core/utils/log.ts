@@ -3,8 +3,15 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import type { LoggingConfig } from '../config/config.js'
+import { sanitizeNetworkLogValue } from '../security/network-redaction.js'
 
 export type Logger = pino.Logger
+
+const networkSecurityHooks = {
+  logMethod(inputArgs: unknown[], method: (...args: unknown[]) => void) {
+    method.apply(this, inputArgs.map((arg) => sanitizeNetworkLogValue(arg)))
+  },
+}
 
 // --- Default console-only logger (pre-init) ---
 // Before initLogger() is called (e.g., during module-level imports),
@@ -12,6 +19,7 @@ export type Logger = pino.Logger
 // with a multi-target logger (console + rolling file).
 let rootLogger: pino.Logger = pino({
   level: 'debug',
+  hooks: networkSecurityHooks,
   transport: { target: 'pino-pretty', options: { colorize: true, translateTime: 'SYS:standard', destination: 2 } },
 })
 let initialized = false
@@ -155,7 +163,7 @@ export function initLogger(config: LoggingConfig): Logger {
   })
 
   currentTransport = transports
-  rootLogger = pino({ level: config.level }, transports)
+  rootLogger = pino({ level: config.level, hooks: networkSecurityHooks }, transports)
   initialized = true
 
   // Update the default log wrapper to use the new root logger
@@ -179,7 +187,7 @@ export function setLogLevel(level: string): void {
 export function createChildLogger(context: { module: string; [key: string]: unknown }): Logger {
   return new Proxy({} as Logger, {
     get(_target, prop, receiver) {
-      const child = rootLogger.child(context)
+      const child = rootLogger.child(sanitizeNetworkLogValue(context) as pino.Bindings)
       const value = Reflect.get(child, prop, receiver)
       return typeof value === 'function' ? value.bind(child) : value
     },
@@ -205,7 +213,7 @@ export function createSessionLogger(sessionId: string, parentLogger: Logger): Lo
   try {
     const sessionLogPath = path.join(sessionLogDir, `${sessionId}.log`)
     const dest = pino.destination(sessionLogPath)
-    const sessionFileLogger = pino({ level: parentLogger.level }, dest).child({ sessionId })
+    const sessionFileLogger = pino({ level: parentLogger.level, hooks: networkSecurityHooks }, dest).child({ sessionId })
 
     // Create a logger that writes to both parent (combined) and session file
     const combinedChild = parentLogger.child({ sessionId })
@@ -249,11 +257,17 @@ export function createSessionLogger(sessionId: string, parentLogger: Logger): Lo
 }
 
 /** Close the per-session log file destination to release the file handle. */
-export function closeSessionLogger(logger: Logger): void {
+export async function closeSessionLogger(logger: Logger): Promise<void> {
   const dest = (logger as any).__sessionDest
-  if (dest && typeof dest.destroy === 'function') {
-    dest.destroy()
-  }
+  if (!dest) return
+  await new Promise<void>((resolve) => {
+    let settled = false
+    const done = () => { if (!settled) { settled = true; resolve() } }
+    const timeout = setTimeout(done, 3000)
+    dest.once?.('close', () => { clearTimeout(timeout); done() })
+    if (typeof dest.end === 'function') dest.end()
+    else { dest.destroy?.(); clearTimeout(timeout); done() }
+  })
 }
 
 /**
@@ -268,7 +282,7 @@ export async function shutdownLogger(): Promise<void> {
   const transport = currentTransport
 
   // Reset state immediately so re-init is possible
-  rootLogger = pino({ level: 'debug' })
+  rootLogger = pino({ level: 'debug', hooks: networkSecurityHooks })
   Object.assign(log, wrapVariadic(rootLogger))
   currentTransport = undefined
   logDir = undefined

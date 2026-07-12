@@ -4,6 +4,12 @@
 
 - Agent warm-pool: server keeps one pre-initialized AgentInstance ready in the background for the default agent, so first `POST /sessions` calls pay only for the `newSession` RPC (~300ms) instead of a full subprocess spawn (~2–3s). Refills after consumption; 5-min idle TTL; liveness-checked before claim.
 
+## 2026.712.7 - 2026-07-12
+
+### Fixed
+
+- Merge live-only sessions with persisted session records so session listings and health counters report the same active and total population.
+
 ## 2026.712.6 - 2026-07-12
 
 ### Security

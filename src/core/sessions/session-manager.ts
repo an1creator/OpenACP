@@ -221,7 +221,7 @@ export class SessionManager {
     if (this.store) {
       let records = this.store.list().filter(r => !r.isAssistant);
       if (channelId) records = records.filter((r) => r.channelId === channelId);
-      return records.map((record) => {
+      const summaries: SessionSummary[] = records.map((record) => {
         const live = this.sessions.get(record.sessionId);
         if (live) {
           return {
@@ -258,6 +258,31 @@ export class SessionManager {
           isLive: false,
         };
       });
+
+      // A live session can briefly exist without a store record (for example while
+      // an adapter is finishing its persistence step). Keep it visible in API and
+      // health results instead of letting the store become an accidental filter.
+      const storedIds = new Set(records.map((record) => record.sessionId));
+      for (const live of this.listSessions(channelId)) {
+        if (storedIds.has(live.id)) continue;
+        summaries.push({
+          id: live.id,
+          agent: live.agentName,
+          status: live.status,
+          name: live.name ?? null,
+          workspace: live.workingDirectory,
+          channelId: live.channelId,
+          createdAt: live.createdAt.toISOString(),
+          lastActiveAt: null,
+          dangerousMode: live.clientOverrides.bypassPermissions ?? false,
+          queueDepth: live.queueDepth,
+          promptRunning: live.promptRunning,
+          configOptions: live.configOptions?.length ? live.configOptions : undefined,
+          capabilities: live.agentCapabilities ?? null,
+          isLive: true,
+        });
+      }
+      return summaries;
     }
 
     // Fallback: no store — return live sessions only

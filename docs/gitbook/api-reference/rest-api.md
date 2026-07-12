@@ -54,7 +54,7 @@ Returns daemon health. No auth required.
 }
 ```
 
-`uptime` is milliseconds since daemon start. `sessions.active` counts sessions with status `active` or `initializing`.
+`uptime` is milliseconds since daemon start. `sessions.active` counts merged live and persisted sessions with status `active` or `initializing`; `sessions.total` counts the same merged population, so it is never smaller than `sessions.active`.
 
 ```bash
 curl http://localhost:21420/api/health
@@ -117,7 +117,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/adapters
 
 ### GET /api/sessions
 
-Lists all sessions (active, finished, cancelled, error).
+Lists all sessions (active, finished, cancelled, error). Persisted records and live in-memory sessions are merged by session ID; a live session remains visible even before its first store record is available.
 
 **Response**
 ```json

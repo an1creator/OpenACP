@@ -598,16 +598,11 @@ describe("ApiServer", () => {
   });
 
   it("GET /api/health/details returns full system health (authenticated)", async () => {
-    mockCore.sessionManager.listSessions.mockReturnValueOnce([
+    mockCore.sessionManager.listAllSessions.mockReturnValueOnce([
       { status: "active" },
       { status: "initializing" },
       { status: "finished" },
-    ]);
-    mockCore.sessionManager.listRecords.mockReturnValueOnce([
-      { sessionId: "a" },
-      { sessionId: "b" },
-      { sessionId: "c" },
-      { sessionId: "d" },
+      { status: "cancelled" },
     ]);
     const port = await startServer();
 

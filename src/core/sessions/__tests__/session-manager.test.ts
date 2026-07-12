@@ -653,6 +653,24 @@ describe('SessionManager', () => {
     expect(summaries.filter(s => s.id === 'live-sess')).toHaveLength(1)
   })
 
+  it('includes a live session that does not yet have a store record', () => {
+    const store = mockStore()
+    const manager = new SessionManager(store)
+    const live = createSession({ id: 'live-without-record', channelId: 'api' })
+    live.activate()
+    manager.registerSession(live)
+
+    const summaries = manager.listAllSessions()
+
+    expect(summaries).toHaveLength(1)
+    expect(summaries[0]).toMatchObject({
+      id: 'live-without-record',
+      status: 'active',
+      isLive: true,
+      lastActiveAt: null,
+    })
+  })
+
   it('falls back to live-only when no store', () => {
     const manager = new SessionManager(null)
     const session = createSession({ id: 'sess-1', channelId: 'telegram' })

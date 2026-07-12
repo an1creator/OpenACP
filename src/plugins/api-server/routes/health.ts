@@ -33,8 +33,7 @@ export async function systemRoutes(
   app.get('/health/details', {
     preHandler: [...(authPreHandler ? [authPreHandler] : []), requireScopes('system:health')],
   }, async () => {
-    const activeSessions = deps.core.sessionManager.listSessions();
-    const allRecords = deps.core.sessionManager.listRecords();
+    const sessions = deps.core.sessionManager.listAllSessions();
     const mem = process.memoryUsage();
     const tunnel = deps.core.tunnelService;
 
@@ -48,10 +47,10 @@ export async function systemRoutes(
         heapTotal: mem.heapTotal,
       },
       sessions: {
-        active: activeSessions.filter(
+        active: sessions.filter(
           (s) => s.status === 'active' || s.status === 'initializing',
         ).length,
-        total: allRecords.length,
+        total: sessions.length,
       },
       adapters: Array.from(deps.core.adapters.keys()),
       tunnel: tunnel

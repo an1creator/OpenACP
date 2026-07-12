@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { createTestContext } from '../testing/test-context.js'
-import type { CommandDef, CommandResponse } from '@openacp/cli'
+import type { CommandDef, CommandResponse } from '@n1creator/openacp-cli'
 
 describe('createTestContext', () => {
   it('creates context with required fields', () => {

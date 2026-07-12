@@ -1,4 +1,4 @@
-import type { InstallContext, TerminalIO, SettingsAPI } from '@openacp/cli'
+import type { InstallContext, TerminalIO, SettingsAPI } from '@n1creator/openacp-cli'
 
 export interface TestInstallContextOpts {
   pluginName: string

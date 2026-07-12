@@ -1,13 +1,13 @@
 # Plugin SDK Reference
 
-The `@openacp/plugin-sdk` package provides types, base classes, adapter primitives, and testing utilities for building OpenACP plugins.
+The `@n1creator/openacp-plugin-sdk` package provides types, base classes, adapter primitives, and testing utilities for building OpenACP plugins.
 
 ---
 
 ## Installation
 
 ```bash
-npm install --save-dev @openacp/plugin-sdk
+npm install --save-dev @n1creator/openacp-plugin-sdk
 ```
 
 ---
@@ -17,7 +17,7 @@ npm install --save-dev @openacp/plugin-sdk
 All types are re-exported from the main entry point:
 
 ```typescript
-import type { OpenACPPlugin, PluginContext } from '@openacp/plugin-sdk'
+import type { OpenACPPlugin, PluginContext } from '@n1creator/openacp-plugin-sdk'
 ```
 
 ### Plugin Interfaces
@@ -73,7 +73,7 @@ import type { OpenACPPlugin, PluginContext } from '@openacp/plugin-sdk'
 Exported from the main entry point:
 
 ```typescript
-import { MessagingAdapter, StreamAdapter, BaseRenderer } from '@openacp/plugin-sdk'
+import { MessagingAdapter, StreamAdapter, BaseRenderer } from '@n1creator/openacp-plugin-sdk'
 ```
 
 ### MessagingAdapter
@@ -101,7 +101,7 @@ Use this to customize how agent responses appear on your platform.
 Reusable building blocks for adapter implementations:
 
 ```typescript
-import { SendQueue, DraftManager, ToolCallTracker, ActivityTracker } from '@openacp/plugin-sdk'
+import { SendQueue, DraftManager, ToolCallTracker, ActivityTracker } from '@n1creator/openacp-plugin-sdk'
 ```
 
 | Class | Description |
@@ -118,7 +118,7 @@ import { SendQueue, DraftManager, ToolCallTracker, ActivityTracker } from '@open
 Import from the `/testing` subpath:
 
 ```typescript
-import { createTestContext, createTestInstallContext, mockServices } from '@openacp/plugin-sdk/testing'
+import { createTestContext, createTestInstallContext, mockServices } from '@n1creator/openacp-plugin-sdk/testing'
 ```
 
 ---
@@ -162,7 +162,7 @@ Extends `PluginContext` with inspection properties:
 
 ```typescript
 import { describe, it, expect } from 'vitest'
-import { createTestContext } from '@openacp/plugin-sdk/testing'
+import { createTestContext } from '@n1creator/openacp-plugin-sdk/testing'
 import plugin from '../index.js'
 
 describe('my-plugin', () => {
@@ -250,7 +250,7 @@ The `terminalResponses` map provides answers for each prompt method. Responses a
 
 ```typescript
 import { describe, it, expect } from 'vitest'
-import { createTestInstallContext } from '@openacp/plugin-sdk/testing'
+import { createTestInstallContext } from '@n1creator/openacp-plugin-sdk/testing'
 import plugin from '../index.js'
 
 describe('install flow', () => {
@@ -310,7 +310,7 @@ describe('install flow', () => {
 Factory functions that create mock implementations of OpenACP service interfaces. Each function returns a fully-typed object with sensible defaults. Pass `overrides` to customize specific methods.
 
 ```typescript
-import { mockServices } from '@openacp/plugin-sdk/testing'
+import { mockServices } from '@n1creator/openacp-plugin-sdk/testing'
 ```
 
 #### mockServices.security(overrides?)

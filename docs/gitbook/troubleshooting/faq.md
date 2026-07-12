@@ -55,7 +55,7 @@ All persistent state is stored in the instance directory (`<workspace>/.openacp/
 - `sessions.json` — session metadata
 - `history/` — conversation history
 
-Back up the entire `<workspace>/.openacp/` directory (e.g. `~/openacp-workspace/.openacp/`). To restore on a new machine, copy it back, reinstall OpenACP (`npm install -g @openacp/cli`), and register the instance with `openacp instances create --dir <workspace>`.
+Back up the entire `<workspace>/.openacp/` directory (e.g. `~/openacp-workspace/.openacp/`). To restore on a new machine, copy it back, reinstall OpenACP (`npm install -g @n1creator/openacp-cli`), and register the instance with `openacp instances create --dir <workspace>`.
 
 ---
 
@@ -91,4 +91,4 @@ On next startup, OpenACP will create fresh sessions. If a session record in `<in
 
 ### How do I report a bug or request a feature?
 
-Open an issue on the [OpenACP GitHub repository](https://github.com/Open-ACP/OpenACP). Before filing, run `openacp doctor` and include its output. Enable debug logging with `OPENACP_DEBUG=true openacp start` and attach the relevant log section.
+Open an issue on the [OpenACP GitHub repository](https://github.com/an1creator/OpenACP). Before filing, run `openacp doctor` and include its output. Enable debug logging with `OPENACP_DEBUG=true openacp start` and attach the relevant log section.

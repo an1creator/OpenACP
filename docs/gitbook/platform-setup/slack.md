@@ -5,7 +5,7 @@ This guide walks you through creating a Slack app and connecting it to OpenACP. 
 ## Prerequisites
 
 - **Slack workspace admin access** — required to create and install an app
-- OpenACP installed: `npm install -g @openacp/cli`
+- OpenACP installed: `npm install -g @n1creator/openacp-cli`
 - At least one ACP agent installed (e.g., `claude-agent-acp`)
 
 ---

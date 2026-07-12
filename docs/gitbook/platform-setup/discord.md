@@ -5,7 +5,7 @@ This guide walks you through creating a Discord bot and connecting it to OpenACP
 ## Prerequisites
 
 - A Discord account with permission to manage a server (or create a new one)
-- OpenACP installed: `npm install -g @openacp/cli`
+- OpenACP installed: `npm install -g @n1creator/openacp-cli`
 - At least one ACP agent installed (e.g., `claude-agent-acp`)
 
 ---

@@ -35,6 +35,7 @@ describe("agent-installer", () => {
     });
 
     it("falls back to binary when no npx/uvx", () => {
+      vi.stubGlobal("process", { ...process, platform: "darwin", arch: "arm64" });
       const agent: RegistryAgent = {
         id: "test", name: "Test", version: "1.0.0", description: "test",
         distribution: {

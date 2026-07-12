@@ -4,7 +4,7 @@ import type { SpeechService } from "../../plugins/speech/exports.js";
 import type { EventBus } from "../event-bus.js";
 import type { NotificationManager } from "../../plugins/notifications/notification.js";
 import type { TunnelService } from "../../plugins/tunnel/tunnel-service.js";
-import type { AgentEvent } from "../types.js";
+import type { AgentEvent, ConfigOption, SetConfigOptionValue } from "../types.js";
 import type { MiddlewareChain } from "../plugin/middleware-chain.js";
 import type { SessionStore } from "./session-store.js";
 import type { IChannelAdapter } from "../channel.js";
@@ -17,6 +17,12 @@ import { createChildLogger } from "../utils/log.js";
 import { Hook, BusEvent, SessionEv } from "../events.js";
 
 const log = createChildLogger({ module: "session-factory" });
+
+function toSetConfigOptionValue(option: ConfigOption): SetConfigOptionValue {
+  return option.type === "boolean"
+    ? { type: "boolean", value: option.currentValue }
+    : { type: "select", value: option.currentValue };
+}
 
 /** Parameters for creating a new session — used by SessionFactory.create() and Core.createFullSession(). */
 export interface SessionCreateParams {
@@ -306,10 +312,7 @@ export class SessionFactory {
             const live = session.getConfigOption(persisted.id);
             if (live && live.currentValue !== persisted.currentValue) {
               try {
-                await session.setConfigOption(persisted.id, {
-                  type: persisted.type,
-                  value: persisted.currentValue as string & boolean,
-                });
+                await session.setConfigOption(persisted.id, toSetConfigOptionValue(persisted));
               } catch { /* best-effort — don't fail resume if one option sync fails */ }
             }
           }
@@ -420,10 +423,7 @@ export class SessionFactory {
             const live = session.getConfigOption(persisted.id);
             if (live && live.currentValue !== persisted.currentValue) {
               try {
-                await session.setConfigOption(persisted.id, {
-                  type: persisted.type,
-                  value: persisted.currentValue as string & boolean,
-                });
+                await session.setConfigOption(persisted.id, toSetConfigOptionValue(persisted));
               } catch { /* best-effort — don't fail resume if one option sync fails */ }
             }
           }

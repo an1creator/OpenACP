@@ -65,7 +65,7 @@ export {
   isAutoStartSupported,
 } from "../cli/autostart.js";
 
-// ─── Plugin re-exports (convenience for @openacp/cli consumers) ──────────────
+// ─── Plugin re-exports (convenience for @n1creator/openacp-cli consumers) ──────────────
 // These are NOT core dependencies — they're re-exported for public API
 // convenience so consumers don't need to import from deep plugin paths.
 export { NotificationManager } from "../plugins/notifications/notification.js";

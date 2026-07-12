@@ -15,7 +15,7 @@ Please read the [Code of Conduct](CODE_OF_CONDUCT.md) before contributing.
 **Getting started**
 
 ```bash
-git clone https://github.com/Open-ACP/OpenACP.git
+git clone https://github.com/an1creator/OpenACP.git
 cd OpenACP
 pnpm install
 pnpm build
@@ -66,7 +66,7 @@ src/
 ├── main.ts                  # Server startup, plugin boot
 └── index.ts                 # Public API exports
 packages/
-└── plugin-sdk/              # @openacp/plugin-sdk — types + testing utilities
+└── plugin-sdk/              # @n1creator/openacp-plugin-sdk — types + testing utilities
 ui/                          # Web UI (React + Vite, separate pnpm project)
 ```
 
@@ -92,7 +92,7 @@ For a complete architecture reference and AI-friendly codebase guide, see [`CLAU
 Install the SDK:
 
 ```bash
-npm install @openacp/plugin-sdk
+npm install @n1creator/openacp-plugin-sdk
 ```
 
 Scaffold a new plugin:
@@ -150,17 +150,21 @@ See [`packages/plugin-sdk/`](packages/plugin-sdk/) for the full API and [`src/cl
 
 ## Where to Start
 
-- Browse [`good first issue`](https://github.com/Open-ACP/OpenACP/labels/good%20first%20issue) for beginner-friendly tasks
-- Check [`help wanted`](https://github.com/Open-ACP/OpenACP/labels/help%20wanted) for tasks that need community help
-- Join [GitHub Discussions](https://github.com/Open-ACP/OpenACP/discussions) for questions and ideas
+- Browse [`good first issue`](https://github.com/an1creator/OpenACP/labels/good%20first%20issue) for beginner-friendly tasks
+- Check [`help wanted`](https://github.com/an1creator/OpenACP/labels/help%20wanted) for tasks that need community help
+- Join [GitHub Discussions](https://github.com/an1creator/OpenACP/discussions) for questions and ideas
 
 ---
 
 ## Reporting Issues
 
-Use [GitHub Issues](https://github.com/Open-ACP/OpenACP/issues) to report bugs or request features. Please check for existing issues before opening a new one and include reproduction steps where applicable.
+Use [GitHub Issues](https://github.com/an1creator/OpenACP/issues) to report bugs or request features. Please check for existing issues before opening a new one and include reproduction steps where applicable.
 
 ---
+
+## Fork Release Process
+
+Maintainers of the `@n1creator` fork should follow the [release and host migration runbook](docs/dev/n1creator-release-runbook.md), including first-publication 2FA and GitHub Actions trusted publishing setup.
 
 ## License
 

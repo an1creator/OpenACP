@@ -219,7 +219,7 @@ await core.start()
 Adapter plugins implement `OpenACPPlugin` and register themselves in `setup()`:
 
 ```typescript
-import type { OpenACPPlugin, PluginContext } from '@openacp/plugin-sdk'
+import type { OpenACPPlugin, PluginContext } from '@n1creator/openacp-plugin-sdk'
 import { MyPlatformAdapter } from './adapter.js'
 
 const plugin: OpenACPPlugin = {
@@ -236,7 +236,7 @@ const plugin: OpenACPPlugin = {
 export default plugin
 ```
 
-Adapter implementations can extend `MessagingAdapter` (for platforms with threads/topics) or `StreamAdapter` (for simpler integrations) from `@openacp/plugin-sdk`, instead of extending `ChannelAdapter` directly.
+Adapter implementations can extend `MessagingAdapter` (for platforms with threads/topics) or `StreamAdapter` (for simpler integrations) from `@n1creator/openacp-plugin-sdk`, instead of extending `ChannelAdapter` directly.
 
 > **Note:** The previous `AdapterFactory` pattern is no longer used. All adapter registration now goes through the plugin system.
 

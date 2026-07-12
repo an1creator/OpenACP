@@ -155,20 +155,23 @@ describe("AgentInstance setConfigOption legacy fallback", () => {
     expect(result).toEqual({ configOptions: [] });
   });
 
-  it("falls back to unstable_setSessionModel when setSessionConfigOption returns -32601 for model", async () => {
+  it("falls back to the legacy session/set_model request when setSessionConfigOption returns -32601", async () => {
     const { AgentInstance } = await import("../agent-instance.js");
     const instance = Object.create(AgentInstance.prototype) as InstanceType<typeof AgentInstance>;
 
-    const unstable_setSessionModel = vi.fn().mockResolvedValue({});
+    const request = vi.fn().mockResolvedValue({});
     const setSessionConfigOption = vi.fn().mockRejectedValue(
       Object.assign(new Error('"Method not found": session/set_config_option'), { code: -32601 })
     );
     (instance as any).sessionId = "sess-1";
-    (instance as any).connection = { setSessionConfigOption, setSessionMode: vi.fn(), unstable_setSessionModel };
+    (instance as any).connection = { setSessionConfigOption, setSessionMode: vi.fn(), request };
 
     const result = await instance.setConfigOption("model", { type: "select", value: "gemini-2.5-pro" });
 
-    expect(unstable_setSessionModel).toHaveBeenCalledWith({ sessionId: "sess-1", modelId: "gemini-2.5-pro" });
+    expect(request).toHaveBeenCalledWith("session/set_model", {
+      sessionId: "sess-1",
+      modelId: "gemini-2.5-pro",
+    });
     expect(result).toEqual({ configOptions: [] });
   });
 

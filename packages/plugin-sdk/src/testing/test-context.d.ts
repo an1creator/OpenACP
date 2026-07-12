@@ -1,4 +1,4 @@
-import type { PluginContext, CommandDef, CommandResponse, OutgoingMessage } from '@openacp/cli';
+import type { PluginContext, CommandDef, CommandResponse, OutgoingMessage } from '@n1creator/openacp-cli';
 export interface TestContextOpts {
     pluginName: string;
     pluginConfig?: Record<string, unknown>;
@@ -26,7 +26,7 @@ export interface TestPluginContext extends PluginContext {
         content: OutgoingMessage;
     }>;
     /** Dispatch a registered command by name */
-    executeCommand(name: string, args?: Partial<import('@openacp/cli').CommandArgs>): Promise<CommandResponse | void>;
+    executeCommand(name: string, args?: Partial<import('@n1creator/openacp-cli').CommandArgs>): Promise<CommandResponse | void>;
 }
 /**
  * Creates a test-friendly PluginContext for unit-testing plugins.

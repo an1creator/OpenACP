@@ -18,13 +18,13 @@ This guide gets you from zero to chatting with an AI agent in your Telegram (or 
 On macOS or Linux, run the installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.sh | bash
 ```
 
 On Windows, run this in PowerShell:
 
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.ps1 | iex"
+powershell -c "irm https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.ps1 | iex"
 ```
 
 If you prefer a manual npm install and do not have Node.js yet, install Node.js first. For example, on macOS or Linux with `nvm`:
@@ -40,7 +40,7 @@ nvm use --lts
 Then install OpenACP:
 
 ```bash
-npm install -g @openacp/cli
+npm install -g @n1creator/openacp-cli
 ```
 
 Verify it installed:

@@ -1,7 +1,7 @@
 import type {
   PluginContext, PluginStorage, CommandDef, CommandResponse,
   OutgoingMessage, MenuItem,
-} from '@openacp/cli'
+} from '@n1creator/openacp-cli'
 
 export interface TestContextOpts {
   pluginName: string
@@ -23,7 +23,7 @@ export interface TestPluginContext extends PluginContext {
   /** Messages sent via sendMessage() */
   sentMessages: Array<{ sessionId: string; content: OutgoingMessage }>
   /** Dispatch a registered command by name */
-  executeCommand(name: string, args?: Partial<import('@openacp/cli').CommandArgs>): Promise<CommandResponse | void>
+  executeCommand(name: string, args?: Partial<import('@n1creator/openacp-cli').CommandArgs>): Promise<CommandResponse | void>
 }
 
 /**
@@ -146,9 +146,9 @@ export function createTestContext(opts: TestContextOpts): TestPluginContext {
     },
     registerMenuItem(_item: MenuItem): void {},
     unregisterMenuItem(_id: string): void {},
-    registerAssistantSection(_section: import('@openacp/cli').AssistantSection): void {},
+    registerAssistantSection(_section: import('@n1creator/openacp-cli').AssistantSection): void {},
     unregisterAssistantSection(_id: string): void {},
-    registerEditableFields(_fields: import('@openacp/cli').FieldDef[]): void {},
+    registerEditableFields(_fields: import('@n1creator/openacp-cli').FieldDef[]): void {},
     storage,
     log: silentLog,
     async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
@@ -175,12 +175,12 @@ export function createTestContext(opts: TestContextOpts): TestPluginContext {
     registeredMiddleware,
     emittedEvents,
     sentMessages,
-    async executeCommand(name: string, args?: Partial<import('@openacp/cli').CommandArgs>): Promise<CommandResponse | void> {
+    async executeCommand(name: string, args?: Partial<import('@n1creator/openacp-cli').CommandArgs>): Promise<CommandResponse | void> {
       const cmd = registeredCommands.get(name)
       if (!cmd) {
         throw new Error(`Command not found: ${name}`)
       }
-      const defaultArgs: import('@openacp/cli').CommandArgs = {
+      const defaultArgs: import('@n1creator/openacp-cli').CommandArgs = {
         raw: '',
         sessionId: null,
         channelId: 'test',

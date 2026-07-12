@@ -14,7 +14,7 @@ Welcome, and thank you for wanting to contribute! This guide gets your local dev
 
 ```bash
 # Clone the repo
-git clone https://github.com/Open-ACP/OpenACP.git
+git clone https://github.com/an1creator/OpenACP.git
 cd OpenACP
 
 # Install dependencies

@@ -6,7 +6,7 @@ import type {
   SpeechServiceInterface,
   TunnelServiceInterface,
   ContextService,
-} from '@openacp/cli'
+} from '@n1creator/openacp-cli'
 
 /**
  * Factory functions that create mock implementations of OpenACP service interfaces.

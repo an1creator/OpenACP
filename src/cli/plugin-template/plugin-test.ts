@@ -2,7 +2,7 @@ import type { TemplateParams } from './package-json.js'
 
 export function generatePluginTest(params: TemplateParams): string {
   return `import { describe, it, expect } from 'vitest'
-import { createTestContext, createTestInstallContext } from '@openacp/plugin-sdk/testing'
+import { createTestContext, createTestInstallContext } from '@n1creator/openacp-plugin-sdk/testing'
 import plugin from '../index.js'
 
 describe('${params.pluginName}', () => {

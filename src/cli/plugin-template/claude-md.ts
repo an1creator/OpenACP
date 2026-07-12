@@ -20,7 +20,7 @@ This file provides context for AI coding agents (Claude, Cursor, etc.) working o
 OpenACP is an open-source platform that bridges AI coding agents (Claude Code, Codex, etc.) to messaging platforms (Telegram, Discord, Slack) and custom UIs via the Agent Client Protocol (ACP). It features a microkernel plugin architecture where all features — adapters, services, commands — are plugins.
 
 - **Website & Docs**: https://openacp.gitbook.io/docs
-- **GitHub**: https://github.com/Open-ACP/OpenACP
+- **GitHub**: https://github.com/an1creator/OpenACP
 - **Plugin Registry**: https://github.com/Open-ACP/plugin-registry
 
 Key documentation pages:
@@ -37,7 +37,7 @@ Key documentation pages:
 This is an OpenACP plugin. Plugins extend OpenACP with new adapters, services, commands, and middleware.
 
 - **Package**: ${params.pluginName}
-- **SDK**: \`@openacp/plugin-sdk\` (types, base classes, testing utilities)
+- **SDK**: \`@n1creator/openacp-plugin-sdk\` (types, base classes, testing utilities)
 - **Entry point**: \`src/index.ts\` (default export of \`OpenACPPlugin\` object)
 
 ## Build & Run
@@ -61,7 +61,7 @@ openacp dev .         # Compiles, watches, and reloads plugin on changes
 src/
   index.ts              — Plugin entry point (exports OpenACPPlugin)
   __tests__/
-    index.test.ts       — Tests using @openacp/plugin-sdk/testing
+    index.test.ts       — Tests using @n1creator/openacp-plugin-sdk/testing
 package.json            — engines.openacp declares minimum CLI version
 tsconfig.json           — ES2022, NodeNext, strict mode
 CLAUDE.md               — This file (AI agent context)
@@ -291,10 +291,10 @@ Register with \`ctx.registerMiddleware(hook, { priority?, handler })\`. Return \
 
 ## Testing
 
-Use \`@openacp/plugin-sdk/testing\`:
+Use \`@n1creator/openacp-plugin-sdk/testing\`:
 
 \`\`\`typescript
-import { createTestContext, createTestInstallContext, mockServices } from '@openacp/plugin-sdk/testing'
+import { createTestContext, createTestInstallContext, mockServices } from '@n1creator/openacp-plugin-sdk/testing'
 \`\`\`
 
 ### createTestContext(opts)

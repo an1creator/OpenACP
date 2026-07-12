@@ -11,16 +11,21 @@ Send a message. The agent writes code. You see everything — in real time.
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js >= 20](https://img.shields.io/badge/Node.js-%3E%3D%2020-green.svg)](https://nodejs.org/)
 [![ACP Protocol](https://img.shields.io/badge/Protocol-ACP-purple.svg)](https://agentclientprotocol.org/)
-[![npm](https://img.shields.io/npm/v/@openacp/cli.svg)](https://www.npmjs.com/package/@openacp/cli)
+[![npm](https://img.shields.io/npm/v/@n1creator/openacp-cli.svg)](https://www.npmjs.com/package/@n1creator/openacp-cli)
 [![Twitter Follow](https://img.shields.io/twitter/follow/openacp_ai?style=social)](https://x.com/openacp_ai)
 
-[Documentation](https://openacp.gitbook.io/docs) · [Quick Start](#quick-start) · [Features](#features) · [Agents](#supported-agents) · [Contributing](CONTRIBUTING.md) · [Discussions](https://github.com/Open-ACP/OpenACP/discussions)
+[Documentation](https://openacp.gitbook.io/docs) · [Quick Start](#quick-start) · [Features](#features) · [Agents](#supported-agents) · [Contributing](CONTRIBUTING.md) · [Discussions](https://github.com/an1creator/OpenACP/discussions)
 
 <img src="docs/images/banner.jpg" alt="OpenACP — Control AI coding agents from Telegram, Discord and Slack" width="100%" />
 
 </div>
 
 ---
+
+> **N1 Creator distribution.** This repository publishes the maintained fork as
+> `@n1creator/openacp-cli` and `@n1creator/openacp-plugin-sdk`. Existing OpenACP
+> workspaces remain compatible; migrate by replacing the global CLI package and
+> restarting the same instance.
 
 ## What is OpenACP?
 
@@ -77,13 +82,13 @@ Your Codebase
 ### macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.sh | bash
 ```
 
 ### Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.sh | bash
 ```
 
 > Works on Debian/Ubuntu, Fedora/RHEL, Arch, and other distros. Also supports WSL (Windows Subsystem for Linux).
@@ -93,7 +98,7 @@ curl -fsSL https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/insta
 Open PowerShell and run:
 
 ```powershell
-powershell -c "irm https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.ps1 | iex"
+powershell -c "irm https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.ps1 | iex"
 ```
 
 > Requires PowerShell 5.1+ (built into Windows 10/11).
@@ -113,7 +118,7 @@ nvm use --lts
 Then install OpenACP with npm:
 
 ```bash
-npm install -g @openacp/cli
+npm install -g @n1creator/openacp-cli
 openacp
 # → Interactive setup wizard starts:
 # → ? Choose your platform: Telegram / Discord / Slack
@@ -281,7 +286,15 @@ Yes. OpenACP is MIT-licensed and free to self-host. You only pay for the AI prov
 
 ### How do I update OpenACP?
 ```bash
-npm update -g @openacp/cli
+openacp update
+```
+
+To migrate from the upstream npm package:
+
+```bash
+npm uninstall -g @openacp/cli
+npm install -g @n1creator/openacp-cli@latest
+openacp --dir ~/openacp-workspace restart
 ```
 
 ## Security
@@ -296,17 +309,17 @@ OpenACP grants AI agents access to your filesystem and shell. Before using in pr
 
 ## Star History
 
-<a href="https://star-history.com/#Open-ACP/OpenACP&Date">
+<a href="https://star-history.com/#an1creator/OpenACP&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=Open-ACP/OpenACP&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=Open-ACP/OpenACP&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=Open-ACP/OpenACP&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=an1creator/OpenACP&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=an1creator/OpenACP&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=an1creator/OpenACP&type=Date" />
  </picture>
 </a>
 
 ## Contributing
 
-We welcome contributions! See the [contributing guide](CONTRIBUTING.md) for development setup, testing conventions, and PR process. Have questions? Start a thread on [GitHub Discussions](https://github.com/Open-ACP/OpenACP/discussions).
+We welcome contributions! See the [contributing guide](CONTRIBUTING.md) for development setup, testing conventions, and PR process. Have questions? Start a thread on [GitHub Discussions](https://github.com/an1creator/OpenACP/discussions).
 
 ## License
 

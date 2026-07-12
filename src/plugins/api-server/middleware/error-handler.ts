@@ -71,9 +71,9 @@ export function globalErrorHandler(
     reply.status(400).send({
       error: {
         code: 'VALIDATION_ERROR',
-        message: error.errors.map((e) => e.message).join(', '),
+        message: error.issues.map((e) => e.message).join(', '),
         statusCode: 400,
-        details: error.errors,
+        details: error.issues,
       },
     });
     return;

@@ -1,6 +1,6 @@
 {
-  "name": "@openacp/plugin-sdk",
-  "version": "2026.518.2",
+  "name": "@n1creator/openacp-plugin-sdk",
+  "version": "2026.712.1",
   "description": "SDK for building OpenACP plugins — types, base classes, and testing utilities",
   "type": "module",
   "exports": {
@@ -29,18 +29,18 @@
     "test": "vitest run"
   },
   "peerDependencies": {
-    "@openacp/cli": ">=0.6.0"
+    "@n1creator/openacp-cli": ">=2026.712.1"
   },
   "devDependencies": {
-    "@openacp/cli": "workspace:*",
+    "@n1creator/openacp-cli": "workspace:*",
     "vitest": "^3.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Open-ACP/OpenACP",
+    "url": "https://github.com/an1creator/OpenACP",
     "directory": "packages/plugin-sdk"
   },
-  "homepage": "https://github.com/Open-ACP/OpenACP",
+  "homepage": "https://github.com/an1creator/OpenACP",
   "keywords": [
     "openacp",
     "plugin",

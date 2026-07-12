@@ -37,6 +37,39 @@ After installing, run `openacp doctor` to confirm the command is found. Then res
 
 ---
 
+### Codex reports that a model requires a newer CLI
+
+**Symptoms:** The Codex session initializes and lists a new GPT model, but the
+first prompt fails with a message such as `model requires a newer version of
+Codex`.
+
+**Cause:** The ACP adapter and model catalog are newer than the `codex` executable
+resolved through the host `PATH` or wrapper. A previously installed agent may
+also still reference the retired `@zed-industries/codex-acp` package.
+
+**Solution:**
+
+```bash
+codex update
+codex --version
+openacp agents refresh
+openacp restart
+```
+
+If the installed Codex release does not support self-update, update its npm
+package explicitly:
+
+```bash
+npm install -g @openai/codex@latest
+```
+
+For wrapper-based hosts, confirm that `codex` and the ACP adapter both load the
+same proxy/auth environment. The current registry uses
+`@agentclientprotocol/codex-acp`; OpenACP automatically migrates an existing npx
+agent definition to that package on registry refresh.
+
+---
+
 ### Agent times out and session stalls
 
 **Symptoms:** The session shows activity (typing indicator) but never produces a response, eventually timing out.

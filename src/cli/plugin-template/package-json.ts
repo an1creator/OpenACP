@@ -12,7 +12,7 @@ export interface TemplateParams {
  * Generate package.json for a new plugin.
  *
  * The `engines.openacp` field declares the minimum OpenACP CLI version required.
- * The `peerDependencies` entry on `@openacp/cli` is what npm uses for compatibility
+ * The `peerDependencies` entry on `@n1creator/openacp-cli` is what npm uses for compatibility
  * warnings. Plugin SDK is a devDependency (types only, not bundled).
  */
 export function generatePackageJson(params: TemplateParams): string {
@@ -36,10 +36,10 @@ export function generatePackageJson(params: TemplateParams): string {
       openacp: `>=${params.cliVersion}`,
     },
     peerDependencies: {
-      '@openacp/cli': `>=${params.cliVersion}`,
+      '@n1creator/openacp-cli': `>=${params.cliVersion}`,
     },
     devDependencies: {
-      '@openacp/plugin-sdk': params.cliVersion,
+      '@n1creator/openacp-plugin-sdk': params.cliVersion,
       typescript: '^5.4.0',
       vitest: '^3.0.0',
     },

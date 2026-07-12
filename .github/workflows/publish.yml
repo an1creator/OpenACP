@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -17,8 +18,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: https://registry.npmjs.org
+
+      - name: Use an npm version with trusted publishing support
+        run: npm install --global npm@^11.16.0
 
       - run: pnpm install --frozen-lockfile
 
@@ -28,9 +32,14 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           node -e "
             const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf-8'));
-            pkg.version = '$VERSION';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            for (const file of ['package.json', 'packages/plugin-sdk/package.json']) {
+              const pkg = JSON.parse(fs.readFileSync(file, 'utf-8'));
+              pkg.version = '$VERSION';
+              if (file.includes('plugin-sdk')) {
+                pkg.peerDependencies['@n1creator/openacp-cli'] = '>=' + '$VERSION';
+              }
+              fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + '\n');
+            }
           "
 
       - name: Build CLI types (needed by SDK)
@@ -38,15 +47,11 @@ jobs:
 
       - run: pnpm build:publish
 
-      - name: Publish @openacp/cli
+      - name: Publish @n1creator/openacp-cli
         working-directory: dist-publish
-        run: npm publish --access=public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access=public --provenance
 
-      - name: Publish @openacp/plugin-sdk
+      - name: Publish @n1creator/openacp-plugin-sdk
         if: hashFiles('dist-publish-sdk/package.json') != ''
         working-directory: dist-publish-sdk
-        run: npm publish --access=public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access=public --provenance

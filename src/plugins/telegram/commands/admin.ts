@@ -416,7 +416,7 @@ export function setupVerbosityCallbacks(bot: Bot, core: OpenACPCore): void {
 }
 
 /**
- * Handle `/update` — check npm for a newer version of `@openacp/cli`, install it,
+ * Handle `/update` — check npm for a newer n1creator OpenACP release, install it,
  * and trigger a process restart. Edits the status message in-place as each step completes.
  */
 export async function handleUpdate(
@@ -472,7 +472,7 @@ export async function handleUpdate(
     await ctx.api.editMessageText(
       ctx.chat!.id,
       statusMsg.message_id,
-      "❌ Update failed. Try manually: <code>npm install -g @openacp/cli@latest</code>",
+      "❌ Update failed. Try manually: <code>npm install -g @n1creator/openacp-cli@latest</code>",
       { parse_mode: "HTML" },
     );
     return;

@@ -17,6 +17,11 @@ describe("filterEnv", () => {
     XDG_CONFIG_HOME: "/home/user/.config",
     NODE_ENV: "development",
     EDITOR: "vim",
+    HTTPS_PROXY: "http://proxy.example.test:3128",
+    ALL_PROXY: "socks5://proxy.example.test:1080",
+    NO_PROXY: "localhost,127.0.0.1",
+    https_proxy: "http://proxy.example.test:3128",
+    NODE_USE_ENV_PROXY: "1",
     AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
     AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE",
     DATABASE_URL: "postgres://user:pass@host/db",
@@ -35,6 +40,11 @@ describe("filterEnv", () => {
     expect(result.TERM).toBe("xterm-256color");
     expect(result.USER).toBe("testuser");
     expect(result.NODE_ENV).toBe("development");
+    expect(result.HTTPS_PROXY).toBe("http://proxy.example.test:3128");
+    expect(result.ALL_PROXY).toBe("socks5://proxy.example.test:1080");
+    expect(result.NO_PROXY).toBe("localhost,127.0.0.1");
+    expect(result.https_proxy).toBe("http://proxy.example.test:3128");
+    expect(result.NODE_USE_ENV_PROXY).toBe("1");
   });
 
   it("blocks secret vars", () => {

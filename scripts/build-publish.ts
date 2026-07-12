@@ -56,7 +56,7 @@ for (const [dep, version] of Object.entries(rootPkg.dependencies as Record<strin
 }
 
 const publishPkg = {
-  name: '@openacp/cli',
+  name: '@n1creator/openacp-cli',
   version: rootPkg.version,
   description: 'Self-hosted bridge for AI coding agents via ACP protocol',
   type: 'module',
@@ -74,14 +74,14 @@ const publishPkg = {
   dependencies: publishDeps,
   repository: {
     type: 'git',
-    url: 'https://github.com/Open-ACP/OpenACP',
+    url: 'https://github.com/an1creator/OpenACP',
   },
-  homepage: 'https://github.com/Open-ACP/OpenACP',
+  homepage: 'https://github.com/an1creator/OpenACP',
   author: {
-    name: 'OpenACP',
-    url: 'https://x.com/openacp_ai',
+    name: 'N1 Creator',
+    url: 'https://n1creator.com',
   },
-  license: 'AGPL-3.0',
+  license: 'MIT',
   keywords: ['acp', 'ai', 'coding-agent', 'telegram', 'claude', 'codex', 'gemini', 'cursor', 'agent-client-protocol'],
 }
 
@@ -105,7 +105,7 @@ const builtins = new Set([
 ])
 
 // Packages that appear in template strings (scaffold generator) but are not real runtime imports
-const templateOnlyDeps = new Set(['@openacp/plugin-sdk', 'vitest', '@openacp/plugin-sdk/testing'])
+const templateOnlyDeps = new Set(['@n1creator/openacp-plugin-sdk', 'vitest', '@n1creator/openacp-plugin-sdk/testing'])
 
 const importPattern = /(?:from\s+["']|import\s*\(\s*["'])([^./"'][^"']*)["']/g
 const missingDeps: Map<string, string[]> = new Map()
@@ -141,7 +141,7 @@ if (missingDeps.size > 0) {
 
 console.log('✅ All external imports are covered by published dependencies')
 
-// 7. Build and prepare @openacp/plugin-sdk
+// 7. Build and prepare @n1creator/openacp-plugin-sdk
 const sdkDir = path.join(root, 'packages/plugin-sdk')
 if (fs.existsSync(sdkDir)) {
   // SDK needs CLI type declarations — ensure tsc has been run on root first
@@ -151,7 +151,7 @@ if (fs.existsSync(sdkDir)) {
     execSync('pnpm tsc', { cwd: root, stdio: 'inherit' })
   }
 
-  console.log('\nBuilding @openacp/plugin-sdk...')
+  console.log('\nBuilding @n1creator/openacp-plugin-sdk...')
   execSync('npx tsc', { cwd: sdkDir, stdio: 'inherit' })
 
   // Generate SDK publish package.json (replace workspace:* with actual version)
@@ -159,7 +159,7 @@ if (fs.existsSync(sdkDir)) {
   sdkPkg.version = rootPkg.version
   // devDependencies with workspace:* are stripped for publish (not needed at runtime)
   delete sdkPkg.devDependencies
-  // peerDependencies already uses @openacp/cli (not workspace protocol)
+  // peerDependencies already uses @n1creator/openacp-cli (not workspace protocol)
 
   const sdkPublishDir = path.join(root, 'dist-publish-sdk')
   fs.mkdirSync(sdkPublishDir, { recursive: true })
@@ -179,10 +179,10 @@ if (fs.existsSync(sdkDir)) {
     fs.copyFileSync(sdkReadme, path.join(sdkPublishDir, 'README.md'))
   }
 
-  console.log(`✅ SDK built: @openacp/plugin-sdk@${rootPkg.version}`)
+  console.log(`✅ SDK built: @n1creator/openacp-plugin-sdk@${rootPkg.version}`)
 }
 
-console.log(`\nBuild complete! Package: @openacp/cli@${rootPkg.version}`)
+console.log(`\nBuild complete! Package: @n1creator/openacp-cli@${rootPkg.version}`)
 console.log('To publish:')
 console.log('  cd dist-publish && npm publish --access=public')
 if (fs.existsSync(path.join(root, 'dist-publish-sdk'))) {

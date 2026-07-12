@@ -12,7 +12,7 @@ This guide walks you through connecting OpenACP to Telegram. OpenACP uses a Tele
 ## Prerequisites
 
 - A Telegram account
-- OpenACP installed: `npm install -g @openacp/cli`
+- OpenACP installed: `npm install -g @n1creator/openacp-cli`
 - At least one ACP agent installed (e.g., `claude-agent-acp`)
 
 ---

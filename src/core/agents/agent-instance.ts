@@ -617,17 +617,17 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
         );
       } else {
         const response = await withAgentTimeout(
-          instance.connection.unstable_resumeSession({ sessionId: agentSessionId, cwd: workingDirectory }),
+          instance.connection.resumeSession({ sessionId: agentSessionId, cwd: workingDirectory, mcpServers: resolvedMcp as any }),
           agentDef.name,
           'resumeSession',
           agentDef.initTimeoutMs,
         );
-        instance.sessionId = response.sessionId;
+        instance.sessionId = agentSessionId;
         instance.initialSessionResponse = response;
-        instance.debugTracer = createDebugTracer(response.sessionId, workingDirectory);
+        instance.debugTracer = createDebugTracer(agentSessionId, workingDirectory);
         log.info(
           {
-            sessionId: response.sessionId,
+            sessionId: agentSessionId,
             durationMs: Date.now() - spawnStart,
             agentCapabilities: instance.agentCapabilities ?? null,
           },
@@ -905,7 +905,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
             command: params.command,
             args: params.args,
             env: params.env,
-            cwd: params.cwd,
+            cwd: params.cwd ?? undefined,
             outputByteLimit: params.outputByteLimit ?? MAX_OUTPUT_BYTES,
           },
           self.middlewareChain,
@@ -963,7 +963,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
           return { configOptions: [] };
         }
         if (configId === 'model' && value.type === 'select') {
-          await this.connection.unstable_setSessionModel({
+          await this.connection.request("session/set_model", {
             sessionId: this.sessionId,
             modelId: value.value as string,
           });
@@ -1020,7 +1020,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
 
   /** Close a session on the agent side (cleanup agent-internal state). */
   async closeSession(sessionId: string): Promise<void> {
-    await this.connection.unstable_closeSession({ sessionId });
+    await this.connection.closeSession({ sessionId });
   }
 
   // ── Prompt & lifecycle ──────────────────────────────────────────────

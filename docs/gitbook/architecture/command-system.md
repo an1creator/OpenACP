@@ -273,7 +273,7 @@ If Telegram registers its own `/new` handler, Telegram users get the rich wizard
 Here's a complete example of a plugin that registers a command:
 
 ```typescript
-import type { OpenACPPlugin, PluginContext } from '@openacp/cli'
+import type { OpenACPPlugin, PluginContext } from '@n1creator/openacp-cli'
 
 export default {
   name: '@community/weather',

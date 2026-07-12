@@ -27,10 +27,10 @@ Or start with [What is OpenACP?](getting-started/what-is-openacp.md) to understa
 ## Quick Install
 
 ```bash
-npm install -g @openacp/cli
+npm install -g @n1creator/openacp-cli
 openacp
 ```
 
 ---
 
-[![npm](https://img.shields.io/npm/v/@openacp/cli)](https://www.npmjs.com/package/@openacp/cli) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![npm](https://img.shields.io/npm/v/@n1creator/openacp-cli)](https://www.npmjs.com/package/@n1creator/openacp-cli) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)

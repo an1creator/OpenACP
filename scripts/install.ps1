@@ -1,5 +1,5 @@
 # OpenACP Installer for Windows
-# Usage: powershell -c "irm https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.ps1 | iex"
+# Usage: powershell -c "irm https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.ps1 | iex"
 
 [CmdletBinding()]
 param(
@@ -197,14 +197,14 @@ function Resolve-PackageInstallSpec {
     param([string]$RequestedTag)
 
     if ($RequestedTag -eq 'latest') {
-        return "@openacp/cli@latest"
+        return "@n1creator/openacp-cli@latest"
     }
     # If it looks like a version number, use it directly
     if ($RequestedTag -match '^\d') {
-        return "@openacp/cli@$RequestedTag"
+        return "@n1creator/openacp-cli@$RequestedTag"
     }
     # Treat as dist-tag
-    return "@openacp/cli@$RequestedTag"
+    return "@n1creator/openacp-cli@$RequestedTag"
 }
 
 function Resolve-NpmExecutable {
@@ -267,7 +267,7 @@ function Install-OpenACPNpm {
 # ─── Section 7: Install via Git ──────────────────────────────────────────────
 
 function Install-OpenACPGit {
-    $repoUrl = "https://github.com/Open-ACP/OpenACP.git"
+    $repoUrl = "https://github.com/an1creator/OpenACP.git"
 
     if ($DryRun) {
         Write-Msg -Level info -Message "[dry-run] Would clone $repoUrl to $GitDir, install deps, build, and create wrapper"

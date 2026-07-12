@@ -1,6 +1,6 @@
 // Speech provider types for use by OpenACP plugins.
 // These are stable interfaces that plugins can rely on without depending
-// on @openacp/cli internals.
+// on @n1creator/openacp-cli internals.
 
 export interface TTSOptions {
   language?: string;

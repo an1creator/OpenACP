@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # OpenACP Installer for macOS and Linux
-# Usage: curl -fsSL https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.sh | bash
 
 # ─── Section 1: Initialization & Utilities ────────────────────────────────────
 
@@ -462,7 +462,7 @@ print_usage() {
 OpenACP installer (macOS + Linux)
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.sh | bash
   curl -fsSL ... | bash -s -- [options]
 
 Options:
@@ -490,7 +490,7 @@ Environment variables:
   OPENACP_VERBOSE=1
 
 Examples:
-  curl -fsSL https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.sh | bash
   curl -fsSL ... | bash -s -- --no-onboard
   curl -fsSL ... | bash -s -- --version 2026.328.1
   curl -fsSL ... | bash -s -- --install-method git
@@ -1088,10 +1088,10 @@ fix_npm_permissions() {
 resolve_package_install_spec() {
     local value="$1"
     if [[ "$value" == "latest" ]]; then
-        echo "@openacp/cli@latest"
+        echo "@n1creator/openacp-cli@latest"
         return 0
     fi
-    echo "@openacp/cli@${value}"
+    echo "@n1creator/openacp-cli@${value}"
 }
 
 install_openacp_npm() {
@@ -1164,7 +1164,7 @@ install_openacp_npm() {
 
 install_openacp_from_git() {
     local repo_dir="$1"
-    local repo_url="https://github.com/Open-ACP/OpenACP.git"
+    local repo_url="https://github.com/an1creator/OpenACP.git"
 
     if [[ -d "$repo_dir/.git" ]]; then
         ui_info "Installing OpenACP from git checkout: ${repo_dir}"

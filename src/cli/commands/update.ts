@@ -13,7 +13,7 @@ export async function cmdUpdate(args: string[] = []): Promise<void> {
 \x1b[1mUsage:\x1b[0m
   openacp update
 
-Checks npm for the latest version of @openacp/cli and
+Checks npm for the latest version of @n1creator/openacp-cli and
 installs it globally if an update is available.
 `)
     return
@@ -33,7 +33,7 @@ installs it globally if an update is available.
   if (ok) {
     console.log(`\x1b[32m✓ Updated to v${latest}\x1b[0m`)
   } else {
-    console.error('Update failed. Try manually: npm install -g @openacp/cli@latest')
+    console.error('Update failed. Try manually: npm install -g @n1creator/openacp-cli@latest')
     process.exit(1)
   }
 }

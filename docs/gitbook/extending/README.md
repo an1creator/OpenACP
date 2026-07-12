@@ -6,7 +6,7 @@ OpenACP is designed to be extended. You can build plugins that add new features,
 
 - [**Getting Started: Your First Plugin**](getting-started-plugin.md) — Step-by-step tutorial: scaffold, develop, test, and publish a plugin from scratch.
 - [**Plugin System**](plugin-system.md) — Installing, listing, configuring, and uninstalling plugins via the CLI.
-- [**Plugin SDK Reference**](plugin-sdk-reference.md) — Types, base classes, adapter primitives, and testing utilities provided by `@openacp/plugin-sdk`.
+- [**Plugin SDK Reference**](plugin-sdk-reference.md) — Types, base classes, adapter primitives, and testing utilities provided by `@n1creator/openacp-plugin-sdk`.
 - [**Dev Mode**](dev-mode.md) — Hot-reload development workflow for plugin authors.
 - [**Building Adapters**](building-adapters.md) — Step-by-step guide to implementing a `ChannelAdapter` for a new messaging platform.
 - [**Adapter Reference**](adapter-reference.md) — Full method signatures, type definitions, and lifecycle documentation for adapters.

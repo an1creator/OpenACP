@@ -51,7 +51,7 @@ src/
     commands/         — CLI commands (start, plugins, dev, etc.)
     plugin-template/  — Scaffold templates for `openacp plugin create`
   packages/
-    plugin-sdk/       — @openacp/plugin-sdk (types + testing utilities)
+    plugin-sdk/       — @n1creator/openacp-plugin-sdk (types + testing utilities)
 ```
 
 ### Core Abstractions
@@ -86,10 +86,10 @@ All features are plugins. Core only provides infrastructure (ServiceRegistry, Mi
 
 ## npm Publishing
 
-Published as `@openacp/cli` on npm. Users install with `npm install -g @openacp/cli`.
+Published as `@n1creator/openacp-cli` on npm. Users install with `npm install -g @n1creator/openacp-cli`.
 
 - `pnpm build:publish` bundles CLI via tsup + builds SDK via tsc
-- GitHub Action auto-publishes both `@openacp/cli` and `@openacp/plugin-sdk` on tag push (`v*`)
+- GitHub Action auto-publishes both `@n1creator/openacp-cli` and `@n1creator/openacp-plugin-sdk` on tag push (`v*`)
 - Plugin system: `openacp plugin install <name>` installs from npm to `~/.openacp/plugins/`
 
 ## Versioning

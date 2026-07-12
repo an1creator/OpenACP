@@ -975,7 +975,7 @@ openacp uninstall @openacp/adapter-discord --json
 
 ## update
 
-Checks npm for the latest version of `@openacp/cli` and installs it if an update is available.
+Checks npm for the latest version of `@n1creator/openacp-cli` and installs it if an update is available.
 
 **Usage**
 ```

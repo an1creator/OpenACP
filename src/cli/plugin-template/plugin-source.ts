@@ -13,7 +13,7 @@ export function generatePluginSource(params: TemplateParams): string {
   const dirName = params.pluginName.replace(/^@[^/]+\//, '')
   const escapedDescription = (params.description || '').replace(/'/g, "\\'")
 
-  return `import type { OpenACPPlugin, PluginContext, InstallContext, MigrateContext } from '@openacp/plugin-sdk'
+  return `import type { OpenACPPlugin, PluginContext, InstallContext, MigrateContext } from '@n1creator/openacp-plugin-sdk'
 
 const plugin: OpenACPPlugin = {
   name: '${params.pluginName}',

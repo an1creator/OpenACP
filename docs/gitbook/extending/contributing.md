@@ -9,7 +9,7 @@ Contributions are welcome. This page covers how to set up a development environm
 **Requirements:** Node.js >= 20, pnpm >= 10.
 
 ```bash
-# 1. Fork https://github.com/Open-ACP/OpenACP and clone your fork
+# 1. Fork https://github.com/an1creator/OpenACP and clone your fork
 git clone https://github.com/<your-username>/OpenACP.git
 cd OpenACP
 
@@ -31,7 +31,7 @@ pnpm test
 
 The compiled output lands in `dist/`. The entry point is `dist/cli.js`.
 
-For publishing-related work, `pnpm build:publish` bundles via tsup into `dist-publish/` — this is what gets shipped to npm as `@openacp/cli`.
+For publishing-related work, `pnpm build:publish` bundles via tsup into `dist-publish/` — this is what gets shipped to npm as `@n1creator/openacp-cli`.
 
 ---
 

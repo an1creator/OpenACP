@@ -25,7 +25,7 @@ export function generatePluginGuide(params: TemplateParams): string {
 src/
   index.ts              — Plugin entry point (exports OpenACPPlugin object)
   __tests__/
-    index.test.ts       — Tests using Vitest + @openacp/plugin-sdk/testing
+    index.test.ts       — Tests using Vitest + @n1creator/openacp-plugin-sdk/testing
 package.json            — npm package config with engines.openacp constraint
 tsconfig.json           — TypeScript strict mode, ES2022, NodeNext
 CLAUDE.md               — Full technical reference for AI coding agents
@@ -154,11 +154,11 @@ async setup(ctx: PluginContext) {
 
 ## Testing
 
-Tests use Vitest and \`@openacp/plugin-sdk/testing\`.
+Tests use Vitest and \`@n1creator/openacp-plugin-sdk/testing\`.
 
 \`\`\`typescript
 import { describe, it, expect } from 'vitest'
-import { createTestContext, createTestInstallContext, mockServices } from '@openacp/plugin-sdk/testing'
+import { createTestContext, createTestInstallContext, mockServices } from '@n1creator/openacp-plugin-sdk/testing'
 import plugin from '../index.js'
 
 describe('${params.pluginName}', () => {
@@ -224,6 +224,6 @@ const ctx = createTestContext({
 - [Plugin SDK Reference](https://docs.openacp.dev/extending/plugin-sdk-reference)
 - [Getting Started: Your First Plugin](https://docs.openacp.dev/extending/getting-started-plugin)
 - [Dev Mode](https://docs.openacp.dev/extending/dev-mode)
-- [Contributing](https://github.com/Open-ACP/OpenACP/blob/main/CONTRIBUTING.md)
+- [Contributing](https://github.com/an1creator/OpenACP/blob/main/CONTRIBUTING.md)
 `
 }

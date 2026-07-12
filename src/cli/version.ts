@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
 import { existsSync, readFileSync } from 'node:fs'
 
-const NPM_PACKAGE = '@openacp/cli'
+export const NPM_PACKAGE = '@n1creator/openacp-cli'
 
 // Walk up from the current module's directory to find package.json.
 // Necessary because the compiled output lives in dist/ but package.json is at the root.
@@ -66,7 +66,7 @@ export function compareVersions(current: string, latest: string): -1 | 0 | 1 {
 }
 
 /**
- * Run `npm install -g @openacp/cli@latest` as a child process.
+ * Install the latest n1creator OpenACP release as a global package.
  * Forwards signals to the child so Ctrl+C during update cancels cleanly.
  */
 export async function runUpdate(): Promise<boolean> {
@@ -74,7 +74,7 @@ export async function runUpdate(): Promise<boolean> {
   return new Promise((resolve) => {
     const child = spawn('npm', ['install', '-g', `${NPM_PACKAGE}@latest`], {
       stdio: 'inherit',
-      shell: true,
+      shell: false,
     })
     const onSignal = () => {
       child.kill('SIGTERM')

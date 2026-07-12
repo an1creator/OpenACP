@@ -220,8 +220,8 @@ describe('LifecycleManager — Settings Validation', () => {
         if (result.success) return { valid: true }
         return {
           valid: false,
-          errors: result.error.errors.map(
-            (e: { path: (string | number)[]; message: string }) => `${e.path.join('.')}: ${e.message}`,
+          errors: result.error.issues.map(
+            (e) => `${e.path.map(String).join('.')}: ${e.message}`,
           ),
         }
       },
@@ -263,8 +263,8 @@ describe('LifecycleManager — Settings Validation', () => {
         if (result.success) return { valid: true }
         return {
           valid: false,
-          errors: result.error.errors.map(
-            (e: { path: (string | number)[]; message: string }) => `${e.path.join('.')}: ${e.message}`,
+          errors: result.error.issues.map(
+            (e) => `${e.path.map(String).join('.')}: ${e.message}`,
           ),
         }
       },
@@ -329,8 +329,8 @@ describe('LifecycleManager — Settings Validation', () => {
         if (result.success) return { valid: true }
         return {
           valid: false,
-          errors: result.error.errors.map(
-            (e: { path: (string | number)[]; message: string }) => `${e.path.join('.')}: ${e.message}`,
+          errors: result.error.issues.map(
+            (e) => `${e.path.map(String).join('.')}: ${e.message}`,
           ),
         }
       },

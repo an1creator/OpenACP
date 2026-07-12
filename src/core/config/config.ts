@@ -20,7 +20,7 @@ const LoggingSchema = z
     maxFiles: z.number().default(7),
     sessionLogRetentionDays: z.number().default(30),
   })
-  .default({});
+  .prefault({});
 
 /** Runtime logging configuration. Controls per-module log levels and output destinations. */
 export type LoggingConfig = z.infer<typeof LoggingSchema>;
@@ -52,9 +52,9 @@ export const ConfigSchema = z.object({
           allowedPaths: z.array(z.string()).default([]),
           envWhitelist: z.array(z.string()).default([]),
         })
-        .default({}),
+        .prefault({}),
     })
-    .default({}),
+    .prefault({}),
 
   // --- Logging ---
   logging: LoggingSchema,
@@ -68,7 +68,7 @@ export const ConfigSchema = z.object({
     .object({
       ttlDays: z.number().default(30),
     })
-    .default({}),
+    .prefault({}),
 
   // --- Installed integration tracking (e.g. plugins installed via CLI) ---
   integrations: z
@@ -87,7 +87,7 @@ export const ConfigSchema = z.object({
   // --- Multi-agent switching behavior ---
   agentSwitch: z.object({
     labelHistory: z.boolean().default(true),
-  }).default({}),
+  }).prefault({}),
 });
 
 /** Validated config object used throughout the codebase. Always obtained via `ConfigManager.get()` to ensure it's up-to-date. */

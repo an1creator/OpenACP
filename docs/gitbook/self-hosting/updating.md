@@ -15,19 +15,49 @@ Update available: 2026.327.1 → 2026.401.1
 ? Update now before starting?
 ```
 
-Selecting yes runs `npm install -g @openacp/cli@latest` in-process and exits, asking you to re-run your command with the new version. Set `OPENACP_SKIP_UPDATE_CHECK=true` to suppress this prompt.
+Selecting yes runs `npm install -g @n1creator/openacp-cli@latest` in-process and exits, asking you to re-run your command with the new version. Set `OPENACP_SKIP_UPDATE_CHECK=true` to suppress this prompt.
 
 ## Update
 
 ```bash
-npm update -g @openacp/cli
+openacp update
+```
+
+The CLI update command checks and installs `@n1creator/openacp-cli`. When the
+daemon is managed by systemd, OpenACP exits with its restart status and lets
+systemd invoke the configured `ExecStart` wrapper again. This ensures wrapper
+environment variables and the newly installed package path are used and avoids
+creating a competing detached daemon.
+
+You can also update directly:
+
+```bash
+npm install -g @n1creator/openacp-cli@latest
+openacp restart
 ```
 
 Or to pin to a specific version:
 
 ```bash
-npm install -g @openacp/cli@2026.401.1
+npm install -g @n1creator/openacp-cli@2026.401.1
 ```
+
+## Migrating from the upstream package
+
+The N1 Creator distribution uses a different npm package name but preserves the
+same `openacp` executable and workspace format:
+
+```bash
+npm uninstall -g @openacp/cli
+npm install -g @n1creator/openacp-cli@latest
+openacp --dir ~/openacp-workspace restart
+openacp --dir ~/openacp-workspace status
+```
+
+If `openacp` is a wrapper, verify that it ultimately executes the global
+`openacp` binary from the same npm prefix you updated. Keep proxy and other
+required environment setup in the wrapper or systemd drop-in rather than in the
+package directory, because npm replaces package files during upgrades.
 
 If you are running from source, pull and rebuild:
 
@@ -63,12 +93,26 @@ In addition, a one-time **global instance migration** runs at CLI startup. If a 
 
 Migrations are idempotent: running them multiple times has no effect.
 
+Installed npx and uvx agent definitions are also reconciled with the current ACP
+Registry. If an adapter package moves while retaining the same registry ID,
+OpenACP updates the stored command and arguments automatically while preserving
+user-provided environment overrides. Binary adapters still require an explicit
+install because they must be downloaded for the current platform.
+
 ## Post-Upgrade Checks
 
 After upgrading, start OpenACP normally:
 
 ```bash
 openacp start
+```
+
+Refresh agent metadata and verify external CLIs after a release that updates the
+ACP SDK or registry:
+
+```bash
+openacp agents refresh
+openacp doctor
 ```
 
 If there are any issues with the config (e.g., a field that could not be migrated), the process prints the validation errors and exits with a non-zero code. Review the output and correct the config file at `<instance-root>/config.json`.

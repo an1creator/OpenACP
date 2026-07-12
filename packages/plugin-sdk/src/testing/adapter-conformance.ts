@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import type { IChannelAdapter } from '@openacp/cli'
+import type { IChannelAdapter } from '@n1creator/openacp-cli'
 
 export function runAdapterConformanceTests(
   createAdapter: () => IChannelAdapter | Promise<IChannelAdapter>,

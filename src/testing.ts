@@ -2,7 +2,7 @@
 //
 // These helpers exist so plugin authors can validate their adapters against
 // the IChannelAdapter contract without wiring up a real messaging platform.
-// Import from `@openacp/cli/testing` in your plugin test files.
+// Import from `@n1creator/openacp-cli/testing` in your plugin test files.
 
 /**
  * Runs the standard IChannelAdapter conformance test suite against a given adapter factory.
@@ -17,7 +17,7 @@
  *
  * @example
  * ```ts
- * import { runAdapterConformanceTests } from '@openacp/cli/testing'
+ * import { runAdapterConformanceTests } from '@n1creator/openacp-cli/testing'
  * import { MyAdapter } from './my-adapter.js'
  *
  * runAdapterConformanceTests(() => new MyAdapter(mockConfig))

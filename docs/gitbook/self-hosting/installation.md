@@ -16,14 +16,14 @@ No database, no Docker, no external services required beyond the messaging platf
 The fastest way to install OpenACP on macOS or Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Open-ACP/OpenACP/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/install.sh | bash
 ```
 
 The script automatically:
 
 1. Detects your platform (macOS or Linux).
 2. Checks for Node.js 20+ and installs it if missing.
-3. Installs `@openacp/cli` globally via npm.
+3. Installs `@n1creator/openacp-cli` globally via npm.
 4. Launches the setup wizard.
 
 No prior setup required — the script handles everything.
@@ -33,7 +33,7 @@ No prior setup required — the script handles everything.
 If you prefer to manage Node.js yourself, install OpenACP directly from npm:
 
 ```bash
-npm install -g @openacp/cli
+npm install -g @n1creator/openacp-cli
 ```
 
 ### Verify the installation
@@ -107,7 +107,7 @@ You can override the config path with the `OPENACP_CONFIG_PATH` environment vari
 If you want to hack on OpenACP or run an unreleased version:
 
 ```bash
-git clone https://github.com/Open-ACP/OpenACP.git
+git clone https://github.com/an1creator/OpenACP.git
 cd OpenACP
 pnpm install
 pnpm build          # TypeScript compile → dist/

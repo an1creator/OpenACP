@@ -152,7 +152,7 @@ interface ChannelConfig {
 Adapter plugins now implement the `OpenACPPlugin` interface. Instead of exporting an `AdapterFactory`, plugins register their adapter in the `setup()` method:
 
 ```typescript
-import type { OpenACPPlugin, PluginContext } from '@openacp/plugin-sdk'
+import type { OpenACPPlugin, PluginContext } from '@n1creator/openacp-plugin-sdk'
 
 const plugin: OpenACPPlugin = {
   name: '@openacp/adapter-myplatform',
@@ -164,7 +164,7 @@ const plugin: OpenACPPlugin = {
 }
 ```
 
-Adapter implementations should extend `MessagingAdapter` (for full-featured platforms with threads/topics) or `StreamAdapter` (for simpler stream-based integrations) from `@openacp/plugin-sdk`.
+Adapter implementations should extend `MessagingAdapter` (for full-featured platforms with threads/topics) or `StreamAdapter` (for simpler stream-based integrations) from `@n1creator/openacp-plugin-sdk`.
 
 ---
 

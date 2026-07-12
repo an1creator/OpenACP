@@ -53,7 +53,7 @@ export async function tunnelRoutes(
 
     const parsed = AddTunnelBodySchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.errors[0]?.message ?? 'Invalid request' });
+      return reply.status(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request' });
     }
     const body = parsed.data;
 

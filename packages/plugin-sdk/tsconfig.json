@@ -10,7 +10,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "paths": {
-      "@openacp/cli/testing": ["../../dist/testing.d.ts"]
+      "@n1creator/openacp-cli/testing": ["../../dist/testing.d.ts"]
     }
   },
   "include": ["src/**/*.ts"],

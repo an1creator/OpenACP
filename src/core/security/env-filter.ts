@@ -15,6 +15,11 @@ export const DEFAULT_ENV_WHITELIST = [
   "TMPDIR", "XDG_*", "NODE_ENV", "EDITOR",
   // Git — agents need git config and SSH access for code operations
   "GIT_*", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
+  // Network proxies — ACP adapters and their CLI children may require the host proxy.
+  // Include both cases because different runtimes and libraries inspect different names.
+  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+  "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+  "NODE_USE_ENV_PROXY",
   // Terminal rendering — ensures correct color output in agent responses
   "COLORTERM", "FORCE_COLOR", "NO_COLOR", "TERM_PROGRAM", "HOSTNAME",
 ];

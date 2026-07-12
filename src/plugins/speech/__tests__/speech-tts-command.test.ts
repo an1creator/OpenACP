@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { createTestContext } from '@openacp/plugin-sdk/testing'
+import { createTestContext } from '@n1creator/openacp-plugin-sdk/testing'
 import type { TTSProvider } from '../speech-types.js'
 
 // Must be hoisted before importing speechPlugin

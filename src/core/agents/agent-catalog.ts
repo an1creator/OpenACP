@@ -80,6 +80,7 @@ export class AgentCatalog {
       };
       fs.mkdirSync(path.dirname(this.cachePath), { recursive: true });
       fs.writeFileSync(this.cachePath, JSON.stringify(cache, null, 2), { mode: 0o600 });
+      this.enrichInstalledFromRegistry();
       log.info({ count: this.registryAgents.length }, "Registry updated");
     } catch (err) {
       log.warn({ err }, "Failed to fetch registry, using cached data");
@@ -287,8 +288,10 @@ export class AgentCatalog {
         updated = true;
       }
 
-      // Enrich version if unknown
-      if (agent.version === "unknown") {
+      // Keep the installed metadata aligned with the registry. Package runners
+      // are intentionally unpinned, so this records the adapter version whose
+      // command definition is currently in use.
+      if (agent.version !== regAgent.version) {
         agent.version = regAgent.version;
         updated = true;
       }
@@ -318,6 +321,29 @@ export class AgentCatalog {
             updated = true;
           }
           // binary: skip — binary must be downloaded via `openacp agents install`
+        }
+      }
+
+      // Registry entries can move to a new adapter package while retaining the
+      // same ID. Refresh existing package-runner definitions automatically so
+      // users do not remain stuck on a retired adapter (for example, Codex moved
+      // from @zed-industries/codex-acp to @agentclientprotocol/codex-acp).
+      const currentDist = resolveDistribution(regAgent);
+      if (agent.distribution === "npx" && currentDist?.type === "npx") {
+        const args = [stripNpmVersion(currentDist.package), ...currentDist.args];
+        if (agent.command !== "npx" || !arraysEqual(agent.args, args)) {
+          agent.command = "npx";
+          agent.args = args;
+          agent.env = { ...currentDist.env, ...agent.env };
+          updated = true;
+        }
+      } else if (agent.distribution === "uvx" && currentDist?.type === "uvx") {
+        const args = [stripPythonVersion(currentDist.package), ...currentDist.args];
+        if (agent.command !== "uvx" || !arraysEqual(agent.args, args)) {
+          agent.command = "uvx";
+          agent.args = args;
+          agent.env = { ...currentDist.env, ...agent.env };
+          updated = true;
         }
       }
 
@@ -402,6 +428,10 @@ function stripNpmVersion(pkg: string): string {
   }
   const at = pkg.indexOf("@");
   return at === -1 ? pkg : pkg.slice(0, at);
+}
+
+function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 /**

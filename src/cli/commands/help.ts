@@ -102,6 +102,6 @@ Connect messaging platforms (Telegram, Discord) to 28+ AI coding agents via ACP 
                        Success: { "success": true, "data": { ... } }
                        Error:   { "success": false, "error": { "code": "...", "message": "..." } }
 
-\x1b[2mMore info: https://github.com/Open-ACP/OpenACP\x1b[0m
+\x1b[2mMore info: https://github.com/an1creator/OpenACP\x1b[0m
 `)
 }

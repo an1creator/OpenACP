@@ -10,7 +10,7 @@ This is a **hands-on tutorial** that walks you through creating, developing, tes
 
 - **Node.js** 18+ installed
 - **npm** or **pnpm** installed
-- **OpenACP** installed globally (`npm install -g @openacp/cli`)
+- **OpenACP** installed globally (`npm install -g @n1creator/openacp-cli`)
 - A working OpenACP setup (run `openacp onboard` if you haven't yet)
 
 ---
@@ -103,26 +103,26 @@ Key fields in the generated `package.json`:
     "openacp": ">=2026.0327.1"
   },
   "peerDependencies": {
-    "@openacp/cli": ">=2026.0327.1"
+    "@n1creator/openacp-cli": ">=2026.0327.1"
   },
   "devDependencies": {
-    "@openacp/plugin-sdk": "^1.0.0",
+    "@n1creator/openacp-plugin-sdk": "^1.0.0",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
   }
 }
 ```
 
-The `engines.openacp` field declares the minimum OpenACP CLI version required by your plugin. When users install your plugin, OpenACP checks this field and warns if their CLI version is too old. The `peerDependencies` on `@openacp/cli` serves the same purpose for npm's dependency resolver.
+The `engines.openacp` field declares the minimum OpenACP CLI version required by your plugin. When users install your plugin, OpenACP checks this field and warns if their CLI version is too old. The `peerDependencies` on `@n1creator/openacp-cli` serves the same purpose for npm's dependency resolver.
 
-The `@openacp/plugin-sdk` package provides all types, base classes, and testing utilities you need.
+The `@n1creator/openacp-plugin-sdk` package provides all types, base classes, and testing utilities you need.
 
 ### src/index.ts
 
 The generated entry point contains every lifecycle hook with inline documentation:
 
 ```typescript
-import type { OpenACPPlugin, PluginContext, InstallContext, MigrateContext } from '@openacp/plugin-sdk'
+import type { OpenACPPlugin, PluginContext, InstallContext, MigrateContext } from '@n1creator/openacp-plugin-sdk'
 
 const plugin: OpenACPPlugin = {
   name: '@myorg/hello-world',
@@ -205,7 +205,7 @@ See [Dev Mode](dev-mode.md) for the full guide.
 npm test
 ```
 
-Tests use Vitest and the `@openacp/plugin-sdk/testing` utilities.
+Tests use Vitest and the `@n1creator/openacp-plugin-sdk/testing` utilities.
 
 ---
 
@@ -216,7 +216,7 @@ Let's turn the template into a greeting plugin that responds to a `/hello` comma
 Replace the contents of `src/index.ts`:
 
 ```typescript
-import type { OpenACPPlugin, PluginContext, InstallContext } from '@openacp/plugin-sdk'
+import type { OpenACPPlugin, PluginContext, InstallContext } from '@n1creator/openacp-plugin-sdk'
 
 const plugin: OpenACPPlugin = {
   name: '@myorg/hello-world',
@@ -282,7 +282,7 @@ Replace `src/__tests__/index.test.ts`:
 
 ```typescript
 import { describe, it, expect } from 'vitest'
-import { createTestContext, createTestInstallContext } from '@openacp/plugin-sdk/testing'
+import { createTestContext, createTestInstallContext } from '@n1creator/openacp-plugin-sdk/testing'
 import plugin from '../index.js'
 
 describe('@myorg/hello-world', () => {

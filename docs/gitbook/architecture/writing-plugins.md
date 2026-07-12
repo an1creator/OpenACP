@@ -26,7 +26,7 @@ my-plugin/
 
 ```typescript
 // src/index.ts
-import type { OpenACPPlugin, PluginContext } from '@openacp/cli'
+import type { OpenACPPlugin, PluginContext } from '@n1creator/openacp-cli'
 
 export default {
   name: '@community/my-plugin',
@@ -443,7 +443,7 @@ describe('my-plugin', () => {
     ".": "./dist/index.js"
   },
   "peerDependencies": {
-    "@openacp/cli": ">=2026.0326.0"
+    "@n1creator/openacp-cli": ">=2026.0326.0"
   },
   "keywords": ["openacp", "openacp-plugin"]
 }
@@ -486,7 +486,7 @@ Before publishing:
 - [ ] `migrate()` handles version upgrades
 - [ ] `teardown()` cleans up resources (timers, connections)
 - [ ] Tests cover setup, commands, and error cases
-- [ ] `package.json` has `@openacp/cli` as peer dependency
+- [ ] `package.json` has `@n1creator/openacp-cli` as peer dependency
 
 ---
 

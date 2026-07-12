@@ -1,4 +1,4 @@
-// Public API surface for the `@openacp/cli` package.
+// Public API surface for the `@n1creator/openacp-cli` package.
 //
 // Most exports come from `core/index.ts` which provides the full set of
 // core modules, plugin types, and adapter primitives for plugin authors.

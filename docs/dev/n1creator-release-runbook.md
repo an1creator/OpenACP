@@ -75,3 +75,10 @@ openacp doctor
 
 On systemd-managed hosts, the daemon exits for systemd to invoke the stable
 wrapper. Do not run a second detached daemon manually.
+
+The Telegram `/update` command runs the global npm install inside the active
+daemon and requests a restart only after npm succeeds. Do not stop/restart the
+systemd unit or start a second manual npm install while `/update` is running:
+the daemon forwards its termination signal to npm and reports the interrupted
+update as failed. Wait for the Telegram success/failure message before doing
+other rollout work.

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { CommandRegistry } from '../../command-registry.js'
-import { clearProxyDraftsForChannel, registerProxyCommand } from '../proxy.js'
+import { clearProxyDraftsForChannel, PROXY_CAPABILITY_ERROR, registerProxyCommand } from '../proxy.js'
 import { ProxyRevisionConflictError } from '../../network/proxy-store.js'
 
 function baseArgs() {
@@ -27,22 +27,71 @@ describe('/proxy command', () => {
     expect(proxyService.setRoute).toHaveBeenCalledWith('agents.codex', 'profile:usa', undefined)
     expect(result).toMatchObject({ type: 'text' })
     expect((result as any).text).toContain('active sessions were not restarted')
+    expect(identity.getUserByIdentity).toHaveBeenCalledTimes(3) // one read gate, then read + mutation re-check
     expect((await registry.execute('/proxy categories', baseArgs())).type).toBe('menu')
     expect((await registry.execute('/proxy category agents', baseArgs())).type).toBe('menu')
     expect((await registry.execute('/proxy scope agents.codex', baseArgs())).type).toBe('menu')
   })
 
-  it('rejects every mutating command from a participant without capability', async () => {
+  it('rejects every read, diagnostic, test, and mutation from a participant without capability', async () => {
     const registry = new CommandRegistry()
-    const proxyService = { status: () => ({ diagnostics: [] }), listProfiles: () => [], setRoute: vi.fn(), deleteProfile: vi.fn() }
+    const proxyService = {
+      status: vi.fn(() => ({ diagnostics: [] })),
+      listProfiles: vi.fn(() => []),
+      test: vi.fn(),
+      setRoute: vi.fn(),
+      deleteProfile: vi.fn(),
+    }
     const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'member' }) }
     registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } })
-    for (const command of ['/proxy set agents.codex direct', '/proxy import x /tmp/x', '/proxy delete-confirm x']) {
+    for (const command of [
+      '/proxy', '/proxy status', '/proxy profiles', '/proxy routes', '/proxy diagnostics',
+      '/proxy test agents.codex', '/proxy set agents.codex direct',
+      '/proxy import x /tmp/x', '/proxy delete-confirm x',
+    ]) {
       const result = await registry.execute(command, baseArgs())
-      expect(result).toMatchObject({ type: 'error' })
-      expect((result as any).message).toContain('network:proxy:manage')
+      expect(result).toEqual({ type: 'error', message: PROXY_CAPABILITY_ERROR })
     }
-    expect(proxyService.setRoute).not.toHaveBeenCalled(); expect(proxyService.deleteProfile).not.toHaveBeenCalled()
+    expect(proxyService.status).not.toHaveBeenCalled()
+    expect(proxyService.listProfiles).not.toHaveBeenCalled()
+    expect(proxyService.test).not.toHaveBeenCalled()
+    expect(proxyService.setRoute).not.toHaveBeenCalled()
+    expect(proxyService.deleteProfile).not.toHaveBeenCalled()
+    expect(JSON.stringify(identity.getUserByIdentity.mock.calls)).not.toContain('proxy.test')
+  })
+
+  it('fails closed with the same typed response when the identity service is absent', async () => {
+    const registry = new CommandRegistry()
+    const proxyService = { status: vi.fn(), listProfiles: vi.fn(), test: vi.fn() }
+    registerProxyCommand(registry, { proxyService } as any)
+
+    for (const command of ['/proxy', '/proxy diagnostics', '/proxy test channels.telegram']) {
+      await expect(registry.execute(command, baseArgs())).resolves.toEqual({
+        type: 'error',
+        message: PROXY_CAPABILITY_ERROR,
+      })
+    }
+    expect(proxyService.status).not.toHaveBeenCalled()
+    expect(proxyService.listProfiles).not.toHaveBeenCalled()
+    expect(proxyService.test).not.toHaveBeenCalled()
+  })
+
+  it('converts identity lookup failures into the same safe response without leaking the error', async () => {
+    const registry = new CommandRegistry()
+    const proxyService = { status: vi.fn(), listProfiles: vi.fn(), test: vi.fn() }
+    const identity = {
+      getUserByIdentity: vi.fn().mockRejectedValue(new Error('lookup failed at proxy.internal with secret-value')),
+    }
+    registerProxyCommand(registry, {
+      proxyService,
+      lifecycleManager: { serviceRegistry: { get: () => identity } },
+    } as any)
+
+    const result = await registry.execute('/proxy diagnostics', baseArgs())
+    expect(result).toEqual({ type: 'error', message: PROXY_CAPABILITY_ERROR })
+    expect(JSON.stringify(result)).not.toContain('proxy.internal')
+    expect(JSON.stringify(result)).not.toContain('secret-value')
+    expect(proxyService.status).not.toHaveBeenCalled()
   })
 
   it('paginates large profile and category menus for connector callback limits', async () => {
@@ -55,9 +104,10 @@ describe('/proxy command', () => {
       status: () => ({ revision: 3, diagnostics: [] }), listProfiles: () => profiles, getKnownScopes: () => scopes,
       resolve: (scope: string) => ({ scope, route: 'inherit' }),
     }
-    registerProxyCommand(registry, { proxyService } as any)
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } } as any)
     const firstProfiles = await registry.execute('/proxy profiles', baseArgs()) as any
-    expect(firstProfiles.options).toHaveLength(10) // 8 profiles + Next + Back for read-only callers
+    expect(firstProfiles.options).toHaveLength(11) // Create + 8 profiles + Next + Back for authorized callers
     expect(firstProfiles.options.some((option: any) => option.command === '/proxy profiles 1')).toBe(true)
     const secondCategory = await registry.execute('/proxy category plugins 3 1', baseArgs()) as any
     expect(secondCategory.options.some((option: any) => option.command === '/proxy category plugins 3 0')).toBe(true)

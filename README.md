@@ -227,9 +227,11 @@ not globally intercepted. Credentials live in a separate mode-0600 secret store
 and never appear in route files, agent definitions, status responses, or
 structured OpenACP logs.
 
-Manage routes from any connector with `/proxy`, from the CLI with
-`openacp proxy`, or through `/api/v1/proxy`. Channel changes are tested before
-they are saved. See [Scoped Proxy Routing](docs/gitbook/features/proxy-routing.md).
+In Telegram, open **Settings → Proxy Management** or use `/proxy` directly.
+Both paths render the same connector-neutral proxy home; other adapters can use
+that `/proxy` command model too. CLI and REST automation remain available through
+`openacp proxy` and `/api/v1/proxy`. Channel changes are tested before they are
+saved. See [Scoped Proxy Routing](docs/gitbook/features/proxy-routing.md).
 
 ### Operations
 
@@ -312,7 +314,8 @@ The protected JSON file supports a Quick URL mode: use either separate
 mutually exclusive. A URL must include an explicit port; credentials are parsed
 and stored separately, and the original URL is never persisted or returned.
 
-The connector-neutral `/proxy` interface now provides admin-only add/edit,
+The connector-neutral `/proxy` interface requires `network:proxy:manage` before
+showing status, profiles, routes, diagnostics, or tests. It provides add/edit,
 candidate test-before-save, credential clearing, paginated route controls, and
 atomic delete-with-reassignment. Telegram deletes credential replies before use;
 if that guarantee is unavailable, OpenACP refuses the value and directs the

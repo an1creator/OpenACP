@@ -186,6 +186,12 @@ function stalePolicyResponse(reopen: string): CommandResponse {
   }
 }
 
+export const PROXY_CAPABILITY_ERROR = 'Proxy management requires network:proxy:manage capability.'
+
+function proxyCapabilityError(): CommandResponse {
+  return { type: 'error', message: PROXY_CAPABILITY_ERROR }
+}
+
 /** Connector-neutral proxy command. Adapters render the returned menus in their native UI. */
 export function registerProxyCommand(registry: CommandRegistry, _core: unknown): void {
   const core = _core as OpenACPCore
@@ -203,8 +209,11 @@ export function registerProxyCommand(registry: CommandRegistry, _core: unknown):
         'wizard-save', 'wizard-cancel', 'wizard-create-mode', 'wizard-default-port', 'wizard-auth',
         'wizard-review',
       ])
+      // Authorize before reading status, profiles, routes, diagnostics, or test results.
+      if (!(await canManageProxy(core, args))) return proxyCapabilityError()
+      // Mutations deliberately re-check at execution time so cached menu access cannot authorize a write.
       if (action && mutations.has(action) && !(await canManageProxy(core, args))) {
-        return { type: 'error', message: 'This action requires network:proxy:manage capability.' }
+        return proxyCapabilityError()
       }
       if (!action || action === 'status') {
         return {
@@ -659,6 +668,10 @@ export function registerProxyCommand(registry: CommandRegistry, _core: unknown):
 async function canManageProxy(core: OpenACPCore, args: CommandArgs): Promise<boolean> {
   const identity = core.lifecycleManager?.serviceRegistry?.get<IdentityService>('identity')
   if (!identity) return false
-  const user = await identity.getUserByIdentity(formatIdentityId(args.channelId, args.userId))
-  return Boolean(user && hasIdentityCapability(user.role, 'network:proxy:manage'))
+  try {
+    const user = await identity.getUserByIdentity(formatIdentityId(args.channelId, args.userId))
+    return Boolean(user && hasIdentityCapability(user.role, 'network:proxy:manage'))
+  } catch {
+    return false
+  }
 }

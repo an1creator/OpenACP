@@ -57,6 +57,8 @@ export function registerCoreMenuItems(registry: MenuRegistry): void {
     priority: 32,
     group: 'config',
     action: { type: 'command', command: '/proxy' },
+    // Keep already-sent m:core:proxy buttons valid while nesting new entry points under Settings.
+    visible: () => false,
   })
   registry.register({
     id: 'core:restart',

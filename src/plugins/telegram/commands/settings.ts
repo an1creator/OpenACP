@@ -10,6 +10,7 @@ import {
   type ConfigFieldDef,
 } from "../../../core/config/config-registry.js";
 import { createChildLogger } from "../../../core/utils/log.js";
+import { settingsCommandCallback } from "../callback-navigation.js";
 
 const log = createChildLogger({ module: "telegram-settings" });
 
@@ -30,6 +31,8 @@ async function buildSettingsKeyboard(core: OpenACPCore): Promise<InlineKeyboard>
     }
   }
 
+  // Reuse the connector-neutral command renderer instead of duplicating proxy menus here.
+  kb.text("🌐 Proxy Management", settingsCommandCallback("/proxy")).row();
   kb.text("◀️ Back to Menu", "s:back");
   return kb;
 }

@@ -78,9 +78,12 @@ openacp proxy test --profile usa
 openacp proxy delete usa --reassign direct --expected-revision 14
 ```
 
-In Telegram, use `/proxy`. The connector-neutral menus support profile listing,
-full add/edit flows, a quick write-only proxy URL mode, manual endpoint setup,
-candidate testing before save, credential clearing,
+In Telegram, open **Settings → Proxy Management** or use `/proxy` directly. The
+main action menu keeps one Settings entry instead of duplicating proxy management
+beside it; already-sent legacy proxy buttons continue to open the same home. The
+connector-neutral menus support profile listing, full add/edit flows, a quick
+write-only proxy URL mode, manual endpoint setup, candidate testing before save,
+credential clearing,
 transactional deletion with route reassignment, the routing matrix, route
 selectors, and connectivity tests, so other adapters can render the same
 management model. Wizard drafts exist only in memory for ten minutes, are bound
@@ -128,11 +131,12 @@ an explicit choice between no authentication and a complete non-empty
 username/password pair. The former `-` sentinel is not accepted as no-auth.
 Profile names are trimmed and must contain 1-100 characters.
 
-Viewing status and running fixed connectivity checks is read-only. Profile and
-route mutations require the `network:proxy:manage` capability in commands and
-REST. Authorization is checked again for every slash command, button callback,
-and follow-up wizard input. Long connector menus are paginated; drafts cannot be
-resumed by another member or topic.
+The connector `/proxy` command requires `network:proxy:manage` before reading
+status, profiles, routes, diagnostics, or test results; missing identity fails
+closed with no policy data. REST authorization remains unchanged and is
+documented separately. Connector mutations reauthorize again at execution time,
+including every button callback and follow-up wizard input. Long connector menus
+are paginated; drafts cannot be resumed by another member or topic.
 
 ## Runtime behavior and safety
 

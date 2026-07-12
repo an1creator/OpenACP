@@ -55,16 +55,23 @@ describe('proxy command discoverability', () => {
     expect(output).toContain('never in command arguments')
   })
 
-  it('is discoverable in Telegram autocomplete and the shared main menu', () => {
+  it('is discoverable in Telegram autocomplete and through Settings without a duplicate main-menu item', () => {
     expect(STATIC_COMMANDS).toContainEqual({
       command: 'proxy',
       description: 'Manage scoped proxy routing',
     })
     const menu = new MenuRegistry()
     registerCoreMenuItems(menu)
-    expect(menu.getItem('core:proxy')).toMatchObject({
+    expect(menu.getItem('core:settings')).toMatchObject({
+      label: '⚙️ Settings',
+      action: { type: 'callback', callbackData: 's:settings' },
+    })
+    expect(menu.getItems().map((item) => item.id)).not.toContain('core:proxy')
+    const legacyProxyItem = menu.getItem('core:proxy')
+    expect(legacyProxyItem).toMatchObject({
       label: '🌐 Proxy Routing',
       action: { type: 'command', command: '/proxy' },
     })
+    expect(legacyProxyItem?.visible?.()).toBe(false)
   })
 })

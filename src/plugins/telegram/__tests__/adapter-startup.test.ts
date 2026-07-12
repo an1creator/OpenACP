@@ -517,6 +517,135 @@ describe('TelegramAdapter startup sequence', () => {
     expect(editMessageText).toHaveBeenCalledWith(expect.stringContaining('network:proxy:manage'), expect.any(Object))
   })
 
+  it('opens the canonical proxy home through the generic Settings command callback', async () => {
+    const { checkTopicsPrerequisites } = await import('../validators.js')
+    vi.mocked(checkTopicsPrerequisites).mockResolvedValue({ ok: true })
+    const { CommandRegistry } = await import('../../../core/command-registry.js')
+    const { registerProxyCommand } = await import('../../../core/commands/proxy.js')
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    const registry = new CommandRegistry()
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    core.lifecycleManager.serviceRegistry.get = vi.fn((name: string) => name === 'command-registry' ? registry : name === 'identity' ? identity : null)
+    registerProxyCommand(registry, core)
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+    await adapter.start()
+    const bot = MockBot.instances.at(-1)!
+    const callback = bot.callbackHandlers.find(({ filter }) => filter instanceof RegExp && filter.test('c//proxy'))
+    expect(callback).toBeDefined()
+    const editMessageText = vi.fn().mockResolvedValue(undefined)
+
+    await callback!.handler({
+      chat: { id: makeTelegramConfig().chatId },
+      from: { id: 77 },
+      callbackQuery: { data: 'c//proxy', message: {} },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText,
+    })
+
+    expect(editMessageText).toHaveBeenCalledWith('🌐 Proxy management', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: 'Profiles', callback_data: 'c//proxy profiles' }],
+          [{ text: 'Routing', callback_data: 'c//proxy routing' }],
+          [{ text: 'Diagnostics', callback_data: 'c//proxy diagnostics' }],
+          [{ text: 'Help', callback_data: 'c//proxy help' }],
+        ],
+      },
+    })
+    expect(JSON.stringify(editMessageText.mock.calls)).not.toContain('Back to Settings')
+  })
+
+  it('preserves a Settings return target through canonical proxy submenus without changing direct /proxy', async () => {
+    const { checkTopicsPrerequisites } = await import('../validators.js')
+    vi.mocked(checkTopicsPrerequisites).mockResolvedValue({ ok: true })
+    const { CommandRegistry } = await import('../../../core/command-registry.js')
+    const { registerProxyCommand } = await import('../../../core/commands/proxy.js')
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    const registry = new CommandRegistry()
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    core.proxyService.listProfiles = vi.fn().mockReturnValue([])
+    core.proxyService.status = vi.fn().mockReturnValue({ revision: 1, diagnostics: [] })
+    core.lifecycleManager.serviceRegistry.get = vi.fn((name: string) => name === 'command-registry' ? registry : name === 'identity' ? identity : null)
+    registerProxyCommand(registry, core)
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+    await adapter.start()
+    const bot = MockBot.instances.at(-1)!
+    const callback = bot.callbackHandlers.find(({ filter }) => filter instanceof RegExp && filter.test('c/@settings:/proxy'))
+    expect(callback).toBeDefined()
+    expect(bot.callbackHandlers.some(({ filter }) => filter === 's:back:refresh')).toBe(true)
+    const editMessageText = vi.fn().mockResolvedValue(undefined)
+    const baseCtx = {
+      chat: { id: makeTelegramConfig().chatId },
+      from: { id: 77 },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+      editMessageText,
+    }
+
+    await callback!.handler({
+      ...baseCtx,
+      callbackQuery: { data: 'c/@settings:/proxy', message: {} },
+    })
+    const homeKeyboard = editMessageText.mock.calls.at(-1)![1].reply_markup.inline_keyboard
+    expect(homeKeyboard.at(-1)).toEqual([{ text: '◀️ Back to Settings', callback_data: 's:back:refresh' }])
+    const profilesCallback = homeKeyboard[0][0].callback_data
+    expect(profilesCallback).toBe('c/@settings:/proxy profiles')
+
+    await callback!.handler({
+      ...baseCtx,
+      callbackQuery: { data: profilesCallback, message: {} },
+    })
+    const profilesKeyboard = editMessageText.mock.calls.at(-1)![1].reply_markup.inline_keyboard
+    expect(profilesKeyboard.some((row: any[]) => row.some((button: any) => button.text === 'Back'))).toBe(true)
+    expect(profilesKeyboard.at(-1)).toEqual([{ text: '◀️ Back to Settings', callback_data: 's:back:refresh' }])
+  })
+
+  it('fails closed before rendering proxy policy for member and missing-identity callbacks', async () => {
+    const { checkTopicsPrerequisites } = await import('../validators.js')
+    vi.mocked(checkTopicsPrerequisites).mockResolvedValue({ ok: true })
+    const { CommandRegistry } = await import('../../../core/command-registry.js')
+    const { PROXY_CAPABILITY_ERROR, registerProxyCommand } = await import('../../../core/commands/proxy.js')
+    const { TelegramAdapter } = await import('../adapter.js')
+
+    for (const identity of [
+      { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'member' }) },
+      null,
+    ]) {
+      const core = makeMockCore(`access-${identity ? 'member' : 'missing'}`) as any
+      const registry = new CommandRegistry()
+      core.proxyService.status = vi.fn()
+      core.proxyService.listProfiles = vi.fn()
+      core.lifecycleManager.serviceRegistry.get = vi.fn((name: string) =>
+        name === 'command-registry' ? registry : name === 'identity' ? identity : null)
+      registerProxyCommand(registry, core)
+      const adapter = new TelegramAdapter(core, makeTelegramConfig())
+      await adapter.start()
+      const bot = MockBot.instances.at(-1)!
+      const callback = bot.callbackHandlers.find(({ filter }) => filter instanceof RegExp && filter.test('c//proxy'))
+      const editMessageText = vi.fn().mockResolvedValue(undefined)
+
+      for (const data of ['c//proxy', 'c/@settings:/proxy']) {
+        await callback!.handler({
+          chat: { id: makeTelegramConfig().chatId },
+          from: { id: 77 },
+          callbackQuery: { data, message: {} },
+          answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+          editMessageText,
+        })
+      }
+
+      expect(editMessageText.mock.calls[0]).toEqual([`❌ ${PROXY_CAPABILITY_ERROR}`, { parse_mode: 'Markdown' }])
+      expect(editMessageText.mock.calls[1]).toEqual([`❌ ${PROXY_CAPABILITY_ERROR}`, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: '◀️ Back to Settings', callback_data: 's:back:refresh' }]] },
+      }])
+      expect(core.proxyService.status).not.toHaveBeenCalled()
+      expect(core.proxyService.listProfiles).not.toHaveBeenCalled()
+      await adapter.stop()
+    }
+  })
+
   it('deletes sensitive input before dispatch and discards it when deletion fails', async () => {
     const { checkTopicsPrerequisites } = await import('../validators.js')
     vi.mocked(checkTopicsPrerequisites).mockResolvedValue({ ok: true })

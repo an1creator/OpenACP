@@ -74,6 +74,13 @@ import {
   type TelegramCommandOwnerIdentity,
 } from "./command-ownership-store.js";
 import { getGlobalRoot } from "../../core/instance/instance-context.js";
+import {
+  contextualCommandCallback,
+  decodeCommandCallback,
+  returnButton,
+  type TelegramCommandCallback,
+  type TelegramReturnTarget,
+} from "./callback-navigation.js";
 // evaluateNoise is handled by MessagingAdapter.shouldDisplay()
 
 interface PlanMetadata {
@@ -138,7 +145,7 @@ function patchedFetch(
  *   API calls while keeping the response live.
  * - **Callback routing**:
  *   - `p:<key>:<optionId>` — permission approval buttons
- *   - `c/<command>` (or `c/#<id>` for long commands) — command button actions
+ *   - `c/<command>` (or `c/#<id>`) — command actions with optional allow-listed return context
  *   - `m:<itemId>` — MenuRegistry item dispatch
  *   - Domain prefixes (`d:`, `v:`, `ns:`, `sw:`, etc.) — specific feature flows
  * - **Two-phase startup**: Phase 1 starts the bot and registers handlers.
@@ -173,7 +180,7 @@ export class TelegramAdapter extends MessagingAdapter {
   private skillManager!: SkillCommandManager;
   private fileService!: FileServiceInterface;
   private sessionTrackers: Map<string, ActivityTracker> = new Map();
-  private callbackCache = new Map<string, string>();
+  private callbackCache = new Map<string, TelegramCommandCallback>();
   private callbackCounter = 0;
   private pendingCommandInputs = new Map<string, {
     command: string;
@@ -181,6 +188,7 @@ export class TelegramAdapter extends MessagingAdapter {
     fallback: string;
     expiresAt: number;
     promptMessageId: number;
+    returnTarget?: TelegramReturnTarget;
   }>();
   /** Pending skill commands queued when session.threadId was not yet set */
   private _pendingSkillCommands = new Map<string, AgentCommand[]>();
@@ -510,7 +518,13 @@ export class TelegramAdapter extends MessagingAdapter {
           reply: async () => {},
         });
         if (response.type !== 'silent' && response.type !== 'delegated') {
-          await this.renderCommandResponse(response, ctx.chat.id, topicIdForInput, String(ctx.from?.id));
+          await this.renderCommandResponse(
+            response,
+            ctx.chat.id,
+            topicIdForInput,
+            String(ctx.from?.id),
+            pending.returnTarget,
+          );
         }
         return;
       }
@@ -622,7 +636,8 @@ export class TelegramAdapter extends MessagingAdapter {
       }
 
       const data = ctx.callbackQuery.data;
-      const command = this.fromCallbackData(data);
+      const callback = this.fromCallbackData(data);
+      const command = callback.command;
 
       const registry =
         this.core.lifecycleManager?.serviceRegistry?.get<CommandRegistry>(
@@ -659,7 +674,13 @@ export class TelegramAdapter extends MessagingAdapter {
         await ctx.answerCallbackQuery();
         if (response.type !== "silent" && response.type !== "delegated") {
           if (response.type === 'input') {
-            await this.renderCommandResponse(response, chatId, topicId, String(ctx.from?.id));
+            await this.renderCommandResponse(
+              response,
+              chatId,
+              topicId,
+              String(ctx.from?.id),
+              callback.returnTarget,
+            );
             return;
           }
           // Always edit the callback message in-place (no new messages)
@@ -667,9 +688,10 @@ export class TelegramAdapter extends MessagingAdapter {
             const keyboard = response.options.map((opt) => [
               {
                 text: `${opt.label}${opt.hint ? ` \u2014 ${opt.hint}` : ""}`,
-                callback_data: this.toCallbackData(opt.command),
+                callback_data: this.toCallbackData(opt.command, callback.returnTarget),
               },
             ]);
+            this.appendReturnButton(keyboard, callback.returnTarget);
             try {
               await ctx.editMessageText(response.title, {
                 reply_markup: { inline_keyboard: keyboard },
@@ -691,7 +713,11 @@ export class TelegramAdapter extends MessagingAdapter {
               parseMode = "Markdown";
             }
             try {
-              await ctx.editMessageText(text, { ...(parseMode && { parse_mode: parseMode }) });
+              const returnMarkup = this.returnMarkup(callback.returnTarget);
+              await ctx.editMessageText(text, {
+                ...(parseMode && { parse_mode: parseMode }),
+                ...(returnMarkup && { reply_markup: returnMarkup }),
+              });
             } catch {
               /* message unchanged or deleted */
             }
@@ -1389,11 +1415,14 @@ export class TelegramAdapter extends MessagingAdapter {
     chatId: number,
     topicId?: number,
     userId?: string,
+    returnTarget?: TelegramReturnTarget,
   ): Promise<void> {
+    const returnMarkup = this.returnMarkup(returnTarget);
     switch (response.type) {
       case "text":
         await this.bot.api.sendMessage(chatId, response.text, {
           message_thread_id: topicId,
+          ...(returnMarkup && { reply_markup: returnMarkup }),
         });
         break;
       case "adaptive": {
@@ -1404,6 +1433,7 @@ export class TelegramAdapter extends MessagingAdapter {
         await this.bot.api.sendMessage(chatId, text, {
           message_thread_id: topicId,
           ...(variant?.parse_mode && { parse_mode: variant.parse_mode }),
+          ...(returnMarkup && { reply_markup: returnMarkup }),
         });
         break;
       }
@@ -1411,16 +1441,17 @@ export class TelegramAdapter extends MessagingAdapter {
         await this.bot.api.sendMessage(
           chatId,
           `\u26a0\ufe0f ${response.message}`,
-          { message_thread_id: topicId },
+          { message_thread_id: topicId, ...(returnMarkup && { reply_markup: returnMarkup }) },
         );
         break;
       case "menu": {
         const keyboard = response.options.map((opt) => [
           {
             text: `${opt.label}${opt.hint ? ` \u2014 ${opt.hint}` : ""}`,
-            callback_data: this.toCallbackData(opt.command),
+            callback_data: this.toCallbackData(opt.command, returnTarget),
           },
         ]);
+        this.appendReturnButton(keyboard, returnTarget);
         await this.bot.api.sendMessage(chatId, response.title, {
           message_thread_id: topicId,
           reply_markup: { inline_keyboard: keyboard },
@@ -1434,6 +1465,7 @@ export class TelegramAdapter extends MessagingAdapter {
         const text = `${response.title}\n${lines.join("\n")}`;
         await this.bot.api.sendMessage(chatId, text, {
           message_thread_id: topicId,
+          ...(returnMarkup && { reply_markup: returnMarkup }),
         });
         break;
       }
@@ -1442,16 +1474,17 @@ export class TelegramAdapter extends MessagingAdapter {
           [
             {
               text: "\u2705 Yes",
-              callback_data: this.toCallbackData(response.onYes),
+              callback_data: this.toCallbackData(response.onYes, returnTarget),
             },
           ],
         ];
         if (response.onNo) {
           buttons[0].push({
             text: "\u274c No",
-            callback_data: this.toCallbackData(response.onNo),
+            callback_data: this.toCallbackData(response.onNo, returnTarget),
           });
         }
+        this.appendReturnButton(buttons, returnTarget);
         await this.bot.api.sendMessage(chatId, response.question, {
           message_thread_id: topicId,
           reply_markup: { inline_keyboard: buttons },
@@ -1460,7 +1493,10 @@ export class TelegramAdapter extends MessagingAdapter {
       }
       case "input": {
         if (!userId) {
-          await this.bot.api.sendMessage(chatId, response.fallback, { message_thread_id: topicId });
+          await this.bot.api.sendMessage(chatId, response.fallback, {
+            message_thread_id: topicId,
+            ...(returnMarkup && { reply_markup: returnMarkup }),
+          });
           break;
         }
         const key = `${chatId}:${userId}:${topicId ?? 0}`;
@@ -1485,6 +1521,7 @@ export class TelegramAdapter extends MessagingAdapter {
           fallback: response.fallback,
           expiresAt: Date.now() + (response.expiresInMs ?? 10 * 60_000),
           promptMessageId: promptMessage.message_id,
+          returnTarget,
         });
         break;
       }
@@ -1493,11 +1530,15 @@ export class TelegramAdapter extends MessagingAdapter {
     }
   }
 
-  private toCallbackData(command: string): string {
+  private toCallbackData(command: string, returnTarget?: TelegramReturnTarget): string {
     const data = `c/${command}`;
-    if (data.length <= 64) return data;
+    if (!returnTarget && Buffer.byteLength(data, 'utf8') <= 64) return data;
+    if (returnTarget) {
+      const contextual = contextualCommandCallback(command, returnTarget);
+      if (contextual) return contextual;
+    }
     const id = String(++this.callbackCounter);
-    this.callbackCache.set(id, command);
+    this.callbackCache.set(id, { command, returnTarget });
     if (this.callbackCache.size > 1000) {
       const first = this.callbackCache.keys().next().value;
       if (first) this.callbackCache.delete(first);
@@ -1505,11 +1546,26 @@ export class TelegramAdapter extends MessagingAdapter {
     return `c/#${id}`;
   }
 
-  private fromCallbackData(data: string): string {
+  private fromCallbackData(data: string): TelegramCommandCallback {
     if (data.startsWith("c/#")) {
-      return this.callbackCache.get(data.slice(3)) ?? data.slice(2);
+      return this.callbackCache.get(data.slice(3)) ?? { command: data.slice(2) };
     }
-    return data.slice(2);
+    return decodeCommandCallback(data);
+  }
+
+  private returnMarkup(returnTarget?: TelegramReturnTarget): {
+    inline_keyboard: Array<Array<{ text: string; callback_data: string }>>
+  } | undefined {
+    return returnTarget
+      ? { inline_keyboard: [[returnButton(returnTarget)]] }
+      : undefined;
+  }
+
+  private appendReturnButton(
+    keyboard: Array<Array<{ text: string; callback_data: string }>>,
+    returnTarget?: TelegramReturnTarget,
+  ): void {
+    if (returnTarget) keyboard.push([returnButton(returnTarget)]);
   }
 
   private setupRoutes(): void {

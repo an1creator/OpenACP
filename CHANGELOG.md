@@ -1,5 +1,24 @@
 ## Unreleased
 
+## 2026.712.11 - 2026-07-12
+
+### Changed
+
+- Move proxy management from a separate main action-menu item into Settings.
+  The Settings entry reuses the connector-neutral `/proxy` home, while direct
+  `/proxy`, Telegram command discovery, and already-sent legacy menu buttons
+  remain available. Telegram carries an allow-listed return target through
+  proxy submenus and wizard callbacks, while direct and legacy entry points do
+  not inherit Settings navigation.
+
+### Security
+
+- Require `network:proxy:manage` before every connector `/proxy` action,
+  including status, profile/route views, diagnostics, and connectivity tests.
+  Missing or failing identity resolution returns one typed safe error before
+  proxy policy data is read; mutations retain an additional execution-time
+  authorization check.
+
 ## 2026.712.10 - 2026-07-12
 
 ### Added

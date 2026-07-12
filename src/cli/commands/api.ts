@@ -541,7 +541,7 @@ Shows the version of the currently running daemon process.
       console.log(`Bypass permissions ${state} for session ${sessionId}`)
 
     } else if (subCmd === 'health') {
-      const res = await call('/api/health')
+      const res = await call('/api/v1/system/health/details')
       const data = await res.json() as Record<string, unknown>
       if (!res.ok) {
         if (json) jsonError(ErrorCodes.API_ERROR, extractApiError(data))
@@ -568,7 +568,7 @@ Shows the version of the currently running daemon process.
       console.log(`Tunnel   : ${tunnelStr}`)
 
     } else if (subCmd === 'restart') {
-      const res = await call('/api/restart', { method: 'POST' })
+      const res = await call('/api/v1/system/restart', { method: 'POST' })
       const data = await res.json() as Record<string, unknown>
       if (!res.ok) {
         if (json) jsonError(ErrorCodes.API_ERROR, extractApiError(data))
@@ -630,7 +630,7 @@ Shows the version of the currently running daemon process.
       }
 
     } else if (subCmd === 'adapters') {
-      const res = await call('/api/adapters')
+      const res = await call('/api/v1/system/adapters')
       const data = await res.json() as { adapters: Array<{ name: string; type: string }> }
       if (!res.ok) {
         if (json) jsonError(ErrorCodes.API_ERROR, String((data as Record<string, unknown>).error ?? 'API request failed'))
@@ -681,7 +681,7 @@ Shows the version of the currently running daemon process.
       console.log('Notification sent to all channels.')
 
     } else if (subCmd === 'version') {
-      const res = await call('/api/version')
+      const res = await call('/api/v1/system/version')
       const data = await res.json() as Record<string, unknown>
       if (!res.ok) {
         if (json) jsonError(ErrorCodes.API_ERROR, extractApiError(data))

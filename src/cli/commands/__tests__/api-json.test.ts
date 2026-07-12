@@ -38,7 +38,7 @@ vi.mock('../../api-client.js', () => ({
         }),
       })
     }
-    if (urlPath === '/api/health') {
+    if (urlPath === '/api/v1/system/health/details') {
       return Promise.resolve({
         ok: true,
         json: () => Promise.resolve({ status: 'ok', uptime: 3600, version: '2026.401.1' }),

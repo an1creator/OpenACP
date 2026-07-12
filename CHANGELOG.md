@@ -1,5 +1,7 @@
 ## Unreleased
 
+## 2026.712.8 - 2026-07-12
+
 ### Fixed
 
 - Made identity `updatedAt` advance monotonically even when create and update happen within the same millisecond, removing a Node 24 CI race.

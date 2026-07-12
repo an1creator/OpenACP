@@ -53,7 +53,7 @@ provenance for the release.
 Push the verified commit to `main`, then create and push the matching tag:
 
 ```bash
-VERSION=2026.712.7
+VERSION=2026.712.8
 git tag "v${VERSION}"
 git push origin main
 git push origin "v${VERSION}"

@@ -50,6 +50,12 @@ export class ProxyUnknownScopeError extends ProxyValidationError {
 export class ProxyProfileInUseError extends ProxyValidationError {
   constructor(id: string) { super(`Proxy profile "${id}" is still used by routing`, 'PROXY_PROFILE_IN_USE') }
 }
+export class ProxyProfileNotFoundError extends ProxyValidationError {
+  constructor(id: string) { super(`Proxy profile "${id}" does not exist`, 'PROXY_PROFILE_NOT_FOUND') }
+}
+export class ProxyProfileExistsError extends ProxyValidationError {
+  constructor(id: string) { super(`Proxy profile "${id}" already exists`, 'PROXY_PROFILE_EXISTS') }
+}
 
 export class ProxyRouteTestError extends Error {
   readonly code = 'PROXY_ROUTE_TEST_FAILED'
@@ -220,25 +226,102 @@ export class ProxyService {
   }
 
   private buildProfile(input: ProxyProfileInput, config: StoredProxyConfig, secrets: Record<string, SecretRecord>): { profile: ProxyProfile; nextSecrets: Record<string, SecretRecord> } {
+    input = this.normalizeProfileInput(input)
     validateId(input.id, 'profile id')
-    if (!PROXY_PROTOCOLS.includes(input.protocol)) throw new ProxyValidationError(`Unsupported proxy protocol: ${input.protocol}`)
-    if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) throw new ProxyValidationError('Proxy port must be between 1 and 65535')
-    const host = canonicalHost(input.host)
+    if (input.name !== undefined) {
+      const name = input.name.trim()
+      if (!name || name.length > 100) throw new ProxyValidationError('Proxy profile name must contain 1-100 non-whitespace characters')
+      input = { ...input, name }
+    }
+    if (!input.protocol || !PROXY_PROTOCOLS.includes(input.protocol)) throw new ProxyValidationError(`Unsupported proxy protocol: ${input.protocol}`)
+    if (!Number.isInteger(input.port) || input.port! < 1 || input.port! > 65535) throw new ProxyValidationError('Proxy port must be between 1 and 65535')
+    const host = canonicalHost(input.host ?? '')
+    for (const [label, value] of [['username', input.username], ['password', input.password]] as const) {
+      if (value !== undefined && (value.length > 4096 || /[\r\n\u0000]/.test(value))) {
+        throw new ProxyValidationError(`Proxy ${label} contains unsupported control characters or exceeds 4096 characters`)
+      }
+    }
+    if (input.noProxy && (input.noProxy.length > 256 || input.noProxy.some((item) => !item || /[\u0000-\u0020\u007f]/.test(item)))) {
+      throw new ProxyValidationError('NO_PROXY entries must be non-empty, whitespace-free values (maximum 256 entries)')
+    }
     const existing = config.profiles.find((p) => p.id === input.id)
     const nextSecrets = structuredClone(secrets)
-    if (input.username !== undefined || input.password !== undefined) nextSecrets[input.id] = { username: input.username ?? nextSecrets[input.id]?.username, password: input.password ?? nextSecrets[input.id]?.password }
+    if (input.clearCredentials) delete nextSecrets[input.id]
+    else if (input.username !== undefined || input.password !== undefined) nextSecrets[input.id] = { username: input.username ?? nextSecrets[input.id]?.username, password: input.password ?? nextSecrets[input.id]?.password }
     const secret = nextSecrets[input.id]
     return { profile: {
-      id: input.id, name: input.name ?? existing?.name ?? input.id, protocol: input.protocol, host, port: input.port,
+      id: input.id, name: input.name ?? existing?.name ?? input.id, protocol: input.protocol, host, port: input.port!,
       noProxy: input.noProxy ?? existing?.noProxy ?? ['localhost', '127.0.0.1', '::1'], failClosed: input.failClosed ?? existing?.failClosed ?? true,
       hasCredentials: Boolean(secret?.username || secret?.password),
     }, nextSecrets }
   }
 
+  /** Parse a write-only proxy URL into canonical components without retaining it. */
+  parseProxyUrlInput(proxyUrl: string): Pick<ProxyProfileInput, 'protocol' | 'host' | 'port' | 'username' | 'password' | 'clearCredentials'> {
+    if (!proxyUrl || /[\u0000-\u001f\u007f]/.test(proxyUrl)) throw new ProxyValidationError('Proxy URL contains invalid control characters')
+    let url: URL
+    try { url = new URL(proxyUrl) } catch { throw new ProxyValidationError('Proxy URL is invalid') }
+    const protocol = url.protocol.slice(0, -1) as ProxyProfile['protocol']
+    if (!PROXY_PROTOCOLS.includes(protocol)) throw new ProxyValidationError(`Unsupported proxy protocol: ${protocol}`)
+    if ((url.pathname && url.pathname !== '/') || url.search || url.hash) throw new ProxyValidationError('Proxy URL must not contain a path, query, or fragment')
+    // URL normalizes an explicitly written default port (for example :80)
+    // to an empty string, so verify and retain the port from the authority.
+    const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i.exec(proxyUrl)?.[1]
+    const hostPort = authority?.slice((authority.lastIndexOf('@') + 1) || 0)
+    const explicitPort = hostPort?.startsWith('[')
+      ? /^\[[^\]]+\]:(\d+)$/.exec(hostPort)?.[1]
+      : /:(\d+)$/.exec(hostPort ?? '')?.[1]
+    if (!explicitPort) throw new ProxyValidationError('Proxy URL must include an explicit port')
+    let username = ''
+    let password = ''
+    try { username = decodeURIComponent(url.username); password = decodeURIComponent(url.password) }
+    catch { throw new ProxyValidationError('Proxy URL credentials contain invalid percent encoding') }
+    return {
+      protocol,
+      host: url.hostname,
+      port: Number(url.port || explicitPort),
+      ...(username ? { username } : {}),
+      ...(password ? { password } : {}),
+      // Replacing an existing endpoint with a URL that has no userinfo must
+      // remove the old write-only secret instead of silently retaining it.
+      clearCredentials: !username && !password,
+    }
+  }
+
+  private normalizeProfileInput(input: ProxyProfileInput): ProxyProfileInput {
+    if (input.proxyUrl !== undefined) {
+      const componentKeys = ['protocol', 'host', 'port', 'username', 'password', 'clearCredentials'] as const
+      if (componentKeys.some((key) => input[key] !== undefined)) throw new ProxyValidationError('proxyUrl is mutually exclusive with endpoint and credential fields')
+      const { proxyUrl, ...metadata } = input
+      return { ...metadata, ...this.parseProxyUrlInput(proxyUrl) }
+    }
+    if (!input.protocol || !input.host || input.port === undefined) throw new ProxyValidationError('protocol, host, and port are required when proxyUrl is not provided')
+    return input
+  }
+
   async saveProfileSafely(input: ProxyProfileInput, expectedRevision?: number): Promise<ProxyProfile> {
+    return this.mutateProfileSafely(input, 'upsert', expectedRevision)
+  }
+
+  async createProfileSafely(input: ProxyProfileInput, expectedRevision?: number): Promise<ProxyProfile> {
+    return this.mutateProfileSafely(input, 'create', expectedRevision)
+  }
+
+  async updateProfileSafely(input: ProxyProfileInput, expectedRevision?: number): Promise<ProxyProfile> {
+    return this.mutateProfileSafely(input, 'update', expectedRevision)
+  }
+
+  private async mutateProfileSafely(
+    input: ProxyProfileInput,
+    operation: 'upsert' | 'create' | 'update',
+    expectedRevision?: number,
+  ): Promise<ProxyProfile> {
     return this.serialize(async () => {
     const config = this.store.load(); const secrets = this.store.getSecrets()
     if (expectedRevision !== undefined && config.revision !== expectedRevision) throw new ProxyRevisionConflictError(expectedRevision, config.revision)
+    const exists = config.profiles.some((profile) => profile.id === input.id)
+    if (operation === 'create' && exists) throw new ProxyProfileExistsError(input.id)
+    if (operation === 'update' && !exists) throw new ProxyProfileNotFoundError(input.id)
     const { profile: candidate, nextSecrets } = this.buildProfile(input, config, secrets)
     const affectedScopes = this.scopesUsingProfile(config, input.id)
     const candidateSecret = nextSecrets[input.id]
@@ -258,7 +341,20 @@ export class ProxyService {
     }
     this.invalidatePolicyBeforeCommit(config, input.id)
     config.profiles = [...config.profiles.filter((p) => p.id !== candidate.id), candidate]
-    const saved = this.store.commit(config, nextSecrets, config.revision).profiles.find((p) => p.id === candidate.id)!
+    let committed: StoredProxyConfig
+    try {
+      committed = this.store.commit(config, nextSecrets, config.revision)
+    } catch (error) {
+      // Cross-process writers can win after our read/test phase. Preserve the
+      // create-only/update-only contract instead of degrading into an upsert.
+      if (error instanceof ProxyRevisionConflictError && operation !== 'upsert') {
+        const latestExists = this.store.load().profiles.some((profile) => profile.id === input.id)
+        if (operation === 'create' && latestExists) throw new ProxyProfileExistsError(input.id)
+        if (operation === 'update' && !latestExists) throw new ProxyProfileNotFoundError(input.id)
+      }
+      throw error
+    }
+    const saved = committed.profiles.find((p) => p.id === candidate.id)!
     this.retireScopes(affectedScopes)
     return saved
     })
@@ -313,13 +409,34 @@ export class ProxyService {
   }
 
   async deleteProfile(id: string, expectedRevision?: number): Promise<void> {
+    await this.deleteProfileSafely(id, undefined, expectedRevision)
+  }
+
+  /** Delete a profile, optionally reassigning every direct reference in one tested CAS transaction. */
+  async deleteProfileSafely(id: string, reassign?: ProxyRoute, expectedRevision?: number): Promise<{ reassignedScopes: string[] }> {
     return this.serialize(async () => {
     const config = this.store.load(); const secrets = this.store.getSecrets()
     if (expectedRevision !== undefined && config.revision !== expectedRevision) throw new ProxyRevisionConflictError(expectedRevision, config.revision)
-    if (!config.profiles.some((p) => p.id === id)) throw new ProxyValidationError(`Proxy profile "${id}" does not exist`)
-    if (Object.values(config.routing.routes).includes(`profile:${id}`) || config.routing.global === `profile:${id}`) throw new ProxyProfileInUseError(id)
-    config.profiles = config.profiles.filter((p) => p.id !== id); delete secrets[id]
-    this.store.commit(config, secrets, config.revision)
+    if (!config.profiles.some((p) => p.id === id)) throw new ProxyProfileNotFoundError(id)
+    const directScopes = Object.entries(config.routing.routes).filter(([, route]) => route === `profile:${id}`).map(([scope]) => scope)
+    const globalUsesProfile = config.routing.global === `profile:${id}`
+    if ((directScopes.length || globalUsesProfile) && !reassign) throw new ProxyProfileInUseError(id)
+    if (reassign === `profile:${id}`) throw new ProxyValidationError('A deleted profile cannot be reassigned to itself')
+    if (reassign) this.validateRoute(reassign)
+    const candidate = structuredClone(config)
+    if (globalUsesProfile) candidate.routing.global = reassign!
+    for (const scope of directScopes) candidate.routing.routes[scope] = reassign!
+    const changedScopes = this.changedResolutionScopes(config, candidate)
+    try { await this.testCandidateRoutes(config, candidate) }
+    catch (error) { throw new ProxyRouteTestError(globalUsesProfile ? 'global' : directScopes[0]!, error) }
+    candidate.profiles = candidate.profiles.filter((p) => p.id !== id)
+    delete secrets[id]
+    this.invalidatePolicyBeforeCommit(config, id)
+    this.store.commit(candidate, secrets, config.revision)
+    this.retireScopes(changedScopes)
+    if (globalUsesProfile) for (const listener of this.listeners) await listener('global', reassign!)
+    for (const scope of directScopes) for (const listener of this.listeners) await listener(scope, reassign!)
+    return { reassignedScopes: [...new Set([...(globalUsesProfile ? ['global'] : []), ...directScopes])] }
     })
   }
 
@@ -547,6 +664,25 @@ export class ProxyService {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? redactNetworkSecrets(error.message) : 'Proxy test failed' }
     } finally { try { await response?.body?.cancel() } catch {}; fetcher?.destroy?.() }
+  }
+
+  /** Test an unsaved profile candidate entirely in memory. Credentials never reach persistence. */
+  async testProfileCandidate(input: ProxyProfileInput, targetUrl?: string): Promise<{ ok: boolean; status?: number; error?: string }> {
+    const config = this.store.load()
+    const { profile, nextSecrets } = this.buildProfile(input, config, this.store.getSecrets())
+    const fetcher = this.createProfileFetch(profile, nextSecrets[profile.id])
+    let response: Response | undefined
+    try {
+      response = await fetcher(targetUrl ?? 'https://api.ipify.org?format=json', {
+        signal: AbortSignal.timeout(10_000),
+      })
+      return { ok: response.ok, status: response.status }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? redactNetworkSecrets(error.message) : 'Proxy test failed' }
+    } finally {
+      try { await response?.body?.cancel() } catch {}
+      fetcher.destroy?.()
+    }
   }
 
   status(): ProxyStatus {

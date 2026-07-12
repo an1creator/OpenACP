@@ -95,7 +95,7 @@ export const TTS_TIMEOUT_MS = 30_000;
 //   cancelled    → active    (resume: user sends a new prompt)
 //   finished     → (terminal — no further transitions)
 const VALID_TRANSITIONS: Record<SessionStatus, Set<SessionStatus>> = {
-  initializing: new Set(["active", "error"]),
+  initializing: new Set(["active", "error", "cancelled"]),
   active: new Set(["error", "finished", "cancelled"]),
   error: new Set(["active", "cancelled"]),
   cancelled: new Set(["active"]),
@@ -182,6 +182,9 @@ export class Session extends TypedEmitter<SessionEvents> {
   private _abortedTurnIds = new Set<string>();
   /** Last completed turnId — used by abortPrompt() to retroactively mark a just-finished turn as interrupted */
   private _lastCompletedTurnId: string | null = null;
+  /** Idempotent teardown checkpoints allow cleanup retry after a partial failure. */
+  private _destroyedAgent = false;
+  private _closedLogger = false;
 
   private _autoApprovedCommands: string[] = []
 
@@ -284,7 +287,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     this.emit(SessionEv.SESSION_END, reason ?? "completed");
   }
 
-  /** Transition to cancelled — from active or error (terminal session cancel) */
+  /** Transition to cancelled — from initializing, active, or error. */
   markCancelled(): void {
     this.transition("cancelled");
   }
@@ -939,7 +942,13 @@ export class Session extends TypedEmitter<SessionEvents> {
     }
     // Clear queued prompts
     this.queue.clear();
-    await this.agentInstance.destroy();
-    await closeSessionLogger(this.log);
+    if (!this._destroyedAgent) {
+      await this.agentInstance.destroy();
+      this._destroyedAgent = true;
+    }
+    if (!this._closedLogger) {
+      await closeSessionLogger(this.log);
+      this._closedLogger = true;
+    }
   }
 }

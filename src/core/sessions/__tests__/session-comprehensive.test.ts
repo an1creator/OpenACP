@@ -95,9 +95,10 @@ describe("Session — State Machine Exhaustive Transitions", () => {
       expect(() => session.finish()).toThrow("Invalid session transition: initializing → finished");
     });
 
-    it("initializing → cancelled throws", () => {
+    it("initializing → cancelled is allowed for fresh API sessions", () => {
       const session = createTestSession();
-      expect(() => session.markCancelled()).toThrow("Invalid session transition: initializing → cancelled");
+      expect(() => session.markCancelled()).not.toThrow();
+      expect(session.status).toBe("cancelled");
     });
 
     it("active → active throws (double activate)", () => {

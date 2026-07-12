@@ -52,6 +52,13 @@ export function registerCoreMenuItems(registry: MenuRegistry): void {
     action: { type: 'command', command: '/integrate' },
   })
   registry.register({
+    id: 'core:proxy',
+    label: '🌐 Proxy Routing',
+    priority: 32,
+    group: 'config',
+    action: { type: 'command', command: '/proxy' },
+  })
+  registry.register({
     id: 'core:restart',
     label: '🔄 Restart',
     priority: 40,

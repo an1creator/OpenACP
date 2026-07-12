@@ -4,6 +4,7 @@ import os from 'os'
 import fs from 'fs'
 import { SessionManager } from '../session-manager.js'
 import { Session } from '../session.js'
+import { SessionFactory } from '../session-factory.js'
 import type { SessionStore } from '../session-store.js'
 import { JsonFileSessionStore } from '../session-store.js'
 import type { SessionRecord } from '../../types.js'
@@ -242,9 +243,64 @@ describe('SessionManager', () => {
       }))
     })
 
-    it('handles unknown session gracefully', async () => {
-      // Should not throw
-      await manager.cancelSession('nonexistent')
+    it('returns a typed failure for an unknown session', async () => {
+      await expect(manager.cancelSession('nonexistent')).rejects.toMatchObject({
+        code: 'SESSION_NOT_FOUND',
+      })
+    })
+
+    it('cancels a freshly-created initializing session', async () => {
+      const session = createSession({ id: 'sess-initializing' })
+      manager.registerSession(session)
+      await store.save({
+        sessionId: session.id,
+        agentSessionId: 'a-init',
+        agentName: 'claude',
+        workingDir: '/ws',
+        channelId: 'api',
+        status: 'initializing',
+        createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        clientOverrides: {},
+        platform: {},
+      })
+
+      const result = await manager.cancelSession(session.id)
+
+      expect(result).toEqual({
+        sessionId: session.id,
+        cancelled: true,
+        previousStatus: 'initializing',
+        status: 'cancelled',
+        alreadyTerminal: false,
+        cleanupPending: false,
+      })
+      expect(session.status).toBe('cancelled')
+      expect(session.agentInstance.destroy).toHaveBeenCalledOnce()
+    })
+
+    it('shares one cancellation operation across concurrent callers', async () => {
+      const session = createSession({ id: 'sess-race' })
+      session.activate()
+      let releaseDestroy!: () => void
+      session.agentInstance.destroy = vi.fn(() => new Promise<void>((resolve) => { releaseDestroy = resolve }))
+      manager.registerSession(session)
+      await store.save({
+        sessionId: session.id, agentSessionId: 'a-race', agentName: 'claude',
+        workingDir: '/ws', channelId: 'api', status: 'active',
+        createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+        clientOverrides: {}, platform: {},
+      })
+
+      const first = manager.cancelSession(session.id)
+      await vi.waitFor(() => expect(session.agentInstance.destroy).toHaveBeenCalledOnce())
+      const second = manager.cancelSession(session.id)
+      releaseDestroy()
+
+      const [a, b] = await Promise.all([first, second])
+      expect(a).toEqual(b)
+      expect(a).toMatchObject({ cancelled: true, previousStatus: 'active', status: 'cancelled' })
+      expect(session.agentInstance.destroy).toHaveBeenCalledOnce()
     })
 
     it('removes cancelled session from in-memory map', async () => {
@@ -285,10 +341,52 @@ describe('SessionManager', () => {
       })
       const callCount = (store.save as any).mock.calls.length
 
-      await manager.cancelSession('already-cancelled')
+      const result = await manager.cancelSession('already-cancelled')
 
       // save was not called again since already cancelled
       expect((store.save as any).mock.calls.length).toBe(callCount)
+      expect(result).toMatchObject({ cancelled: false, alreadyTerminal: true, status: 'cancelled' })
+    })
+
+    it('persists cancellation before failed destroy and retries cleanup idempotently', async () => {
+      const session = createSession({ id: 'durable-cancel' })
+      session.activate()
+      const abortPrompt = vi.spyOn(session, 'abortPrompt').mockResolvedValue()
+      session.agentInstance.destroy = vi.fn()
+        .mockRejectedValueOnce(new Error('cleanup via http://user:secret@proxy.test failed'))
+        .mockResolvedValueOnce(undefined)
+      manager.registerSession(session)
+      await store.save({
+        sessionId: session.id, agentSessionId: 'durable-agent', agentName: 'claude',
+        workingDir: '/ws', channelId: 'api', status: 'active', createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(), clientOverrides: {}, platform: {},
+      })
+      await store.save({
+        sessionId: 'unrelated', agentSessionId: 'other-agent', agentName: 'claude',
+        workingDir: '/other', channelId: 'api', status: 'active', createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(), clientOverrides: {}, platform: {},
+      })
+
+      const first = await manager.cancelSession(session.id)
+      expect(first).toMatchObject({ cancelled: true, status: 'cancelled', cleanupPending: true })
+      expect(store.get(session.id)?.status).toBe('cancelled')
+      expect(store.flush).toHaveBeenCalled()
+      expect(manager.getSession(session.id)).toBe(session)
+      expect(store.get('unrelated')?.status).toBe('active')
+
+      const restarted = new SessionManager(store)
+      const factory = new SessionFactory({} as any, restarted, (() => ({})) as any, new TypedEmitter() as any)
+      factory.sessionStore = store
+      factory.createFullSession = vi.fn()
+      await expect(factory.getOrResumeById(session.id)).resolves.toBeNull()
+      expect(factory.createFullSession).not.toHaveBeenCalled()
+
+      const second = await manager.cancelSession(session.id)
+      expect(second).toMatchObject({ cancelled: false, alreadyTerminal: true, status: 'cancelled', cleanupPending: false })
+      expect(abortPrompt).toHaveBeenCalledOnce()
+      expect(session.agentInstance.destroy).toHaveBeenCalledTimes(2)
+      expect(manager.getSession(session.id)).toBeUndefined()
+      expect(store.get('unrelated')?.status).toBe('active')
     })
   })
 

@@ -1,6 +1,6 @@
 import { readApiPort, removeStalePortFile, apiCall } from '../api-client.js'
 import { wantsHelp } from './helpers.js'
-import { isJsonMode, jsonSuccess, jsonError, muteForJson, ErrorCodes } from '../output.js'
+import { isJsonMode, jsonSuccess, jsonError, muteForJson, ErrorCodes, type ErrorCode } from '../output.js'
 
 /**
  * Extract a human-readable error message from an API response body.
@@ -18,6 +18,13 @@ function extractApiError(data: Record<string, unknown>, fallback = 'API request 
   if (typeof err === 'object' && err !== null && 'message' in err) {
     return String((err as Record<string, unknown>).message)
   }
+  return fallback
+}
+
+function extractApiErrorCode(data: Record<string, unknown>, fallback: ErrorCode = ErrorCodes.API_ERROR): ErrorCode {
+  const err = data.error
+  const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as Record<string, unknown>).code) : ''
+  if (code === ErrorCodes.SESSION_NOT_FOUND) return ErrorCodes.SESSION_NOT_FOUND
   return fallback
 }
 
@@ -360,12 +367,17 @@ Shows the version of the currently running daemon process.
       })
       const data = await res.json() as Record<string, unknown>
       if (!res.ok) {
-        if (json) jsonError(ErrorCodes.API_ERROR, extractApiError(data))
+        if (json) jsonError(extractApiErrorCode(data, ErrorCodes.SESSION_CANCEL_FAILED), extractApiError(data))
         console.error(`Error: ${extractApiError(data)}`)
         process.exit(1)
       }
-      if (json) jsonSuccess({ cancelled: true, sessionId })
-      console.log(`Session ${sessionId} cancelled`)
+      if (json) jsonSuccess(data)
+      console.log(data.cancelled === false
+        ? `Session ${sessionId} was already ${data.status ?? 'terminal'}`
+        : `Session ${sessionId} cancelled`)
+      if (data.cleanupPending === true) {
+        console.warn('Session state is durably cancelled, but process cleanup is pending. Repeat cancel to retry cleanup.')
+      }
 
     } else if (subCmd === 'status') {
       const res = await call('/api/sessions')

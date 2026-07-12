@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { captureJsonOutput, expectValidJsonError, expectValidJsonSuccess } from './helpers/json-test-utils.js'
 
 const apiCall = vi.hoisted(() => vi.fn())
@@ -8,13 +11,28 @@ vi.mock('../../api-client.js', () => ({
 }))
 
 describe('proxy CLI automation contract', () => {
-  beforeEach(() => apiCall.mockReset())
+  let tempDir: string
+
+  beforeEach(() => {
+    apiCall.mockReset()
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-proxy-cli-'))
+  })
+
+  afterEach(() => fs.rmSync(tempDir, { recursive: true, force: true }))
+
+  function fixture(name: string, value: string, mode = 0o600): string {
+    const file = path.join(tempDir, name)
+    fs.writeFileSync(file, value, { mode })
+    fs.chmodSync(file, mode)
+    return file
+  }
 
   it('preserves --name extracted as a global instance flag', async () => {
+    const envFile = fixture('proxy.env', 'HTTP_PROXY=http://proxy.test:8080\n')
     apiCall.mockResolvedValue(new Response(JSON.stringify({ ok: true, profile: { id: 'usa', name: 'USA Squid' } }), { status: 200 }))
     const { cmdProxy } = await import('../proxy.js')
     const result = await captureJsonOutput(() => cmdProxy(
-      ['import', 'usa', '--env-file', '/protected/proxy.env', '--json'],
+      ['import', 'usa', '--env-file', envFile, '--json'],
       '/tmp/instance',
       'USA Squid',
     ))
@@ -52,5 +70,89 @@ describe('proxy CLI automation contract', () => {
     expect(error.message).toContain('api.telegram.org/bot<redacted>/getMe')
     expect(result.stdout).not.toContain(telegramToken)
     expect(result.stdout).not.toContain('/home/')
+  })
+
+  it('preserves stable proxy API conflict codes in JSON mode', async () => {
+    apiCall.mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'PROXY_REVISION_CONFLICT', message: 'Proxy policy changed concurrently' },
+    }), { status: 409 }))
+    const { cmdProxy } = await import('../proxy.js')
+    const result = await captureJsonOutput(() => cmdProxy(
+      ['delete', 'old', '--expected-revision', '2', '--json'], '/tmp/instance',
+    ))
+    expect(result.exitCode).toBe(1)
+    expect(expectValidJsonError(result.stdout)).toMatchObject({ code: 'PROXY_REVISION_CONFLICT' })
+  })
+
+  it('passes expected revision for route set and clear', async () => {
+    apiCall.mockImplementation(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    const { cmdProxy } = await import('../proxy.js')
+    await cmdProxy(['set', 'agents.codex', 'direct', '--expected-revision', '17'], '/tmp/instance')
+    let request = apiCall.mock.calls[0][2] as RequestInit
+    expect(JSON.parse(String(request.body))).toEqual({ route: 'direct', expectedRevision: 17 })
+
+    apiCall.mockClear()
+    await cmdProxy(['clear', 'agents.codex', '--expected-revision', '18'], '/tmp/instance')
+    expect(apiCall.mock.calls[0][1]).toContain('expectedRevision=18')
+  })
+
+  it('passes protected proxyUrl JSON as the exclusive endpoint representation', async () => {
+    const file = fixture('url.json', JSON.stringify({ proxyUrl: 'socks5h://alice:secret@proxy.test:1080', name: 'Private' }))
+    apiCall.mockResolvedValue(new Response(JSON.stringify({ ok: true, profile: { id: 'private', name: 'Private', hasCredentials: true } }), { status: 200 }))
+    const { cmdProxy } = await import('../proxy.js')
+    const result = await captureJsonOutput(() => cmdProxy(['create', 'private', '--from-json', file, '--json'], '/tmp/instance'))
+    expect(result.exitCode).toBe(0)
+    expectValidJsonSuccess(result.stdout)
+    const body = JSON.parse(String((apiCall.mock.calls[0][2] as RequestInit).body))
+    expect(body).toMatchObject({ id: 'private', proxyUrl: 'socks5h://alice:secret@proxy.test:1080' })
+    expect(body.protocol).toBeUndefined()
+    expect(result.stdout).not.toContain('secret')
+  })
+
+  it('rejects protected JSON that mixes proxyUrl and endpoint components', async () => {
+    const file = fixture('mixed.json', JSON.stringify({ proxyUrl: 'http://proxy.test:8080', protocol: 'http', host: 'proxy.test', port: 8080 }))
+    const { cmdProxy } = await import('../proxy.js')
+    const result = await captureJsonOutput(() => cmdProxy(['create', 'mixed', '--from-json', file, '--json'], '/tmp/instance'))
+    expect(expectValidJsonError(result.stdout)).toMatchObject({ code: 'PROXY_INPUT_SCHEMA_INVALID' })
+    expect(apiCall).not.toHaveBeenCalled()
+  })
+
+  it('rejects a 101-character profile name locally before any API call', async () => {
+    const file = fixture('long-name.json', JSON.stringify({ name: 'x'.repeat(101), proxyUrl: 'http://proxy.test:8080' }))
+    const { cmdProxy } = await import('../proxy.js')
+    const result = await captureJsonOutput(() => cmdProxy(['create', 'long-name', '--from-json', file, '--json'], '/tmp/instance'))
+    expect(expectValidJsonError(result.stdout)).toMatchObject({ code: 'PROXY_INPUT_SCHEMA_INVALID' })
+    expect(apiCall).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['insecure JSON mode', 'PROXY_INPUT_FILE_INSECURE', () => fixture('insecure.json', '{}', 0o644)],
+    ['missing JSON file', 'PROXY_INPUT_FILE_NOT_FOUND', () => path.join(tempDir, 'missing.json')],
+    ['invalid JSON syntax', 'PROXY_INPUT_JSON_INVALID', () => fixture('invalid.json', '{not-json')],
+    ['invalid profile schema', 'PROXY_INPUT_SCHEMA_INVALID', () => fixture('schema.json', '{}')],
+  ])('returns one typed JSON envelope for %s', async (_label, expectedCode, makeFile) => {
+    const file = makeFile()
+    const { cmdProxy } = await import('../proxy.js')
+    const result = await captureJsonOutput(() => cmdProxy(
+      ['test-candidate', 'acceptance-crud', '--from-json', file, '--json'], '/tmp/instance',
+    ))
+    expect(result.exitCode).toBe(1)
+    expect(expectValidJsonError(result.stdout)).toMatchObject({ code: expectedCode })
+    expect(result.stdout).not.toContain(file)
+    expect(result.stdout).not.toContain('at ')
+    expect(apiCall).not.toHaveBeenCalled()
+  })
+
+  it('types missing arguments and insecure env imports before any API call', async () => {
+    const { cmdProxy } = await import('../proxy.js')
+    const missing = await captureJsonOutput(() => cmdProxy(['delete', '--json'], '/tmp/instance'))
+    expect(expectValidJsonError(missing.stdout)).toMatchObject({ code: 'PROXY_MISSING_ARGUMENT' })
+
+    const envFile = fixture('insecure.env', 'HTTP_PROXY=http://proxy.test:8080\n', 0o644)
+    const insecure = await captureJsonOutput(() => cmdProxy(
+      ['import', 'x', '--env-file', envFile, '--json'], '/tmp/instance',
+    ))
+    expect(expectValidJsonError(insecure.stdout)).toMatchObject({ code: 'PROXY_INPUT_FILE_INSECURE' })
+    expect(apiCall).not.toHaveBeenCalled()
   })
 })

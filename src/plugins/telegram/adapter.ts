@@ -58,6 +58,22 @@ import type {
 } from "../../core/adapter-primitives/format-types.js";
 import { OutputModeResolver } from "../../core/adapter-primitives/output-mode-resolver.js";
 import type { TunnelServiceInterface } from "../../core/plugin/types.js";
+import { clearProxyDraftsForChannel } from "../../core/commands/proxy.js";
+import { redactNetworkSecrets } from "../../core/security/network-redaction.js";
+import {
+  prepareTelegramCommandBoundary,
+  synchronizeTelegramCommands,
+  TelegramCommandBoundaryError,
+  type TelegramCommandApi,
+} from "./command-sync.js";
+import {
+  TelegramCommandOwnershipStore,
+  TelegramCommandOwnerConflictError,
+  telegramCommandHostId,
+  telegramCommandInstanceKey,
+  type TelegramCommandOwnerIdentity,
+} from "./command-ownership-store.js";
+import { getGlobalRoot } from "../../core/instance/instance-context.js";
 // evaluateNoise is handled by MessagingAdapter.shouldDisplay()
 
 interface PlanMetadata {
@@ -68,6 +84,17 @@ interface UsageMetadata {
   tokensUsed?: number;
   contextSize?: number;
 }
+
+type RegistryCommandSnapshot = Array<{
+  name: string;
+  description: string;
+  category?: string;
+}>;
+
+const HISTORICAL_OPENACP_COMMAND_NAMES = new Set([
+  ...STATIC_COMMANDS.map((command) => command.command),
+  'clear', 'bypass', 'usage', 'summary',
+]);
 
 /**
  * Wrap native fetch to work around grammY's polyfilled AbortController.
@@ -148,6 +175,13 @@ export class TelegramAdapter extends MessagingAdapter {
   private sessionTrackers: Map<string, ActivityTracker> = new Map();
   private callbackCache = new Map<string, string>();
   private callbackCounter = 0;
+  private pendingCommandInputs = new Map<string, {
+    command: string;
+    sensitive: boolean;
+    fallback: string;
+    expiresAt: number;
+    promptMessageId: number;
+  }>();
   /** Pending skill commands queued when session.threadId was not yet set */
   private _pendingSkillCommands = new Map<string, AgentCommand[]>();
   /** Control message IDs per session (for updating status text/buttons) */
@@ -172,6 +206,23 @@ export class TelegramAdapter extends MessagingAdapter {
   /** Set during normal shutdown so bot.stop() does not trigger a self-restart. */
   private _stopping = false;
   private unregisterProxyTester?: () => void;
+  /** Serializes command-list reconciliations triggered by startup and plugin hot reloads. */
+  private _commandSyncChain: Promise<void> = Promise.resolve();
+  private _pendingCommandSnapshot?: RegistryCommandSnapshot;
+  private _commandSyncWorkerRunning = false;
+  private _commandSyncGeneration = 0;
+  private _commandSyncAbort?: AbortController;
+  private _commandSnapshotVersion = 0;
+  private _commandsReadyHandler?: (data: { commands: RegistryCommandSnapshot }) => void;
+  private _latestCommandSnapshot?: RegistryCommandSnapshot;
+  private _commandApiReady = false;
+  private _initialCommandSyncScheduled = false;
+  private readonly commandOwnershipStore = new TelegramCommandOwnershipStore(getGlobalRoot());
+  private readonly commandOwnerIdentity: TelegramCommandOwnerIdentity;
+  private readonly commandOwnerBotId: string;
+  private readonly commandOwnerTakeoverRequested: boolean;
+  private _commandOwnerClaimed = false;
+  private _commandOwnerHeartbeat?: ReturnType<typeof setInterval>;
 
   private telegramFetch(): typeof fetch {
     return this.core.proxyService.createFetch('channels.telegram');
@@ -260,6 +311,14 @@ export class TelegramAdapter extends MessagingAdapter {
     } as MessagingAdapterConfig);
     this.core = core;
     this.telegramConfig = config;
+    this.commandOwnerBotId = this.telegramConfig.botToken.split(':', 1)[0] ?? '';
+    this.commandOwnerIdentity = {
+      instanceId: this.core.instanceContext.id,
+      instanceKey: telegramCommandInstanceKey(this.core.instanceContext.root),
+      hostId: telegramCommandHostId(),
+      pid: process.pid,
+    };
+    this.commandOwnerTakeoverRequested = process.env.OPENACP_TELEGRAM_COMMAND_TAKEOVER === '1';
     this.saveTopicIds = saveTopicIds;
     this.unregisterProxyTester = this.core.proxyService.registerRouteTester(
       'channels.telegram',
@@ -274,6 +333,38 @@ export class TelegramAdapter extends MessagingAdapter {
   }
 
   /**
+   * Capture command snapshots once startup begins. The normal boot path emits
+   * SYSTEM_COMMANDS_READY before core.start(), so initial reconciliation reads the
+   * authoritative registry state instead of relying on replay of that event. Once
+   * the API is ready, later snapshots drive hot reloads.
+   */
+  private subscribeToCommandSnapshots(): void {
+    if (this._commandsReadyHandler) return;
+    this._commandsReadyHandler = ({ commands }) => {
+      this._latestCommandSnapshot = commands;
+      if (this._commandApiReady) this.syncCommandsWithRetry(commands);
+    };
+    this.core.eventBus.on(BusEvent.SYSTEM_COMMANDS_READY, this._commandsReadyHandler);
+  }
+
+  /** Schedule one authoritative initial reconciliation after grammY is available. */
+  private scheduleInitialCommandSync(): void {
+    if (this._initialCommandSyncScheduled) return;
+    this._initialCommandSyncScheduled = true;
+
+    const registry = this.core.lifecycleManager?.serviceRegistry?.get<CommandRegistry>('command-registry');
+    const commands = registry?.getAll() ?? this._latestCommandSnapshot;
+    if (!commands) {
+      log.warn(
+        { operation: "telegram-command-sync" },
+        "Telegram command registry is not ready; waiting for a commands-ready snapshot",
+      );
+      return;
+    }
+    this.syncCommandsWithRetry(commands);
+  }
+
+  /**
    * Set up the grammY bot, register all callback and message handlers, then perform
    * two-phase startup: Phase 1 starts polling immediately; Phase 2 checks group
    * prerequisites (bot is admin, topics are enabled) and creates/restores system topics.
@@ -281,6 +372,11 @@ export class TelegramAdapter extends MessagingAdapter {
    */
   async start(): Promise<void> {
     this._stopping = false;
+    this._commandSyncGeneration++;
+    this._commandSyncAbort = new AbortController();
+    this._pendingCommandSnapshot = undefined;
+    this._commandSyncWorkerRunning = false;
+    this.subscribeToCommandSnapshots();
     this.bot = new Bot(this.telegramConfig.botToken, {
       client: {
         baseFetchConfig: { duplex: "half" } as RequestInit,
@@ -356,14 +452,6 @@ export class TelegramAdapter extends MessagingAdapter {
       return prev(method, payload, signal);
     });
 
-    // Register Telegram autocomplete commands after all plugins finish setup.
-    // Keeps listening persistently so hot-reload (dev plugin) and community plugin
-    // changes re-sync the command list without restarting the server.
-    const onCommandsReady = ({ commands }: { commands: Array<{ name: string; description: string; category?: string }> }) => {
-      this.syncCommandsWithRetry(commands);
-    };
-    this.core.eventBus.on(BusEvent.SYSTEM_COMMANDS_READY, onCommandsReady);
-
     // Middleware: only accept updates from configured chatId
     this.bot.use((ctx, next) => {
       const chatId = ctx.chat?.id ?? ctx.callbackQuery?.message?.chat?.id;
@@ -384,7 +472,49 @@ export class TelegramAdapter extends MessagingAdapter {
     // Command handler — guard when topics not yet initialized
     this.bot.on("message:text", async (ctx, next) => {
       const text = ctx.message?.text;
-      if (!text?.startsWith("/")) return next();
+      if (!text) return next();
+
+      const topicIdForInput = ctx.message.message_thread_id;
+      const inputKey = `${ctx.chat.id}:${ctx.from?.id ?? 0}:${topicIdForInput ?? 0}`;
+      const pending = this.pendingCommandInputs.get(inputKey);
+      if (!text.startsWith("/") && pending) {
+        if (pending.promptMessageId !== undefined && ctx.message.reply_to_message?.message_id !== pending.promptMessageId) {
+          return next();
+        }
+        this.pendingCommandInputs.delete(inputKey);
+        if (pending.expiresAt <= Date.now()) {
+          await ctx.reply('This input request expired. Start the operation again.').catch(() => {});
+          return;
+        }
+        if (pending.sensitive) {
+          try {
+            await ctx.deleteMessage();
+          } catch {
+            await ctx.reply(`⚠️ I could not securely remove that message, so its value was not used. ${pending.fallback}`).catch(() => {});
+            return;
+          }
+        }
+        const registry = this.core.lifecycleManager?.serviceRegistry?.get<CommandRegistry>('command-registry');
+        if (!registry) return;
+        const sessionId = topicIdForInput != null
+          ? ((await this.core.getOrResumeSession('telegram', String(topicIdForInput)))?.id ?? null)
+          : null;
+        const response = await registry.execute(pending.command, {
+          raw: '', sessionId, channelId: 'telegram', userId: String(ctx.from?.id),
+          conversationId: `${ctx.chat.id}:${topicIdForInput ?? 0}`,
+          interaction: {
+            textInput: true,
+            secureInput: 'delete-after-capture',
+            capturedInput: { value: text, sensitive: pending.sensitive },
+          },
+          reply: async () => {},
+        });
+        if (response.type !== 'silent' && response.type !== 'delegated') {
+          await this.renderCommandResponse(response, ctx.chat.id, topicIdForInput, String(ctx.from?.id));
+        }
+        return;
+      }
+      if (!text.startsWith("/")) return next();
 
       // /retry is always allowed — it is specifically for recovering from the not-initialized state
       const rawCmd = text.split(" ")[0].slice(1).split("@")[0].toLowerCase();
@@ -450,6 +580,8 @@ export class TelegramAdapter extends MessagingAdapter {
           sessionId,
           channelId: "telegram",
           userId: String(ctx.from?.id),
+          conversationId: `${chatId}:${topicId ?? 0}`,
+          interaction: { textInput: true, secureInput: 'delete-after-capture' },
           reply: async (content) => {
             if (typeof content === "string") {
               await ctx.reply(content);
@@ -462,6 +594,7 @@ export class TelegramAdapter extends MessagingAdapter {
                 content as CommandResponse,
                 chatId,
                 topicId,
+                String(ctx.from?.id),
               );
             }
           },
@@ -475,7 +608,7 @@ export class TelegramAdapter extends MessagingAdapter {
           // Silent means fall through to message routing (backward compat for commands not yet migrated)
           return next();
         }
-        await this.renderCommandResponse(response, chatId, topicId);
+        await this.renderCommandResponse(response, chatId, topicId, String(ctx.from?.id));
       } catch (err) {
         await ctx.reply(`\u26a0\ufe0f Command failed: ${String(err)}`);
       }
@@ -514,6 +647,8 @@ export class TelegramAdapter extends MessagingAdapter {
           sessionId,
           channelId: "telegram",
           userId: String(ctx.from?.id),
+          conversationId: `${chatId}:${topicId ?? 0}`,
+          interaction: { textInput: true, secureInput: 'delete-after-capture' },
           reply: async (content) => {
             if (typeof content === "string") {
               await ctx.editMessageText(content).catch(() => {});
@@ -522,7 +657,11 @@ export class TelegramAdapter extends MessagingAdapter {
         });
 
         await ctx.answerCallbackQuery();
-        if (response.type !== "silent") {
+        if (response.type !== "silent" && response.type !== "delegated") {
+          if (response.type === 'input') {
+            await this.renderCommandResponse(response, chatId, topicId, String(ctx.from?.id));
+            return;
+          }
           // Always edit the callback message in-place (no new messages)
           if (response.type === "menu") {
             const keyboard = response.options.map((opt) => [
@@ -645,6 +784,12 @@ export class TelegramAdapter extends MessagingAdapter {
     );
     this.setupRoutes();
 
+    // The global commands-ready event is emitted before core.start() in normal
+    // boot. Re-read the registry now that grammY exists instead of depending on
+    // replay of that lossy event. Hot-reload events remain subscribed above.
+    this._commandApiReady = true;
+    this.scheduleInitialCommandSync();
+
     // Start bot polling. Supervise the promise so a rejected poll triggers a restart
     // instead of silently leaving the process alive but no longer consuming messages.
     void this.bot.start({
@@ -736,24 +881,127 @@ export class TelegramAdapter extends MessagingAdapter {
    * from the registry, deduplicating by command name. Non-critical.
    */
   private syncCommandsWithRetry(registryCommands: Array<{ name: string; description: string; category?: string }>): void {
-    const staticNames = new Set(STATIC_COMMANDS.map((c) => c.command));
+    this._pendingCommandSnapshot = registryCommands;
+    this._commandSnapshotVersion++;
+    if (this._commandSyncWorkerRunning) return;
+    this._commandSyncWorkerRunning = true;
+    const generation = this._commandSyncGeneration;
+    const signal = this._commandSyncAbort?.signal;
 
-    // Only add plugin commands not already in STATIC_COMMANDS.
-    // Telegram command names must be lowercase alphanumeric + underscore only.
-    const pluginCommands = registryCommands
-      .filter((c) => c.category === 'plugin' && !staticNames.has(c.name) && /^[a-z0-9_]+$/.test(c.name))
-      .map((c) => ({ command: c.name, description: c.description.slice(0, 256) }))
+    this._commandSyncChain = (async () => {
+      while (this._pendingCommandSnapshot && generation === this._commandSyncGeneration && !signal?.aborted) {
+        const snapshot = this._pendingCommandSnapshot;
+        const snapshotVersion = this._commandSnapshotVersion;
+        this._pendingCommandSnapshot = undefined;
+        let allCommands: Array<{ command: string; description: string }>
+        try {
+          const boundary = prepareTelegramCommandBoundary(STATIC_COMMANDS, snapshot)
+          allCommands = boundary.commands
+          const { invalidName, invalidDescription, duplicate, overflow } = boundary.skipped
+          if (invalidName || invalidDescription || duplicate || overflow) {
+            log.warn(
+              { invalidName, invalidDescription, duplicate, overflow, operation: 'telegram-command-boundary' },
+              'Skipped plugin Telegram commands before Bot API sync. Names must match [a-z0-9_]{1,32}, descriptions must contain 1-256 characters, and only the first valid commands up to the 100-command limit are published.',
+            )
+          }
+          if (!allCommands.some((command) => command.command === 'proxy')) {
+            throw new TelegramCommandBoundaryError('Required OpenACP command /proxy is missing')
+          }
+        } catch (error) {
+          log.error(
+            { error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)), operation: 'telegram-command-boundary' },
+            'OpenACP core Telegram command definitions are invalid; command sync was skipped without changing Telegram state',
+          )
+          continue
+        }
+        const maxAttempts = 5;
 
-    const allCommands = [...STATIC_COMMANDS, ...pluginCommands].slice(0, 100)
-
-    this.retryWithBackoff(
-      () => this.bot.api.setMyCommands(allCommands, {
-        scope: { type: "chat", chat_id: this.telegramConfig.chatId },
-      }),
-      "setMyCommands",
-    ).catch((err) => {
-      log.warn({ err }, "Failed to register Telegram commands after retries (non-critical)");
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          if (generation !== this._commandSyncGeneration || signal?.aborted) return;
+          try {
+            const result = await synchronizeTelegramCommands(
+              this.bot.api as unknown as TelegramCommandApi,
+              this.telegramConfig.chatId,
+              allCommands,
+              {
+                ownershipStore: this.commandOwnershipStore,
+                botId: this.commandOwnerBotId,
+                ownerIdentity: this.commandOwnerIdentity,
+                allowOwnerTakeover: this.commandOwnerTakeoverRequested,
+                onOwnerClaimed: () => {
+                  this._commandOwnerClaimed = true
+                  this.startCommandOwnerHeartbeat()
+                },
+                historicalOwnedNames: HISTORICAL_OPENACP_COMMAND_NAMES,
+                signal,
+              },
+            );
+            if (generation !== this._commandSyncGeneration || signal?.aborted) return;
+            log.info(
+              { updatedScopes: result.updated, unchangedScopes: result.unchanged },
+              "Telegram command menus synchronized",
+            );
+            break;
+          } catch (err) {
+            if (generation !== this._commandSyncGeneration || signal?.aborted) return;
+            if (err instanceof TelegramCommandOwnerConflictError) {
+              log.warn(
+                { code: err.code, ownerInstanceId: err.ownerInstanceId, instanceId: this.commandOwnerIdentity.instanceId, operation: 'telegram-command-sync' },
+                'Telegram command sync is owned by another OpenACP instance. This instance did not inspect or mutate Telegram command lists. Configure a unique bot per instance, or stop the same-host owner and request an explicit takeover.',
+              )
+              break
+            }
+            if (snapshotVersion !== this._commandSnapshotVersion && this._pendingCommandSnapshot) break;
+            const safeError = redactNetworkSecrets(err instanceof Error ? err.message : String(err));
+            if (attempt === maxAttempts) {
+              log.warn(
+                { error: safeError, attempt, maxAttempts, operation: "telegram-command-sync" },
+                "Telegram command menu sync failed; bot remains online. Run /doctor and inspect Telegram connectivity",
+              );
+              break;
+            }
+            const delayMs = 2000 * Math.pow(2, attempt - 1);
+            log.warn(
+              { error: safeError, attempt, maxAttempts, delayMs, operation: "telegram-command-sync" },
+              "Telegram command menu sync failed, retrying",
+            );
+            await new Promise<void>((resolve) => {
+              const timer = setTimeout(resolve, delayMs);
+              signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+            });
+          }
+        }
+      }
+    })().finally(() => {
+      this._commandSyncWorkerRunning = false;
+      // A snapshot can arrive after the worker observes an empty queue but
+      // before this finalizer runs. Re-arm explicitly so that narrow window
+      // cannot strand the latest registry state until another plugin event.
+      if (this._pendingCommandSnapshot && generation === this._commandSyncGeneration && !signal?.aborted) {
+        this.syncCommandsWithRetry(this._pendingCommandSnapshot);
+      }
     });
+  }
+
+  private startCommandOwnerHeartbeat(): void {
+    if (this._commandOwnerHeartbeat) return
+    this._commandOwnerHeartbeat = setInterval(() => {
+      void this.commandOwnershipStore.heartbeatOwner(this.commandOwnerBotId, this.commandOwnerIdentity)
+        .then((owned) => {
+          if (!owned) {
+            this._commandOwnerClaimed = false
+            log.warn(
+              { instanceId: this.commandOwnerIdentity.instanceId, operation: 'telegram-command-owner-heartbeat' },
+              'Telegram command-sync ownership was lost; no further command-list writes will be attempted until ownership is resolved.',
+            )
+          }
+        })
+        .catch((error) => log.warn(
+          { error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)), operation: 'telegram-command-owner-heartbeat' },
+          'Could not refresh Telegram command-sync ownership heartbeat',
+        ))
+    }, 30_000)
+    this._commandOwnerHeartbeat.unref?.()
   }
 
   private async initTopicDependentFeatures(): Promise<void> {
@@ -1071,6 +1319,14 @@ export class TelegramAdapter extends MessagingAdapter {
    */
   async stop(): Promise<void> {
     this._stopping = true;
+    this._commandSyncGeneration++;
+    this._commandSyncAbort?.abort();
+    this._commandSyncAbort = undefined;
+    this._pendingCommandSnapshot = undefined;
+    if (this._commandOwnerHeartbeat) {
+      clearInterval(this._commandOwnerHeartbeat)
+      this._commandOwnerHeartbeat = undefined
+    }
     this.unregisterProxyTester?.();
     this.unregisterProxyTester = undefined;
 
@@ -1095,11 +1351,34 @@ export class TelegramAdapter extends MessagingAdapter {
       this.core.eventBus.off("session:configChanged", this._configChangedHandler);
       this._configChangedHandler = undefined;
     }
+    if (this._commandsReadyHandler) {
+      this.core.eventBus.off(BusEvent.SYSTEM_COMMANDS_READY, this._commandsReadyHandler);
+      this._commandsReadyHandler = undefined;
+    }
+    this._commandApiReady = false;
+    this._initialCommandSyncScheduled = false;
+    this._latestCommandSnapshot = undefined;
 
     // Clear send queue
     this.sendQueue.clear();
+    this.pendingCommandInputs.clear();
+    this.callbackCache.clear();
+    clearProxyDraftsForChannel('telegram');
 
-    await this.bot.stop();
+    try {
+      await this.bot.stop();
+    } finally {
+      if (this._commandOwnerClaimed) {
+        try { await this.commandOwnershipStore.releaseOwner(this.commandOwnerBotId, this.commandOwnerIdentity) }
+        catch (error) {
+          log.warn(
+            { error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)), operation: 'telegram-command-owner-release' },
+            'Could not mark Telegram command-sync ownership as stopped; a same-host explicit takeover may be required on restart',
+          )
+        }
+        this._commandOwnerClaimed = false
+      }
+    }
     log.info("Telegram bot stopped");
   }
 
@@ -1109,6 +1388,7 @@ export class TelegramAdapter extends MessagingAdapter {
     response: CommandResponse,
     chatId: number,
     topicId?: number,
+    userId?: string,
   ): Promise<void> {
     switch (response.type) {
       case "text":
@@ -1175,6 +1455,36 @@ export class TelegramAdapter extends MessagingAdapter {
         await this.bot.api.sendMessage(chatId, response.question, {
           message_thread_id: topicId,
           reply_markup: { inline_keyboard: buttons },
+        });
+        break;
+      }
+      case "input": {
+        if (!userId) {
+          await this.bot.api.sendMessage(chatId, response.fallback, { message_thread_id: topicId });
+          break;
+        }
+        const key = `${chatId}:${userId}:${topicId ?? 0}`;
+        for (const [pendingKey, pending] of this.pendingCommandInputs) {
+          if (pending.expiresAt <= Date.now()) this.pendingCommandInputs.delete(pendingKey);
+        }
+        while (this.pendingCommandInputs.size >= 1000) {
+          const oldest = this.pendingCommandInputs.keys().next().value;
+          if (!oldest) break;
+          this.pendingCommandInputs.delete(oldest);
+        }
+        const warning = response.sensitive
+          ? '\n\n🔐 Your reply will be deleted before the value is processed. If deletion fails, the value will not be used.'
+          : '';
+        const promptMessage = await this.bot.api.sendMessage(chatId, `${response.prompt}${warning}`, {
+          message_thread_id: topicId,
+          reply_markup: { force_reply: true, selective: true },
+        });
+        this.pendingCommandInputs.set(key, {
+          command: response.command,
+          sensitive: response.sensitive === true,
+          fallback: response.fallback,
+          expiresAt: Date.now() + (response.expiresInMs ?? 10 * 60_000),
+          promptMessageId: promptMessage.message_id,
         });
         break;
       }

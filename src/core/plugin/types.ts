@@ -275,6 +275,18 @@ export type CommandResponse =
   | { type: 'menu'; title: string; options: MenuOption[] }
   | { type: 'list'; title: string; items: ListItem[] }
   | { type: 'confirm'; question: string; onYes: string; onNo: string }
+  | {
+      /** Request one follow-up text value from the same authenticated conversation. */
+      type: 'input'
+      prompt: string
+      /** Command invoked with the captured value in CommandArgs.interaction.capturedInput. */
+      command: string
+      /** Sensitive values must be removed by the adapter before command dispatch. */
+      sensitive?: boolean
+      /** Shown when an adapter cannot provide the requested input guarantees. */
+      fallback: string
+      expiresInMs?: number
+    }
   | { type: 'error'; message: string }
   /** Command handled successfully but produces no visible output */
   | { type: 'silent' }
@@ -317,6 +329,18 @@ export interface CommandArgs {
   channelId: string
   /** User ID who invoked the command */
   userId: string
+  /** Stable adapter conversation/topic identifier used to bind short-lived interactions. */
+  conversationId?: string
+  /** Input guarantees offered by the invoking adapter. */
+  interaction?: {
+    textInput: boolean
+    secureInput: 'private' | 'delete-after-capture' | 'none'
+    /** One-shot adapter-captured input. Never serialize this into a command string. */
+    capturedInput?: {
+      value: string
+      sensitive: boolean
+    }
+  }
   /** Reply helper — sends message to the topic where command was invoked */
   reply(content: string | CommandResponse | OutgoingMessage): Promise<void>
   /** Direct access to OpenACPCore instance. Available when 'kernel:access' permission is granted. */

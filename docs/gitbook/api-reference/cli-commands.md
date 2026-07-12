@@ -209,6 +209,13 @@ Cancels a session.
 openacp api cancel <session-id>
 ```
 
+The JSON result mirrors the daemon's typed cancellation result, including
+`previousStatus`, `status`, and `alreadyTerminal`. Repeated cancellation of a
+persisted terminal session succeeds idempotently; an unknown ID returns
+`SESSION_NOT_FOUND`. `cleanupPending: true` means the cancelled state is already
+durable but agent/logger teardown failed; repeat the same command to retry
+cleanup without aborting the prompt twice.
+
 ### api cleanup
 
 Deletes finished topics from channel adapters.
@@ -982,18 +989,31 @@ Checks npm for the latest version of `@n1creator/openacp-cli` and installs it if
 ## proxy
 
 Manages scoped proxy profiles and routes through the running daemon. Responses
-are redacted; credential values are accepted only through a protected env file
-or write-only REST fields.
+are redacted. JSON/env input paths must be mode-0600 regular files; credentials
+belong inside those files and are never accepted as command arguments.
 
 ```bash
 openacp proxy status [--json]
-openacp proxy import <id> --env-file <0600-file> [--name <label>]
-openacp proxy set <scope|global> <direct|inherit|profile:id>
-openacp proxy clear <scope>
+openacp proxy create <id> --from-json <0600-file> [--expected-revision <n>]
+openacp proxy update <id> --from-json <0600-file> [--expected-revision <n>]
+openacp proxy import <id> --env-file <0600-file> [--name <label>] [--expected-revision <n>]
+openacp proxy test-candidate <id> --from-json <0600-file>
+openacp proxy set <scope|global> <direct|inherit|profile:id> [--expected-revision <n>]
+openacp proxy clear <scope|global> [--expected-revision <n>]
 openacp proxy test --scope <scope> [--url <https-url>]
 openacp proxy test --profile <id> [--url <https-url>]
-openacp proxy delete <id>
+openacp proxy delete <id> [--reassign <direct|inherit|profile:id>] [--expected-revision <n>]
 ```
+
+`create`, `update`, and `test-candidate` validate the protected JSON file and
+profile shape locally before contacting the daemon. `test-candidate` tests in
+memory without persistence. Updating a profile with omitted credential fields
+preserves its existing secret; `clearCredentials: true` removes it explicitly.
+The profile JSON accepts either `protocol` + `host` + `port` (and optional
+write-only `username`/`password`) or one write-only `proxyUrl`; mixing the forms
+is rejected. `proxyUrl` supports `http`, `https`, `socks5`, and `socks5h`, must
+contain an explicit port, and may contain percent-encoded credentials. Replacing
+an existing profile with a URL that has no credentials clears its old secret.
 
 `--url` is administrative and accepts only the built-in public diagnostic
 hosts (`api.ipify.org`, `ifconfig.me`, or `httpbin.org`); arbitrary URLs are
@@ -1006,6 +1026,13 @@ Connectivity failure exits non-zero. With `--json`, failures use
 `success:false` and stable codes such as `PROXY_TEST_FAILED` and
 `PROXY_ROUTE_TEST_FAILED`. A rejected transactional channel route explicitly
 states that the previous route was not changed.
+
+Local input failures use the same single JSON envelope and exit 1. Stable codes
+include `PROXY_INPUT_FILE_INSECURE`, `PROXY_INPUT_FILE_NOT_FOUND`,
+`PROXY_INPUT_JSON_INVALID`, `PROXY_INPUT_SCHEMA_INVALID`,
+`PROXY_MISSING_ARGUMENT`, and `PROXY_INVALID_ARGUMENT`. Human mode prints one
+concise `Proxy error: ...` line. Neither mode includes a stack trace or local
+input path.
 
 **Usage**
 ```

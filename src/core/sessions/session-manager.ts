@@ -5,6 +5,10 @@ import type { EventBus } from "../event-bus.js";
 import type { MiddlewareChain } from "../plugin/middleware-chain.js";
 import type { SessionStatus, ConfigOption, AgentCapabilities } from "../types.js";
 import { Hook, BusEvent } from "../events.js";
+import { createChildLogger } from "../utils/log.js";
+import { redactNetworkSecrets } from "../security/network-redaction.js";
+
+const log = createChildLogger({ module: 'session-manager' });
 
 /** Flattened view of a session for API consumers — merges live state with stored record. */
 export interface SessionSummary {
@@ -24,6 +28,17 @@ export interface SessionSummary {
   isLive: boolean;
 }
 
+export interface CancelSessionResult {
+  sessionId: string;
+  cancelled: boolean;
+  previousStatus: SessionStatus;
+  status: 'cancelled' | 'finished';
+  alreadyTerminal: boolean;
+  /** Terminal state is durable, but process/logger cleanup needs another cancel retry. */
+  cleanupPending: boolean;
+  warning?: string;
+}
+
 /**
  * Registry for live Session instances. Provides lookup by session ID, channel+thread,
  * or agent session ID. Coordinates session lifecycle: creation, cancellation, persistence,
@@ -41,6 +56,7 @@ export class SessionManager {
   // Prevents SessionBridge STATUS_CHANGE listeners from overwriting the flushed state
   // with transient error status from in-flight prompts that fail after shutdown.
   private _shutdownComplete = false;
+  private cancellationOps = new Map<string, Promise<CancelSessionResult>>();
 
   /**
    * Inject the EventBus after construction. Deferred because EventBus is created
@@ -177,33 +193,78 @@ export class SessionManager {
     return this.store?.get(sessionId);
   }
 
-  /** Cancel a session: abort in-flight prompt, transition to cancelled, destroy agent, and persist. */
-  async cancelSession(sessionId: string): Promise<void> {
+  /**
+   * Cancel a session exactly once. Concurrent callers share one operation;
+   * terminal sessions return an idempotent result instead of throwing.
+   */
+  async cancelSession(sessionId: string): Promise<CancelSessionResult> {
+    const existing = this.cancellationOps.get(sessionId);
+    if (existing) return existing;
+    const operation = this.performCancelSession(sessionId);
+    this.cancellationOps.set(sessionId, operation);
+    try { return await operation; }
+    finally { if (this.cancellationOps.get(sessionId) === operation) this.cancellationOps.delete(sessionId); }
+  }
+
+  private async performCancelSession(sessionId: string): Promise<CancelSessionResult> {
     const session = this.sessions.get(sessionId);
-    if (session) {
-      try {
-        await session.abortPrompt();
-      } catch {
-        // Agent may already be dead — continue with cleanup
-      }
-      // Skip markCancelled for sessions already in a terminal state (e.g. finished)
-      // to avoid invalid state machine transition errors.
-      if (session.status !== "finished" && session.status !== "cancelled") {
-        session.markCancelled();
-      }
-      await session.destroy();
-      this.sessions.delete(sessionId);
+    const recordBefore = this.store?.get(sessionId);
+    const previousStatus = session?.status ?? recordBefore?.status;
+    if (!previousStatus) {
+      const error = new Error(`Session "${sessionId}" not found`) as Error & { code?: string };
+      error.code = 'SESSION_NOT_FOUND';
+      throw error;
     }
-    if (this.store) {
-      const record = this.store.get(sessionId);
-      if (record && record.status !== "cancelled" && record.status !== "finished") {
-        await this.store.save({ ...record, status: "cancelled" });
+    const alreadyTerminal = previousStatus === 'cancelled' || previousStatus === 'finished';
+    const finalStatus = previousStatus === 'finished' ? 'finished' : 'cancelled';
+
+    // Durability is the cancellation boundary. Persist and flush the terminal
+    // record before touching an agent or logger that may fail during teardown.
+    if (this.store && finalStatus === 'cancelled') {
+      const record = this.store.get(sessionId)
+      if (record && record.status !== 'cancelled') {
+        await this.store.save({ ...record, status: 'cancelled' })
+        this.store.flush()
+      }
+    }
+
+    let cleanupPending = false
+    if (session) {
+      if (!alreadyTerminal) {
+        session.markCancelled();
+        try {
+          await session.abortPrompt();
+        } catch (error) {
+          log.warn(
+            { sessionId, error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)) },
+            'Session prompt abort failed after cancellation became durable; continuing cleanup',
+          )
+        }
+      }
+      try {
+        await session.destroy();
+        this.sessions.delete(sessionId);
+      } catch (error) {
+        cleanupPending = true
+        log.warn(
+          { sessionId, error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)) },
+          'Session is durably cancelled but agent/logger cleanup failed; repeat cancellation to retry cleanup',
+        )
       }
     }
     // Hook: session:afterDestroy — read-only, fire-and-forget
-    if (this.middlewareChain) {
+    if (!cleanupPending && this.middlewareChain) {
       this.middlewareChain.execute(Hook.SESSION_AFTER_DESTROY, { sessionId }, async (p) => p).catch(() => {});
     }
+    return {
+      sessionId,
+      cancelled: !alreadyTerminal,
+      previousStatus,
+      status: finalStatus,
+      alreadyTerminal,
+      cleanupPending,
+      ...(cleanupPending ? { warning: 'Session state is cancelled and persisted; process cleanup is pending. Repeat cancellation to retry cleanup.' } : {}),
+    };
   }
 
   /** List live (in-memory) sessions, optionally filtered by channel. Excludes assistant sessions. */

@@ -14,7 +14,7 @@ vi.mock('proxy-agent', () => ({
   },
 }))
 
-import { ProxyService, PROXY_ENV_KEYS } from '../proxy-service.js'
+import { ProxyProfileExistsError, ProxyProfileNotFoundError, ProxyService, ProxyValidationError, PROXY_ENV_KEYS } from '../proxy-service.js'
 
 describe('ProxyService', () => {
   let root: string
@@ -38,6 +38,33 @@ describe('ProxyService', () => {
     await service.setRoute('agents.cursor', 'inherit')
     expect(service.resolve('agents.cursor').route).toBe('inherit')
     expect(service.resolve('channels.discord').route).toBe('direct')
+  })
+
+  it('keeps create/update existence semantics atomic across service instances', async () => {
+    const other = new ProxyService(root)
+    const input = { id: 'race', protocol: 'http' as const, host: 'proxy.test', port: 8080 }
+    const results = await Promise.allSettled([
+      service.createProfileSafely(input),
+      other.createProfileSafely({ ...input, host: 'other.test' }),
+    ])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    expect(rejected?.reason).toBeInstanceOf(ProxyProfileExistsError)
+
+    const deleteFirst = service.deleteProfileSafely('race')
+    const queuedUpdate = service.updateProfileSafely({ ...input, host: 'must-not-resurrect.test' })
+    await deleteFirst
+    await expect(queuedUpdate).rejects.toBeInstanceOf(ProxyProfileNotFoundError)
+    expect(service.getProfile('race')).toBeUndefined()
+  })
+
+  it('rejects overlong or whitespace-only profile names with a typed validation error before network or persistence', () => {
+    expect(() => service.saveProfile({ id: 'long-name', name: 'x'.repeat(101), protocol: 'http', host: 'proxy.test', port: 8080 }))
+      .toThrow(ProxyValidationError)
+    expect(() => service.saveProfile({ id: 'blank-name', name: '   ', protocol: 'http', host: 'proxy.test', port: 8080 }))
+      .toThrow(ProxyValidationError)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(service.listProfiles()).toEqual([])
   })
 
   it('scrubs every inherited proxy variable for direct agent routes', async () => {
@@ -118,6 +145,39 @@ describe('ProxyService', () => {
     await service.createFetch('channels.telegram', 'profile:route')('https://example.test')
     expect(fetchMock).toHaveBeenCalledOnce()
     expect(agentOptions[0].getProxyForUrl('https://example.test')).toBe(`${protocol}://u:p@proxy.test:9000${protocol.startsWith('socks') ? '' : '/'}`)
+  })
+
+  it('accepts a write-only proxy URL with encoded credentials and IPv6 for candidate tests', async () => {
+    const result = await service.testProfileCandidate({
+      id: 'url-candidate',
+      proxyUrl: 'socks5h://alice:pa%3Ass%40word@[2001:db8::9]:1080',
+    })
+    expect(result).toEqual({ ok: true, status: 200 })
+    expect(agentOptions.at(-1)?.getProxyForUrl('https://example.test')).toBe(
+      'socks5h://alice:pa%3Ass%40word@[2001:db8::9]:1080',
+    )
+    expect(JSON.stringify(service.status())).not.toContain('pa:ss@word')
+  })
+
+  it('accepts an explicit default port and clears old credentials when replacement URL has no auth', async () => {
+    service.saveProfile({ id: 'replace', protocol: 'http', host: 'old.test', port: 8080, username: 'old', password: 'secret' })
+    const updated = await service.updateProfileSafely({ id: 'replace', proxyUrl: 'http://new.test:80' })
+    expect(updated).toMatchObject({ host: 'new.test', port: 80, hasCredentials: false })
+    await service.setRoute('agents.codex', 'profile:replace')
+    expect(service.buildAgentEnv('codex', {}).HTTP_PROXY).toBe('http://new.test/')
+  })
+
+  it.each([
+    'http://proxy.test',
+    'http://proxy.test:8080/private',
+    'http://proxy.test:8080?token=value',
+    'ftp://proxy.test:21',
+    'http://proxy.test:8080\nignored',
+  ])('rejects unsafe or incomplete proxy URL input without echoing it: %s', (proxyUrl) => {
+    expect(() => service.parseProxyUrlInput(proxyUrl)).toThrow()
+    try { service.parseProxyUrlInput(proxyUrl) } catch (error) {
+      expect((error as Error).message).not.toContain(proxyUrl)
+    }
   })
 
   it('honors profile noProxy without affecting unrelated process traffic', async () => {

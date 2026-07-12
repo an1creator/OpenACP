@@ -45,6 +45,65 @@ describe('proxy API routes', () => {
     expect(status.statusCode).toBe(200)
     expect(status.body).not.toContain('secret')
     expect(status.json().profiles[0]).toMatchObject({ id: 'usa', hasCredentials: true })
+    const duplicate = await app.inject({
+      method: 'POST', url: '/api/v1/proxy/profiles',
+      payload: { id: 'usa', protocol: 'http', host: 'other.test', port: 8081 },
+    })
+    expect(duplicate.statusCode).toBe(409)
+    expect(duplicate.json().error.code).toBe('PROXY_PROFILE_EXISTS')
+  })
+
+  it('accepts write-only proxyUrl input and rejects mixed endpoint representations', async () => {
+    const create = await app.inject({
+      method: 'POST', url: '/api/v1/proxy/profiles',
+      payload: { id: 'url-profile', name: 'URL profile', proxyUrl: 'http://alice:pa%3Ass@proxy.test:8080' },
+    })
+    expect(create.statusCode).toBe(200)
+    expect(create.json().profile).toMatchObject({ id: 'url-profile', host: 'proxy.test', port: 8080, hasCredentials: true })
+    expect(create.body).not.toContain('alice')
+    expect(create.body).not.toContain('pa%3Ass')
+
+    const mixed = await app.inject({
+      method: 'POST', url: '/api/v1/proxy/profiles',
+      payload: { id: 'mixed', proxyUrl: 'http://proxy.test:8080', protocol: 'http', host: 'proxy.test', port: 8080 },
+    })
+    expect(mixed.statusCode).toBe(400)
+    expect(service.getProfile('mixed')).toBeUndefined()
+  })
+
+  it('returns typed proxy validation for a 101-character name without saving', async () => {
+    const response = await app.inject({
+      method: 'POST', url: '/api/v1/proxy/profiles',
+      payload: { id: 'long-name', name: 'x'.repeat(101), proxyUrl: 'http://proxy.test:8080' },
+    })
+    expect(response.statusCode).toBe(400)
+    expect(response.json().error.code).toBe('PROXY_VALIDATION_ERROR')
+    expect(service.getProfile('long-name')).toBeUndefined()
+  })
+
+  it('serializes concurrent create-only requests so exactly one returns PROFILE_EXISTS', async () => {
+    const payload = { id: 'race', protocol: 'http', host: 'proxy.test', port: 8080 }
+    const responses = await Promise.all([
+      app.inject({ method: 'POST', url: '/api/v1/proxy/profiles', payload }),
+      app.inject({ method: 'POST', url: '/api/v1/proxy/profiles', payload: { ...payload, host: 'other.test' } }),
+    ])
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409])
+    expect(responses.find((response) => response.statusCode === 409)?.json().error.code).toBe('PROXY_PROFILE_EXISTS')
+    expect(service.listProfiles().filter((profile) => profile.id === 'race')).toHaveLength(1)
+  })
+
+  it('does not let a queued PUT resurrect a profile deleted first', async () => {
+    await service.createProfileSafely({ id: 'gone', protocol: 'http', host: 'proxy.test', port: 8080 })
+    const deleted = app.inject({ method: 'DELETE', url: '/api/v1/proxy/profiles/gone' })
+    const updated = app.inject({
+      method: 'PUT', url: '/api/v1/proxy/profiles/gone',
+      payload: { protocol: 'http', host: 'resurrect.test', port: 8081 },
+    })
+    const [deleteResponse, updateResponse] = await Promise.all([deleted, updated])
+    expect(deleteResponse.statusCode).toBe(200)
+    expect(updateResponse.statusCode).toBe(404)
+    expect(updateResponse.json().error.code).toBe('PROXY_PROFILE_NOT_FOUND')
+    expect(service.getProfile('gone')).toBeUndefined()
   })
 
   it('sets exact/category routes and exposes the resolved matrix', async () => {
@@ -82,7 +141,8 @@ describe('proxy API routes', () => {
     expect(badHost.statusCode).toBe(400)
     expect(badHost.json().error.code).toBe('PROXY_VALIDATION_ERROR')
     const missing = await app.inject({ method: 'DELETE', url: '/api/v1/proxy/profiles/missing' })
-    expect(missing.statusCode).toBe(400)
+    expect(missing.statusCode).toBe(404)
+    expect(missing.json().error.code).toBe('PROXY_PROFILE_NOT_FOUND')
     const unknown = await app.inject({ method: 'PUT', url: '/api/v1/proxy/routes/plugins.unknown.flow', payload: { route: 'direct' } })
     expect(unknown.statusCode).toBe(400)
     expect(unknown.json().error.code).toBe('PROXY_UNKNOWN_SCOPE')
@@ -128,5 +188,36 @@ describe('proxy API routes', () => {
     const stale = await app.inject({ method: 'PUT', url: '/api/v1/proxy/routes/agents.cursor', payload: { route: 'direct', expectedRevision: revision } })
     expect(stale.statusCode).toBe(409)
     expect(stale.json().error.code).toBe('PROXY_REVISION_CONFLICT')
+  })
+
+  it('updates profiles, tests unsaved candidates, and atomically reassigns on delete', async () => {
+    await service.saveProfileSafely({ id: 'old', protocol: 'http', host: 'old.test', port: 8080, password: 'write-only' })
+    await service.saveProfileSafely({ id: 'next', protocol: 'https', host: 'next.test', port: 8443 })
+    await service.setRoute('agents.codex', 'profile:old')
+
+    const update = await app.inject({
+      method: 'PUT', url: '/api/v1/proxy/profiles/old',
+      payload: { protocol: 'http', host: 'updated.test', port: 8081, clearCredentials: true },
+    })
+    expect(update.statusCode).toBe(200)
+    expect(update.body).not.toContain('write-only')
+    expect(update.json().profile).toMatchObject({ id: 'old', host: 'updated.test', hasCredentials: false })
+
+    vi.spyOn(service, 'testProfileCandidate').mockResolvedValueOnce({ ok: true, status: 204 })
+    const candidate = await app.inject({
+      method: 'POST', url: '/api/v1/proxy/profiles/test-candidate',
+      payload: { id: 'draft', protocol: 'socks5h', host: 'draft.test', port: 1080, password: 'never-return' },
+    })
+    expect(candidate.statusCode).toBe(200)
+    expect(candidate.json()).toEqual({ ok: true, status: 204 })
+    expect(candidate.body).not.toContain('never-return')
+
+    const deleted = await app.inject({
+      method: 'DELETE', url: '/api/v1/proxy/profiles/old?reassign=profile%3Anext',
+    })
+    expect(deleted.statusCode).toBe(200)
+    expect(deleted.json().reassignedScopes).toContain('agents.codex')
+    expect(service.resolve('agents.codex').route).toBe('profile:next')
+    expect(service.getProfile('old')).toBeUndefined()
   })
 })

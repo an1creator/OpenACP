@@ -53,7 +53,14 @@ vi.mock('../../api-client.js', () => ({
     if (urlPath.startsWith('/api/sessions/') && options?.method === 'DELETE') {
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ cancelled: true }),
+        json: () => Promise.resolve({
+          ok: true,
+          sessionId: 'sess-1',
+          cancelled: true,
+          previousStatus: 'initializing',
+          status: 'cancelled',
+          alreadyTerminal: false,
+        }),
       })
     }
     // Default

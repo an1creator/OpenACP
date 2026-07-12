@@ -640,17 +640,23 @@ export async function sessionRoutes(
     async (request) => {
       const { sessionId: rawId } = SessionIdParamSchema.parse(request.params);
       const sessionId = decodeURIComponent(rawId);
-      // cancelSession handles both live and store-only sessions; just verify it exists first
-      const isKnown = deps.core.sessionManager.getSession(sessionId)
+      const known = deps.core.sessionManager.getSession(sessionId)
         ?? deps.core.sessionManager.getSessionRecord(sessionId);
-      if (!isKnown) {
-        throw new NotFoundError(
-          'SESSION_NOT_FOUND',
-          `Session "${sessionId}" not found`,
-        );
+      if (!known) {
+        throw new NotFoundError('SESSION_NOT_FOUND', `Session "${sessionId}" not found`);
       }
-      await deps.core.sessionManager.cancelSession(sessionId);
-      return { ok: true };
+      try {
+        const result = await deps.core.sessionManager.cancelSession(sessionId);
+        return { ok: true, ...result };
+      } catch (error) {
+        if (error instanceof Error && 'code' in error && error.code === 'SESSION_NOT_FOUND') {
+          throw new NotFoundError(
+            'SESSION_NOT_FOUND',
+            `Session "${sessionId}" not found`,
+          );
+        }
+        throw error;
+      }
     },
   );
 }

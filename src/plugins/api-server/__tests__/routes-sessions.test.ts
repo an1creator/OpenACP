@@ -59,7 +59,13 @@ function createMockDeps(overrides: Partial<RouteDeps> = {}): RouteDeps {
     ]),
     getSession: vi.fn().mockReturnValue(mockSession),
     getSessionRecord: vi.fn().mockReturnValue({ lastActiveAt: '2026-01-01T00:00:00Z' }),
-    cancelSession: vi.fn().mockResolvedValue(undefined),
+    cancelSession: vi.fn().mockResolvedValue({
+      sessionId: 'sess-1',
+      cancelled: true,
+      previousStatus: 'initializing',
+      status: 'cancelled',
+      alreadyTerminal: false,
+    }),
     patchRecord: vi.fn().mockResolvedValue(undefined),
   };
 
@@ -660,11 +666,19 @@ describe('session routes', () => {
       expect(deps.core.sessionManager.cancelSession).toHaveBeenCalledWith(
         'sess-1',
       );
+      expect(response.json()).toEqual({
+        ok: true,
+        sessionId: 'sess-1',
+        cancelled: true,
+        previousStatus: 'initializing',
+        status: 'cancelled',
+        alreadyTerminal: false,
+      });
     });
 
     it('returns 404 for unknown session', async () => {
-      (deps.core.sessionManager.getSession as any).mockReturnValue(null);
-      (deps.core.sessionManager.getSessionRecord as any).mockReturnValue(null);
+      const notFound = Object.assign(new Error('not found'), { code: 'SESSION_NOT_FOUND' });
+      (deps.core.sessionManager.cancelSession as any).mockRejectedValue(notFound);
 
       const response = await app.inject({
         method: 'DELETE',

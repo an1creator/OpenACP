@@ -101,9 +101,10 @@ describe("Session state machine", () => {
       expect(() => session.finish("done")).toThrow();
     });
 
-    it("initializing → cancelled throws", () => {
+    it("initializing → cancelled is allowed for fresh API sessions", () => {
       const session = createSession();
-      expect(() => session.markCancelled()).toThrow();
+      expect(() => session.markCancelled()).not.toThrow();
+      expect(session.status).toBe("cancelled");
     });
 
     it("finished → active throws", () => {

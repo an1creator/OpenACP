@@ -2,8 +2,8 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 import type { RouteDeps } from './types.js'
 import { requireScopes } from '../middleware/auth.js'
-import { AuthError, BadRequestError, ConflictError, ServiceUnavailableError } from '../middleware/error-handler.js'
-import { ProxyProfileTestError, ProxyRouteTestError, ProxyValidationError } from '../../../core/network/proxy-service.js'
+import { AuthError, BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../middleware/error-handler.js'
+import { ProxyProfileExistsError, ProxyProfileNotFoundError, ProxyProfileTestError, ProxyRouteTestError, ProxyValidationError } from '../../../core/network/proxy-service.js'
 import { ProxyRevisionConflictError, ProxyStoreCorruptError } from '../../../core/network/proxy-store.js'
 import { hasScope } from '../auth/roles.js'
 import { lookup } from 'node:dns/promises'
@@ -16,17 +16,36 @@ const RouteSchema = z.string().refine(
   'Route must be direct, inherit, or profile:<id>',
 )
 
-const ProfileSchema = z.object({
+const ProfileBaseSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/i),
-  name: z.string().min(1).max(100).optional(),
-  protocol: z.enum(['http', 'https', 'socks5', 'socks5h']),
-  host: z.string().min(1).max(253),
-  port: z.number().int().min(1).max(65535),
+  // Canonical trim/non-empty/max validation lives in ProxyService so every
+  // caller receives the stable PROXY_VALIDATION_ERROR contract.
+  name: z.string().optional(),
+  proxyUrl: z.string().min(1).max(8192).optional(),
+  protocol: z.enum(['http', 'https', 'socks5', 'socks5h']).optional(),
+  host: z.string().min(1).max(253).optional(),
+  port: z.number().int().min(1).max(65535).optional(),
   username: z.string().optional(),
   password: z.string().optional(),
   noProxy: z.array(z.string()).optional(),
   failClosed: z.boolean().optional(),
+  clearCredentials: z.boolean().optional(),
 })
+
+function refineProfileInput(
+  value: Partial<z.infer<typeof ProfileBaseSchema>>,
+  ctx: z.RefinementCtx,
+): void {
+  const componentFields = [value.protocol, value.host, value.port, value.username, value.password, value.clearCredentials]
+  if (value.proxyUrl !== undefined && componentFields.some((field) => field !== undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'proxyUrl is mutually exclusive with endpoint and credential fields' })
+  }
+  if (value.proxyUrl === undefined && (!value.protocol || !value.host || value.port === undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'protocol, host, and port are required when proxyUrl is not provided' })
+  }
+}
+
+const ProfileSchema = ProfileBaseSchema.superRefine(refineProfileInput)
 
 /** Redacted proxy management API. Credential input is write-only. */
 export async function proxyRoutes(app: FastifyInstance, deps: RouteDeps): Promise<void> {
@@ -36,14 +55,36 @@ export async function proxyRoutes(app: FastifyInstance, deps: RouteDeps): Promis
 
   app.post('/profiles', { preHandler: requireScopes('network:proxy:manage') }, async (request) => {
     let profile
-    const body = ProfileSchema.extend({ expectedRevision: z.number().int().nonnegative().optional() }).parse(request.body)
+    const body = ProfileBaseSchema.extend({ expectedRevision: z.number().int().nonnegative().optional() })
+      .superRefine(refineProfileInput).parse(request.body)
     const { expectedRevision, ...input } = body
-    try { profile = await service.saveProfileSafely(input, expectedRevision) }
+    try { profile = await service.createProfileSafely(input, expectedRevision) }
     catch (error) {
       if (error instanceof ProxyProfileTestError) throw new BadRequestError(error.code, error.message)
       throwProxyApiError(error)
     }
     return { ok: true, profile }
+  })
+
+  app.put('/profiles/:id', { preHandler: requireScopes('network:proxy:manage') }, async (request) => {
+    const { id } = z.object({ id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/i) }).parse(request.params)
+    const body = ProfileBaseSchema.omit({ id: true }).extend({ expectedRevision: z.number().int().nonnegative().optional() })
+      .superRefine(refineProfileInput).parse(request.body)
+    const { expectedRevision, ...input } = body
+    try { return { ok: true, profile: await service.updateProfileSafely({ id, ...input }, expectedRevision) } }
+    catch (error) {
+      if (error instanceof ProxyProfileTestError) throw new BadRequestError(error.code, error.message)
+      throwProxyApiError(error)
+    }
+  })
+
+  app.post('/profiles/test-candidate', { preHandler: requireScopes('network:proxy:manage') }, async (request) => {
+    const body = ProfileBaseSchema.extend({ targetUrl: z.string().url().optional() })
+      .superRefine(refineProfileInput).parse(request.body)
+    if (body.targetUrl) await assertSafeTestTarget(body.targetUrl)
+    const { targetUrl, ...input } = body
+    try { return await service.testProfileCandidate(input, targetUrl) }
+    catch (error) { throwProxyApiError(error) }
   })
 
   app.post('/profiles/import-env', { preHandler: requireScopes('network:proxy:manage') }, async (request) => {
@@ -66,9 +107,12 @@ export async function proxyRoutes(app: FastifyInstance, deps: RouteDeps): Promis
 
   app.delete('/profiles/:id', { preHandler: requireScopes('network:proxy:manage') }, async (request) => {
     const { id } = z.object({ id: z.string() }).parse(request.params)
-    const { expectedRevision } = z.object({ expectedRevision: z.coerce.number().int().nonnegative().optional() }).parse(request.query)
-    try { await service.deleteProfile(id, expectedRevision) } catch (error) { throwProxyApiError(error) }
-    return { ok: true }
+    const { expectedRevision, reassign } = z.object({
+      expectedRevision: z.coerce.number().int().nonnegative().optional(),
+      reassign: RouteSchema.optional(),
+    }).parse(request.query)
+    try { return { ok: true, ...(await service.deleteProfileSafely(id, reassign as import('../../../core/network/proxy-types.js').ProxyRoute | undefined, expectedRevision)) } }
+    catch (error) { throwProxyApiError(error) }
   })
 
   app.put('/routes/:scope', { preHandler: requireScopes('network:proxy:manage') }, async (request) => {
@@ -111,7 +155,9 @@ export async function proxyRoutes(app: FastifyInstance, deps: RouteDeps): Promis
 
 function throwProxyApiError(error: unknown): never {
   if (error instanceof ProxyRevisionConflictError) throw new ConflictError(error.code, error.message)
+  if (error instanceof ProxyProfileExistsError) throw new ConflictError(error.code, `${error.message}; use PUT to update it`)
   if (error instanceof ProxyStoreCorruptError) throw new ServiceUnavailableError(error.code, error.message)
+  if (error instanceof ProxyProfileNotFoundError) throw new NotFoundError(error.code, error.message)
   if (error instanceof ProxyValidationError) throw new BadRequestError(error.code, error.message)
   throw error
 }

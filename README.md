@@ -299,10 +299,28 @@ openacp tunnel list
 # Scoped proxy routing (requires running daemon)
 openacp proxy status
 openacp proxy import usa --env-file ~/.openacp/secrets/proxy.env
+openacp proxy create backup --from-json ~/.openacp/secrets/backup-proxy.json
+openacp proxy update backup --from-json ~/.openacp/secrets/backup-proxy.json
 openacp proxy set channels.telegram profile:usa
 openacp proxy set agents.codex profile:usa
 openacp proxy test --scope channels.telegram
 ```
+
+The protected JSON file supports a Quick URL mode: use either separate
+`protocol`, `host`, and `port` fields or one write-only `proxyUrl` such as
+`{"proxyUrl":"socks5h://user:password@proxy.example:1080"}`. The two forms are
+mutually exclusive. A URL must include an explicit port; credentials are parsed
+and stored separately, and the original URL is never persisted or returned.
+
+The connector-neutral `/proxy` interface now provides admin-only add/edit,
+candidate test-before-save, credential clearing, paginated route controls, and
+atomic delete-with-reassignment. Telegram deletes credential replies before use;
+if that guarantee is unavailable, OpenACP refuses the value and directs the
+operator to a mode-0600 CLI/API input file.
+
+Use a unique Telegram bot for each OpenACP instance. Command synchronization has
+one heartbeat-backed owner per public bot ID and a second instance will not
+modify the first instance's command menus.
 
 > **Full CLI reference** — [CLI Commands](https://openacp.gitbook.io/docs/api-reference/cli-commands)
 

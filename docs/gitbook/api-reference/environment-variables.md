@@ -8,6 +8,7 @@ All overrides are applied before Zod schema validation, so the final config is a
 |---|---|---|---|
 | `OPENACP_TELEGRAM_BOT_TOKEN` | `channels.telegram.botToken` | string | Telegram Bot API token |
 | `OPENACP_TELEGRAM_CHAT_ID` | `channels.telegram.chatId` | number | Telegram chat/supergroup ID (parsed as integer) |
+| `OPENACP_TELEGRAM_COMMAND_TAKEOVER` | — | `"1"` | Explicitly claim command synchronization from a provably stopped owner on the same host. Use for one recovery start only; it cannot steal a live or cross-host owner. |
 | `OPENACP_DISCORD_BOT_TOKEN` | `channels.discord.botToken` | string | Discord bot token |
 | `OPENACP_DISCORD_GUILD_ID` | `channels.discord.guildId` | string | Discord server (guild) ID |
 | `OPENACP_SLACK_BOT_TOKEN` | `channels.slack.botToken` | string | Slack bot OAuth token (`xoxb-...`) |
@@ -39,7 +40,7 @@ All overrides are applied before Zod schema validation, so the final config is a
 
 With the plugin architecture, channel-specific and feature-specific environment variables are now handled by individual plugins in their `setup()` method. The following variables are **plugin-level** (processed by the respective plugin, not core):
 
-- **Telegram plugin:** `OPENACP_TELEGRAM_BOT_TOKEN`, `OPENACP_TELEGRAM_CHAT_ID`
+- **Telegram plugin:** `OPENACP_TELEGRAM_BOT_TOKEN`, `OPENACP_TELEGRAM_CHAT_ID`, `OPENACP_TELEGRAM_COMMAND_TAKEOVER`
 - **Discord plugin:** `OPENACP_DISCORD_BOT_TOKEN`, `OPENACP_DISCORD_GUILD_ID`
 - **Slack plugin:** `OPENACP_SLACK_BOT_TOKEN`, `OPENACP_SLACK_APP_TOKEN`, `OPENACP_SLACK_SIGNING_SECRET`
 - **Speech plugin:** `OPENACP_SPEECH_STT_PROVIDER`, `OPENACP_SPEECH_GROQ_API_KEY`, and the `OPENACP_SPEECH_LOCAL_WHISPER_*` variables above

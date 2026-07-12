@@ -76,9 +76,23 @@ Connect messaging platforms (Telegram, Discord) to 28+ AI coding agents via ACP 
   openacp tunnel list                       List active tunnels           \x1b[2m[--json]\x1b[0m
   openacp tunnel stop <port>                Stop a tunnel                 \x1b[2m[--json]\x1b[0m
   openacp tunnel stop-all                   Stop all user tunnels         \x1b[2m[--json]\x1b[0m
-  openacp proxy status                      Show redacted proxy routing   \x1b[2m[--json]\x1b[0m
-  openacp proxy set <scope> <route>         Set a scoped proxy route
-  openacp proxy test --scope <scope>        Test a scoped route
+
+\x1b[1mProxy Management:\x1b[0m \x1b[2m(requires running daemon)\x1b[0m
+  openacp proxy status                         Profiles, routes, scopes & diagnostics  \x1b[2m[--json]\x1b[0m
+  openacp proxy create <id> --from-json <0600-file>  Create profile  \x1b[2m[--expected-revision <n>] [--json]\x1b[0m
+  openacp proxy update <id> --from-json <0600-file>  Update profile  \x1b[2m[--expected-revision <n>] [--json]\x1b[0m
+  openacp proxy import <id> --env-file <0600-file>   Import env profile  \x1b[2m[--name <label>] [--expected-revision <n>] [--json]\x1b[0m
+  openacp proxy test-candidate <id> --from-json <0600-file>  Test without saving  \x1b[2m[--json]\x1b[0m
+  openacp proxy set <scope|global> <direct|inherit|profile:id>  Set route  \x1b[2m[--json]\x1b[0m
+  openacp proxy clear <scope|global>              Clear route override  \x1b[2m[--json]\x1b[0m
+  openacp proxy test --scope <scope> [--url <url>]  Test effective route  \x1b[2m[--json]\x1b[0m
+  openacp proxy test --profile <id> [--url <url>]   Test saved profile  \x1b[2m[--json]\x1b[0m
+  openacp proxy delete <id>                        Delete profile  \x1b[2m[--reassign <route>] [--expected-revision <n>] [--json]\x1b[0m
+
+  Profile JSON/env files must be regular files with mode 0600. Credentials are
+  write-only: proxy status, command output, diagnostics, and errors never print them.
+  Quick URL JSON uses one write-only proxyUrl with an explicit port; it is mutually
+  exclusive with protocol/host/port and credential component fields.
 
 \x1b[1mDaemon API:\x1b[0m \x1b[2m(requires running daemon)\x1b[0m
   openacp api status                   Active sessions     \x1b[2m[--json]\x1b[0m

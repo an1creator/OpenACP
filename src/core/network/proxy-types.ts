@@ -6,11 +6,15 @@ export type ProxyRoute = 'direct' | 'inherit' | `profile:${string}`
 export interface ProxyProfileInput {
   id: string
   name?: string
-  protocol: ProxyProtocol
-  host: string
-  port: number
+  /** Write-only shorthand; mutually exclusive with endpoint/credential fields. */
+  proxyUrl?: string
+  protocol?: ProxyProtocol
+  host?: string
+  port?: number
   username?: string
   password?: string
+  /** Explicitly remove an existing credential record. */
+  clearCredentials?: boolean
   noProxy?: string[]
   failClosed?: boolean
 }

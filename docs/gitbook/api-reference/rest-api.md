@@ -147,6 +147,32 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/sessions
 
 ---
 
+### DELETE /api/sessions/:id
+
+Cancels fresh, idle, or running sessions. Cancellation is serialized per session,
+so concurrent requests abort and destroy the agent at most once. Repeating the
+request for a persisted terminal session is idempotent.
+
+```json
+{
+  "ok": true,
+  "sessionId": "sess_abc123",
+  "cancelled": true,
+  "previousStatus": "initializing",
+  "status": "cancelled",
+  "alreadyTerminal": false,
+  "cleanupPending": false
+}
+```
+
+The terminal record is flushed before agent/logger teardown. If teardown fails,
+the request still truthfully returns `status: "cancelled"`, plus
+`cleanupPending: true` and a safe warning. Repeating DELETE retries cleanup
+without aborting twice; the cancelled record is never resumed after restart.
+Unknown IDs return HTTP 404 with `SESSION_NOT_FOUND`.
+
+---
+
 ### GET /api/sessions/:id
 
 Returns details for a single session.
@@ -796,7 +822,9 @@ concurrency token.
 
 ### `POST /api/v1/proxy/profiles`
 
-Creates or updates a profile. `username` and `password` are write-only.
+Creates a profile. `username` and `password` are write-only.
+An existing ID returns HTTP 409 with `PROXY_PROFILE_EXISTS`; use `PUT` for
+updates.
 
 ```json
 {
@@ -811,6 +839,36 @@ Creates or updates a profile. `username` and `password` are write-only.
   "expectedRevision": 12
 }
 ```
+
+Instead of the component fields, clients may send a write-only URL:
+
+```json
+{
+  "id": "usa",
+  "name": "US proxy",
+  "proxyUrl": "socks5h://user:password@proxy.example:1080"
+}
+```
+
+`proxyUrl` is mutually exclusive with `protocol`, `host`, `port`, `username`,
+`password`, and `clearCredentials`. It must use `http`, `https`, `socks5`, or
+`socks5h`, include an explicit port, and contain no path, query, or fragment.
+The URL is parsed into the separate profile and secret stores and is never
+persisted or returned. On update, a URL without userinfo clears old credentials.
+Profile names are trimmed and must contain 1-100 non-whitespace characters;
+violations return `PROXY_VALIDATION_ERROR`.
+
+### `PUT /api/v1/proxy/profiles/:id`
+
+Updates an existing profile. The body is the same as create without `id`.
+Use `clearCredentials: true` to explicitly remove stored credentials. Missing
+profiles return HTTP 404 with `PROXY_PROFILE_NOT_FOUND`.
+
+### `POST /api/v1/proxy/profiles/test-candidate`
+
+Tests a complete unsaved profile body entirely in memory. The candidate and its
+credentials are not persisted or returned. An optional approved `targetUrl`
+uses the same SSRF restrictions as `/test`.
 
 ### `POST /api/v1/proxy/profiles/import-env`
 
@@ -834,6 +892,14 @@ An `expectedRevision` mismatch returns HTTP 409 with
 `PROXY_REVISION_CONFLICT`; read status again before retrying. Profile/route
 validation errors are HTTP 400 and a corrupt fail-closed policy store is HTTP
 503.
+
+### `DELETE /api/v1/proxy/profiles/:id`
+
+Deletes an unused profile. If routes reference it, provide a single replacement
+route in the query, for example
+`?reassign=profile%3Anext&expectedRevision=12`. Route testing, reassignment,
+secret deletion, and profile deletion are one CAS transaction; the response
+lists `reassignedScopes`.
 
 ### `POST /api/v1/proxy/test`
 

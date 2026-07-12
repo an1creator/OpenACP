@@ -1,5 +1,61 @@
 ## Unreleased
 
+## 2026.712.10 - 2026-07-12
+
+### Added
+
+- Full connector-neutral proxy profile add/edit wizard with candidate testing,
+  revision-safe save, credential clearing, pagination, and atomic route
+  reassignment during deletion. Telegram exposes it through `/proxy`, bot
+  command discovery, and the main menu.
+- Two explicit profile creation paths: quick write-only `proxyUrl` input and a
+  guided protocol/host/port/authentication flow. URL input supports HTTP, HTTPS,
+  SOCKS5, SOCKS5H, percent-encoded credentials, and bracketed IPv6 without
+  persisting or returning the source URL.
+- Protected proxy profile create/update/candidate-test CLI operations using
+  mode-0600 JSON files, plus matching REST endpoints and typed missing-profile
+  responses.
+
+### Fixed
+
+- Reconcile Telegram command discovery against the current command registry for
+  neutral, English, and Russian locales in both the default and configured-
+  supergroup scopes, including pre-existing administrator overrides. Stale
+  chat-specific lists no longer hide `/proxy`; unknown commands are preserved
+  and OpenACP removes only commands in its mode-0600 ownership ledger;
+  startup reads the authoritative registry after grammY is ready instead of
+  depending on a pre-start event, while synchronization remains idempotent,
+  retryable, and reported by `openacp doctor` without making a transient Bot API
+  failure fatal to startup.
+- Validate plugin commands before ownership or Bot API retries, preserve required
+  core commands under the deterministic 100-command limit, and enforce one
+  heartbeat-backed command-sync owner per public Telegram bot ID. Explicit
+  takeover is limited to a provably stopped same-host owner.
+- Cancel freshly created API sessions without an invalid state transition;
+  concurrent cancellation now aborts/destroys once and returns an idempotent,
+  typed API/CLI result for terminal sessions. Cancellation is flushed before
+  teardown; failed process/logger cleanup is reported as retryable without making
+  the session restorable.
+- Require explicit no-authentication selection in the proxy wizard, reject the
+  ambiguous `-` credential sentinel, and validate trimmed profile names at the
+  100-character boundary before network or persistence work.
+- Make proxy management prominent and complete in packaged CLI help, including
+  protected profile CRUD, unsaved candidate testing, scoped route operations,
+  reassignment, revision flags, and write-only credential guidance.
+- Return stable JSON envelopes for every local proxy CLI input failure and keep
+  human errors concise, without falling through to the top-level fatal stack or
+  exposing protected input paths.
+- Verify the packaged Quick URL/proxyUrl XOR and redaction contract in clean,
+  deterministic publish builds rather than checking help text alone.
+
+### Security
+
+- Bind proxy wizard drafts and follow-up input to the authenticated connector,
+  user, and conversation with bounded RAM-only TTL state and revision CAS.
+  Telegram requires a reply to the exact prompt and deletes credential messages
+  before dispatch; failed deletion discards the value and falls back to the
+  protected CLI/API path.
+
 ## 2026.712.9 - 2026-07-12
 
 ### Added

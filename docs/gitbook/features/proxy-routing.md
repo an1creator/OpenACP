@@ -65,6 +65,9 @@ the source file path.
 
 ```bash
 openacp proxy status
+chmod 600 /path/to/profile.json
+openacp proxy create usa --from-json /path/to/profile.json
+openacp proxy update usa --from-json /path/to/profile.json --expected-revision 12
 openacp proxy set global direct
 openacp proxy set channels.telegram profile:usa
 openacp proxy set agents.codex profile:usa
@@ -72,19 +75,64 @@ openacp proxy set agents.cursor direct
 openacp proxy clear agents.cursor
 openacp proxy test --scope channels.telegram
 openacp proxy test --profile usa
+openacp proxy delete usa --reassign direct --expected-revision 14
 ```
 
 In Telegram, use `/proxy`. The connector-neutral menus support profile listing,
-protected env-file import/replacement, confirmed deletion, the routing matrix,
-route selectors, and connectivity tests, so other adapters can render the same
-management model. Credentials are never accepted as chat text; import references
-a mode-0600 file already present on the host.
+full add/edit flows, a quick write-only proxy URL mode, manual endpoint setup,
+candidate testing before save, credential clearing,
+transactional deletion with route reassignment, the routing matrix, route
+selectors, and connectivity tests, so other adapters can render the same
+management model. Wizard drafts exist only in memory for ten minutes, are bound
+to the invoking connector, user, and conversation, and carry the policy revision
+used for optimistic concurrency.
 
-Viewing status and running the fixed connectivity checks is read-only. Import,
-profile deletion, and route changes require the `network:proxy:manage`
-capability in both command callbacks and REST requests. Long connector menus are
-paginated, and authorization is checked again when a button is pressed rather
-than trusted from the menu that created it.
+At startup and after plugin command changes, OpenACP reconciles Telegram's
+neutral, English, and Russian default and configured-supergroup command lists
+with the current command registry. An existing administrator-specific list is
+reconciled too, so it cannot hide `/proxy`. Unknown commands remain unmanaged;
+OpenACP removes only historical built-ins during the initial migration and
+commands recorded in its ownership ledger afterward. The mode-0600 global
+ledger is keyed by the public bot ID, a hashed chat alias, scope, and locale so
+one instance owns synchronization for each bot. A second instance fails before
+reading or changing Telegram lists; use a unique Telegram bot for every OpenACP
+instance. A stopped same-host owner can be replaced only by an explicit one-time
+`OPENACP_TELEGRAM_COMMAND_TAKEOVER=1` start, while cross-host ownership is never
+stolen. Per-member lists remain untouched. Reconciliation is idempotent, coalesced, cancellable on
+adapter stop, and non-fatal. `/doctor` checks the same effective neutral/en/ru
+scope precedence, identifies the exact stale audience, and warns about ownership
+conflicts.
+
+Before ownership or Bot API calls, OpenACP validates the complete command
+boundary. Core commands, including `/proxy`, have priority. Plugin command names
+must match `[a-z0-9_]{1,32}` and trimmed descriptions must contain 1-256
+characters. Invalid entries and deterministic overflow beyond Telegram's
+100-command limit are skipped with aggregate warnings and never enter retries or
+the ownership ledger.
+
+Telegram captures credential fields with a one-time ForceReply and deletes the
+reply before dispatching the value to the command handler. If deletion fails,
+OpenACP discards the value and points the operator to the protected CLI/API path.
+Connectors that cannot guarantee private or delete-before-dispatch input must not
+accept credential text and render that fallback instead. For non-interactive
+automation, `create`, `update`, and `test-candidate` accept a mode-0600 JSON file;
+secrets must not be placed in command-line arguments.
+
+Quick mode accepts a single `http://`, `https://`, `socks5://`, or `socks5h://`
+URL with an explicit port. Percent-encoded credentials and bracketed IPv6 are
+supported. The URL is parsed immediately into endpoint fields and the separate
+secret record; the original value is neither retained in the draft nor
+persisted. On edit, a replacement URL without credentials explicitly clears the
+old credential record. Manual mode walks through protocol, host, port, and then
+an explicit choice between no authentication and a complete non-empty
+username/password pair. The former `-` sentinel is not accepted as no-auth.
+Profile names are trimmed and must contain 1-100 characters.
+
+Viewing status and running fixed connectivity checks is read-only. Profile and
+route mutations require the `network:proxy:manage` capability in commands and
+REST. Authorization is checked again for every slash command, button callback,
+and follow-up wizard input. Long connector menus are paginated; drafts cannot be
+resumed by another member or topic.
 
 ## Runtime behavior and safety
 
@@ -130,6 +178,9 @@ than trusted from the menu that created it.
   `revision`. Send `expectedRevision` on administrative writes to prevent a stale
   dashboard or connector from overwriting a newer operator change; conflicts
   return HTTP 409.
+- A profile referenced by routes cannot simply disappear. Deletion either fails
+  with `PROXY_PROFILE_IN_USE` or tests and commits one atomic reassignment+delete
+  transaction, then retires only the transports whose resolution changed.
 
 ## Migration from global proxy wrappers
 

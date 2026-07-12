@@ -5,6 +5,15 @@ import { NotFoundError } from '../middleware/error-handler.js';
 import { requireScopes } from '../middleware/auth.js';
 import { getAgentCapabilities } from '../../../core/agents/agent-registry.js';
 
+/** Preserve env key visibility for diagnostics without exposing credential-bearing values. */
+export function redactAgentEnv<T extends { env?: Record<string, string> }>(agent: T): T {
+  if (!agent.env) return agent;
+  return {
+    ...agent,
+    env: Object.fromEntries(Object.keys(agent.env).map((key) => [key, '***'])),
+  };
+}
+
 /**
  * Agent catalog routes under `/api/v1/agents`.
  *
@@ -22,7 +31,7 @@ export async function agentRoutes(
     const agents = deps.core.agentManager.getAvailableAgents();
     const defaultAgent = deps.core.configManager.get().defaultAgent;
     const agentsWithCaps = agents.map((a) => ({
-      ...a,
+      ...redactAgentEnv(a),
       capabilities: getAgentCapabilities(a.name),
     }));
     return { agents: agentsWithCaps, default: defaultAgent };
@@ -46,7 +55,7 @@ export async function agentRoutes(
       throw new NotFoundError('AGENT_NOT_FOUND', `Agent "${name}" not found`);
     }
     return {
-      ...agent,
+      ...redactAgentEnv(agent),
       key: name,
       capabilities: getAgentCapabilities(name),
     };

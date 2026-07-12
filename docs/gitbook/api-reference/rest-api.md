@@ -364,12 +364,15 @@ Lists agents configured in the daemon.
       "name": "claude",
       "command": "claude-agent-acp",
       "args": [],
+      "env": { "HTTP_PROXY": "***" },
       "capabilities": { "integration": "claude" }
     }
   ],
   "default": "claude"
 }
 ```
+
+Agent environment variable names remain visible for diagnostics, but every value is redacted to `"***"`. The same rule applies to `GET /api/agents/:name` and `POST /api/agents/reload`.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/agents

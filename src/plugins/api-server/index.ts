@@ -1,7 +1,6 @@
 import * as fs from 'node:fs'
 import * as crypto from 'node:crypto'
 import * as path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import type { OpenACPPlugin, InstallContext } from '../../core/plugin/types.js'
 import type { OpenACPCore } from '../../core/core.js'
 import { BusEvent } from '../../core/events.js'
@@ -11,6 +10,7 @@ import type { ContextManager } from '../context/context-manager.js'
 import type { ApiServerInstance } from './server.js'
 import type { RouteDeps } from './routes/types.js'
 import { createChildLogger } from '../../core/utils/log.js'
+import { getCurrentVersion } from '../../cli/version.js'
 
 const log = createChildLogger({ module: 'api-server' })
 
@@ -21,14 +21,7 @@ let cachedVersion: string | undefined
 /** Reads the package.json version once and caches it for the lifetime of the process. */
 function getVersion(): string {
   if (cachedVersion) return cachedVersion
-  try {
-    const __filename = fileURLToPath(import.meta.url)
-    const pkgPath = path.resolve(path.dirname(__filename), '../../../package.json')
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))
-    cachedVersion = pkg.version ?? '0.0.0-dev'
-  } catch {
-    cachedVersion = '0.0.0-dev'
-  }
+  cachedVersion = getCurrentVersion()
   return cachedVersion!
 }
 

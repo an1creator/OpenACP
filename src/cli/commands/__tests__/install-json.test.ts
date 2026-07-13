@@ -10,7 +10,19 @@ vi.mock('node:child_process', async (importOriginal) => {
     ...actual,
     execSync: vi.fn(),
     execFileSync: vi.fn(),
-    execFile: vi.fn((_cmd: unknown, _args: unknown, _opts: unknown, cb: (err: null, stdout: string, stderr: string) => void) => {
+    execFile: vi.fn((_cmd: unknown, rawArgs: unknown, _opts: unknown, cb: (err: null, stdout: string, stderr: string) => void) => {
+      const args = rawArgs as string[]
+      const prefix = args[args.indexOf('--prefix') + 1]
+      const spec = args[1]
+      const scopedVersionAt = spec.startsWith('@') ? spec.indexOf('@', spec.indexOf('/') + 1) : -1
+      const packageName = spec.startsWith('@')
+        ? scopedVersionAt === -1 ? spec : spec.slice(0, scopedVersionAt)
+        : spec.split('@')[0]
+      const packageDir = path.join(prefix, 'node_modules', ...packageName.split('/'))
+      fs.mkdirSync(packageDir, { recursive: true })
+      fs.writeFileSync(path.join(prefix, 'package.json'), JSON.stringify({ private: true, dependencies: { [packageName]: '1.0.0' } }))
+      fs.writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ name: packageName, version: '1.0.0', type: 'module', main: 'index.js' }))
+      fs.writeFileSync(path.join(packageDir, 'index.js'), `export default { name: ${JSON.stringify(packageName)}, version: '1.0.0', setup: async () => {}, install: async () => {} }`)
       cb(null, '', '')
       return {} as any
     }),
@@ -53,7 +65,7 @@ describe('install --json', () => {
     const result = await captureJsonOutput(async () => {
       await cmdInstall(['@test/plugin', '--json'], tmpDir)
     })
-    expect(result.exitCode).toBe(0)
+    expect(result.exitCode, result.stdout).toBe(0)
     const data = expectValidJsonSuccess(result.stdout)
     expect(data).toHaveProperty('plugin', '@test/plugin')
     expect(data).toHaveProperty('installed', true)

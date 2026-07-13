@@ -136,7 +136,7 @@ export class ProxyService {
     'channels.default', 'channels.telegram',
     'agents.default', 'agents.codex', 'agents.cursor',
     'services.default', 'services.npmUpdate', 'services.agentRegistry',
-    'services.pluginInstaller', 'services.speechDownloads',
+    'services.pluginInstaller', 'services.speech', 'services.speechDownloads',
     'plugins.default',
   ])
   private readonly testers = new Map<string, RouteTester>()

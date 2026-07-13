@@ -7,9 +7,31 @@ import type { OpenACPPlugin, EventBus, Logger, MigrateContext } from './types.js
 import type { SettingsManager } from './settings-manager.js'
 import type { PluginRegistry } from './plugin-registry.js'
 import { BusEvent } from '../events.js'
+import { recoverPluginInstallTransaction, PluginInstallError } from './plugin-installer.js'
+import fs from 'node:fs'
+import path from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
 
 const SETUP_TIMEOUT_MS = 30_000   // plugin.setup() must complete within 30s
 const TEARDOWN_TIMEOUT_MS = 10_000 // plugin.teardown() must complete within 10s
+
+function migrationGuardPath(instanceRoot: string, pluginName: string): string {
+  return path.join(instanceRoot, 'plugin-migration-quarantine', `${createHash('sha256').update(pluginName).digest('hex')}.json`)
+}
+
+function writeMigrationGuard(instanceRoot: string, pluginName: string, fromVersion: string, toVersion: string): string {
+  const guardPath = migrationGuardPath(instanceRoot, pluginName)
+  const directory = path.dirname(guardPath)
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); fs.chmodSync(directory, 0o700)
+  const temporary = `${guardPath}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify({ version: 1, pluginName, fromVersion, toVersion, createdAt: new Date().toISOString() }, null, 2)}\n`, { flag: 'wx', mode: 0o600 })
+    const fd = fs.openSync(temporary, 'r'); fs.fsyncSync(fd); fs.closeSync(fd)
+    fs.renameSync(temporary, guardPath); fs.chmodSync(guardPath, 0o600)
+    try { const dir = fs.openSync(directory, 'r'); fs.fsyncSync(dir); fs.closeSync(dir) } catch {}
+  } finally { try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary) } catch {} }
+  return guardPath
+}
 
 /** Wraps a promise with a timeout; rejects if the promise doesn't settle in `ms` milliseconds. */
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -111,6 +133,8 @@ export class LifecycleManager {
   settingsManager: SettingsManager | undefined
   private pluginRegistry: PluginRegistry | undefined
   private _instanceRoot: string | undefined
+  private installRecoveryChecked = false
+  private communityRecoveryError: string | undefined
 
   private contexts = new Map<string, ReturnType<typeof createPluginContext>>()
   private loadOrder: OpenACPPlugin[] = []
@@ -175,6 +199,18 @@ export class LifecycleManager {
    * Already-loaded plugins are included in dependency resolution but not re-booted.
    */
   async boot(plugins: OpenACPPlugin[]): Promise<void> {
+    if (!this.installRecoveryChecked && this._instanceRoot && this.pluginRegistry) {
+      this.installRecoveryChecked = true
+      try {
+        await recoverPluginInstallTransaction(this._instanceRoot)
+        await this.pluginRegistry.load()
+      } catch (error) {
+        const code = error instanceof PluginInstallError ? error.code : 'PLUGIN_RECOVERY_FAILED'
+        this.communityRecoveryError = `${code}: Community plugin transaction recovery did not complete; community plugins are quarantined until recovery succeeds.`
+        this.log?.error(this.communityRecoveryError)
+      }
+    }
+
     // Resolve load order via topological sort.
     // resolveLoadOrder will skip plugins whose dependencies are missing entirely
     // (not present in the input list). But we also need to handle runtime setup failures.
@@ -223,6 +259,18 @@ export class LifecycleManager {
 
       // Check if disabled in registry
       const registryEntry = this.pluginRegistry?.get(plugin.name)
+      if (registryEntry && registryEntry.source !== 'builtin' && this.communityRecoveryError) {
+        this._failed.add(plugin.name)
+        this.eventBus?.emit(BusEvent.PLUGIN_FAILED, { name: plugin.name, code: 'PLUGIN_RECOVERY_FAILED', error: this.communityRecoveryError })
+        continue
+      }
+      if (this._instanceRoot && fs.existsSync(migrationGuardPath(this._instanceRoot, plugin.name))) {
+        const status = `PLUGIN_MIGRATION_ROLLBACK_FAILED: ${plugin.name} has a durable migration quarantine marker. Repair or restore its settings and registry entry, then remove the marker before re-enabling it.`
+        this._failed.add(plugin.name)
+        this.getPluginLogger(plugin.name).error(status)
+        this.eventBus?.emit(BusEvent.PLUGIN_FAILED, { name: plugin.name, code: 'PLUGIN_MIGRATION_ROLLBACK_FAILED', error: status })
+        continue
+      }
       if (registryEntry && registryEntry.enabled === false) {
         this.eventBus?.emit(BusEvent.PLUGIN_DISABLED, { name: plugin.name })
         continue
@@ -230,8 +278,12 @@ export class LifecycleManager {
 
       // Check version mismatch → migrate
       if (registryEntry && plugin.migrate && registryEntry.version !== plugin.version && this.settingsManager) {
+        const oldSettings = structuredClone(await this.settingsManager.loadSettings(plugin.name))
+        const oldRegistryEntry = structuredClone(registryEntry)
+        const migrationGuard = this._instanceRoot
+          ? writeMigrationGuard(this._instanceRoot, plugin.name, registryEntry.version, plugin.version)
+          : undefined
         try {
-          const oldSettings = await this.settingsManager.loadSettings(plugin.name)
           const pluginLog = this.getPluginLogger(plugin.name)
           const migrateCtx: MigrateContext = {
             pluginName: plugin.name,
@@ -243,13 +295,34 @@ export class LifecycleManager {
             SETUP_TIMEOUT_MS,
             `${plugin.name}.migrate()`,
           )
-          if (newSettings && typeof newSettings === 'object') {
-            await migrateCtx.settings.setAll(newSettings as Record<string, unknown>)
+          const migratedSettings = newSettings && typeof newSettings === 'object'
+            ? newSettings as Record<string, unknown>
+            : await migrateCtx.settings.getAll()
+          if (plugin.settingsSchema) {
+            const validation = this.settingsManager.validateSettings(plugin.name, migratedSettings, plugin.settingsSchema)
+            if (!validation.valid) throw new Error(`migrated settings invalid: ${validation.errors?.join('; ')}`)
           }
+          await migrateCtx.settings.setAll(migratedSettings)
           this.pluginRegistry!.updateVersion(plugin.name, plugin.version)
           await this.pluginRegistry!.save()
-        } catch (err) {
-          this.getPluginLogger(plugin.name).warn(`Migration failed, continuing with old settings: ${err}`)
+          if (migrationGuard) fs.rmSync(migrationGuard, { force: true })
+        } catch {
+          let settingsRestored = true
+          try { await this.settingsManager.createAPI(plugin.name).setAll(oldSettings) } catch { settingsRestored = false }
+          this.pluginRegistry!.restore(plugin.name, oldRegistryEntry)
+          let registryRestored = true
+          try { await this.pluginRegistry!.save() } catch { registryRestored = false }
+          if (settingsRestored && registryRestored && migrationGuard) fs.rmSync(migrationGuard, { force: true })
+          this._failed.add(plugin.name)
+          const rollbackComplete = settingsRestored && registryRestored
+          const code = rollbackComplete ? 'PLUGIN_MIGRATION_FAILED' : 'PLUGIN_MIGRATION_ROLLBACK_FAILED'
+          const recovery = rollbackComplete
+            ? 'the exact previous registry entry and settings were restored'
+            : 'rollback persistence was incomplete and the durable migration quarantine remains in place'
+          const status = `${code}: ${plugin.name} migration ${oldRegistryEntry.version} → ${plugin.version} failed; ${recovery}. Fix the migration/settings before retrying.`
+          this.getPluginLogger(plugin.name).error(status)
+          this.eventBus?.emit(BusEvent.PLUGIN_FAILED, { name: plugin.name, code, error: status })
+          continue
         }
       }
 

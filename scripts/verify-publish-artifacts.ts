@@ -67,8 +67,57 @@ function build(): void {
   execFileSync('pnpm', ['build:publish'], { cwd: root, stdio: 'inherit' })
 }
 
+function exactKeys(value: Record<string, unknown>, expected: string[], label: string): void {
+  if (Object.keys(value).sort().join(',') !== [...expected].sort().join(',')) throw new Error(`${label} has unexpected fields`)
+}
+
+function assertPluginCatalog(value: unknown): asserts value is { pluginCount: number; plugins: unknown[] } {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Plugin catalog root is invalid')
+  const catalog = value as Record<string, unknown>
+  exactKeys(catalog, ['version', 'generatedAt', 'pluginCount', 'plugins', 'categories'], 'Plugin catalog')
+  if (!Number.isInteger(catalog.version) || Number(catalog.version) < 1 || typeof catalog.generatedAt !== 'string'
+    || !Number.isInteger(catalog.pluginCount) || Number(catalog.pluginCount) < 0
+    || !Array.isArray(catalog.plugins) || !Array.isArray(catalog.categories)
+    || catalog.pluginCount !== catalog.plugins.length) throw new Error('Plugin catalog schema is invalid')
+  for (const [index, raw] of catalog.plugins.entries()) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`Plugin catalog entry ${index} is invalid`)
+    const plugin = raw as Record<string, unknown>
+    exactKeys(plugin, ['name', 'displayName', 'description', 'npm', 'version', 'minCliVersion', 'category', 'tags', 'icon', 'author', 'repository', 'license', 'verified', 'featured'].filter((key) => key !== 'displayName' || key in plugin), `Plugin catalog entry ${index}`)
+    for (const key of ['name', 'description', 'npm', 'version', 'minCliVersion', 'category', 'icon', 'author', 'repository', 'license']) if (typeof plugin[key] !== 'string') throw new Error(`Plugin catalog entry ${index}.${key} is invalid`)
+    if (!Array.isArray(plugin.tags) || plugin.tags.some((tag) => typeof tag !== 'string') || typeof plugin.verified !== 'boolean' || typeof plugin.featured !== 'boolean') throw new Error(`Plugin catalog entry ${index} types are invalid`)
+  }
+  for (const [index, raw] of catalog.categories.entries()) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`Plugin catalog category ${index} is invalid`)
+    const category = raw as Record<string, unknown>
+    exactKeys(category, ['id', 'name', 'icon'], `Plugin catalog category ${index}`)
+    if (Object.values(category).some((item) => typeof item !== 'string')) throw new Error(`Plugin catalog category ${index} types are invalid`)
+  }
+}
+
+function assertRetiredSurfaceAbsent(): void {
+  const bad = /raw\.githubusercontent\.com\/Open-ACP\/plugin-registry|github\.com\/Open-ACP\/plugin-registry|\btwitter\.com\b|\bx\.com\b|openacp_ai|follow us on|social badge/i
+  for (const publishRoot of publishDirs) {
+    for (const relative of filesBelow(path.join(root, publishRoot))) {
+      if (!/\.(?:js|map|d\.ts|md|json)$/.test(relative)) continue
+      const content = fs.readFileSync(path.join(root, publishRoot, relative), 'utf8')
+      if (bad.test(content)) throw new Error(`Packaged textual surface contains a retired registry/social reference: ${publishRoot}/${relative}`)
+    }
+  }
+}
+
 async function assertPackagedProxyContract(): Promise<void> {
   const cli = path.join(root, 'dist-publish', 'dist', 'cli.js')
+  const packagedReadme = fs.readFileSync(path.join(root, 'dist-publish', 'README.md'), 'utf8')
+  if (packagedReadme !== fs.readFileSync(path.join(root, 'README.md'), 'utf8')) throw new Error('Packaged README differs from source')
+  if (/\b(?:twitter\.com|x\.com)\b|follow us|social badge/i.test(packagedReadme)) {
+    throw new Error('Packaged README contains a retired Twitter/X or social-follow claim')
+  }
+  const sourceCatalog = fs.readFileSync(path.join(root, 'src', 'data', 'plugin-catalog.json'))
+  const packagedCatalog = fs.readFileSync(path.join(root, 'dist-publish', 'dist', 'data', 'plugin-catalog.json'))
+  if (!sourceCatalog.equals(packagedCatalog)) throw new Error('Packaged plugin catalog differs byte-for-byte from source')
+  assertPluginCatalog(JSON.parse(packagedCatalog.toString('utf8')))
+  if (createHash('sha256').update(sourceCatalog).digest('hex') !== createHash('sha256').update(packagedCatalog).digest('hex')) throw new Error('Packaged plugin catalog SHA-256 mismatch')
+  assertRetiredSurfaceAbsent()
   const workspace = fs.mkdtempSync(path.join(root, '.verify-proxy-help-'))
   const env = { ...process.env, HOME: workspace, OPENACP_HOME: workspace }
   try {

@@ -1,6 +1,3 @@
-import { execSync } from 'node:child_process'
-import * as fs from 'node:fs'
-import * as path from 'node:path'
 import { wantsHelp } from './helpers.js'
 import { isJsonMode, jsonSuccess, jsonError, muteForJson, ErrorCodes } from '../output.js'
 
@@ -12,9 +9,6 @@ import { isJsonMode, jsonSuccess, jsonError, muteForJson, ErrorCodes } from '../
 export async function cmdUninstall(args: string[], instanceRoot?: string): Promise<void> {
   const json = isJsonMode(args)
   if (json) await muteForJson()
-
-  const root = instanceRoot!
-  const pluginsDir = path.join(root, 'plugins')
 
   if (!json && wantsHelp(args)) {
     console.log(`
@@ -43,19 +37,14 @@ export async function cmdUninstall(args: string[], instanceRoot?: string): Promi
     process.exit(1)
   }
 
-  fs.mkdirSync(pluginsDir, { recursive: true })
-  const pkgPath = path.join(pluginsDir, 'package.json')
-  if (!fs.existsSync(pkgPath)) {
-    fs.writeFileSync(pkgPath, JSON.stringify({ name: 'openacp-plugins', private: true, dependencies: {} }, null, 2))
+  const path = await import('node:path')
+  const { PluginRegistry } = await import('../../core/plugin/plugin-registry.js')
+  const registry = new PluginRegistry(path.join(instanceRoot!, 'plugins.json'))
+  await registry.load()
+  if (registry.get(pkg)) {
+    registry.remove(pkg)
+    await registry.save()
   }
-
-  if (!json) console.log(`Uninstalling ${pkg}...`)
-  try {
-    execSync(`npm uninstall ${pkg} --prefix "${pluginsDir}"`, { stdio: json ? 'pipe' : 'inherit' })
-  } catch (err) {
-    if (json) jsonError(ErrorCodes.UNINSTALL_FAILED, `Failed to uninstall ${pkg}`)
-    process.exit(1)
-  }
-  if (json) jsonSuccess({ plugin: pkg, uninstalled: true })
-  console.log(`Plugin ${pkg} uninstalled.`)
+  if (json) jsonSuccess({ plugin: pkg, uninstalled: true, packageTreeRetained: true, restartRequired: true })
+  if (!json) console.log('Shared npm package files are retained until a coordinated package-tree maintenance transaction; restart OpenACP to apply removal.')
 }

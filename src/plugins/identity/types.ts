@@ -26,9 +26,9 @@ export function parseIdentityId(id: IdentityId): { source: string; platformId: s
 
 /** Access level within the system. Blocked users are denied all operations. */
 export type UserRole = 'admin' | 'member' | 'viewer' | 'blocked'
-export type IdentityCapability = 'network:proxy:manage'
+export type IdentityCapability = 'network:proxy:manage' | 'speech:manage'
 export function hasIdentityCapability(role: UserRole, capability: IdentityCapability): boolean {
-  return role === 'admin' && capability === 'network:proxy:manage'
+  return role === 'admin' && (capability === 'network:proxy:manage' || capability === 'speech:manage')
 }
 
 /**

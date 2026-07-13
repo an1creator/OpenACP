@@ -25,7 +25,7 @@ The agent then receives the transcription as a normal text prompt. If the agent 
 
 ### Configuring STT
 
-Use `/settings` in Telegram or the plugin settings API and select `local-whisper`. The equivalent persisted settings for the built-in `@openacp/speech` plugin are:
+Open **Settings → Speech-to-Text** or run `/speech` on any connector that renders OpenACP commands. This is one connector-neutral command/config boundary backed by the existing `@openacp/speech` service; Telegram does not maintain a separate STT configuration. Select `local-whisper` for local transcription. The equivalent persisted settings are:
 
 ```json
 {
@@ -40,13 +40,20 @@ Use `/settings` in Telegram or the plugin settings API and select `local-whisper
 }
 ```
 
-For Groq, select `groq` and set `groqApiKey`. The older behavior remains compatible: when a Groq key exists and `sttProvider` is unset, OpenACP activates Groq automatically.
+The interface exposes provider status plus language, model, beam size, VAD, device, compute type, and timeout. Changes apply immediately and preserve separately registered TTS providers.
 
-Advanced installations can set `localWhisperScriptPath` to a custom executable. Leave it unset to use the runtime bundled in `@n1creator/openacp-cli`.
+For Groq, add or replace the API key through the write-only secure-input flow, then select `groq`. Reviews show only whether a key is configured. Clearing the key deletes it and turns Groq off when active. The older behavior remains compatible: when a Groq key exists and `sttProvider` was never set, OpenACP activates Groq automatically; an explicit **Off** selection remains off.
+
+Speech settings require an administrator identity with `speech:manage`. Missing identity information and non-admin members fail closed before status or settings are read. Connectors that cannot guarantee private or delete-after-capture input must use protected host configuration instead of accepting a key in chat.
+
+`localWhisperScriptPath` is a host-only advanced executable boundary and is not
+editable through `/speech` or connector callbacks. Set it only through the
+protected settings file or `OPENACP_SPEECH_LOCAL_WHISPER_SCRIPT_PATH` on the
+host. Leave it unset to use the runtime bundled in `@n1creator/openacp-cli`.
 
 ### STT error handling
 
-If transcription fails, the audio attachment is kept and passed to the agent as-is, with an error message in the topic. For local STT, check that Python can create virtual environments and that the first-run dependency/model download has network access. For Groq, check the API key, rate limit, and network access.
+If transcription fails, the audio attachment is kept and passed to the agent as-is, with an error message in the topic. For local STT, check that Python can create virtual environments and that the first-run dependency/model download has network access through `services.speechDownloads`. Groq requests use the independent `services.speech` route; also check the API key and rate limit.
 
 ## Text-to-speech (TTS)
 

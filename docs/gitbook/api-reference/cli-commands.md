@@ -541,7 +541,10 @@ See [Getting Started: Your First Plugin](../extending/getting-started-plugin.md)
 
 ## plugin install
 
-Installs a plugin package. Works with both built-in plugins and community plugins published to npm. Supports `@version` syntax to pin a specific version. After npm install, checks the plugin's `engines.openacp` field and warns if the installed CLI version is older than the minimum required.
+Installs a built-in or community plugin published to npm. Supports `@version`
+syntax to pin a specific version. Community packages are fully staged and must
+export a matching OpenACP plugin with `setup()` and an explicit `install()`
+hook before live packages or the installed registry are changed.
 
 **Usage**
 ```
@@ -566,7 +569,18 @@ openacp plugin add @openacp/adapter-discord --json
 { "plugin": "@openacp/adapter-discord", "version": "1.0.0", "installed": true }
 ```
 
-Community plugins are installed via `npm install` into `<instance-root>/plugins/node_modules/`. The plugin's `install()` hook is called if defined.
+Community plugins are installed via `npm install --ignore-scripts` into `<instance-root>/plugins/node_modules/`. The OpenACP plugin's explicit `install()` hook is called after the package is loaded.
+
+## plugin search
+
+Searches the deterministic offline plugin catalog packaged with the current
+release. It never performs a catalog network request. An empty result is not an
+npm-wide search and does not prevent direct installation by full package name.
+
+**Usage**
+```
+openacp plugin search <query> [--json]
+```
 
 ---
 
@@ -957,7 +971,9 @@ openacp tunnel stop-all [--json]
 
 ## uninstall
 
-Removes an adapter plugin.
+Removes an adapter plugin from the instance registry. Restart OpenACP to apply
+the change. The shared npm package tree is retained until coordinated package
+maintenance, so this command never races module code loaded by the daemon.
 
 **Usage**
 ```
@@ -975,7 +991,7 @@ openacp uninstall @openacp/adapter-discord --json
 
 **JSON output** (`data` shape):
 ```json
-{ "plugin": "@openacp/adapter-discord", "uninstalled": true }
+{ "plugin": "@openacp/adapter-discord", "uninstalled": true, "packageTreeRetained": true, "restartRequired": true }
 ```
 
 ---

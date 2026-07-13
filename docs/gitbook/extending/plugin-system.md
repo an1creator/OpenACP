@@ -24,7 +24,24 @@ Plugins can:
 openacp plugin install @community/my-plugin
 ```
 
-If the plugin has `essential: true`, its interactive `install()` hook runs immediately. Otherwise, it's registered and available on next restart.
+Community packages are installed into a complete staging tree with npm lifecycle
+scripts disabled. OpenACP validates the default export, matching package/plugin
+name and version, `setup()`, and an explicit `install()` hook before the hook is
+run or live packages are swapped. Import, validation, hook, activation, or
+registry failure restores the previous package tree, settings, and registry
+entry. A cross-process lock and durable phase journal make the same guarantee
+across daemon termination or host restart: startup rolls back work before the
+registry commit and completes activation after it. A corrupt or unverifiable
+transaction quarantines community plugins while built-ins continue to start.
+A successful install becomes active on restart.
+
+OpenACP does not mutate the shared npm plugin tree from a running plugin or chat
+command. If a runtime feature reports that a provider is missing, run
+`openacp plugin install <package>` and restart OpenACP. Registry removal is also
+restart-required and currently retains shared npm package files; this avoids
+racing code that the daemon has already loaded.
+
+OpenACP ships a deterministic offline plugin catalog with each release. `openacp plugin search` searches only entries the maintained package can promise; the catalog may be empty. A full npm package name can always be installed directly. Catalog lookup never performs a network request.
 
 ## Listing Plugins
 
@@ -90,3 +107,4 @@ interface OpenACPPlugin {
 - [Architecture > Built-in Plugins](../architecture/built-in-plugins.md) -- reference for all 11 built-in plugins
 - [Architecture > Command System](../architecture/command-system.md) -- how chat commands work
 - [Building Adapters](building-adapters.md) -- building adapter plugins specifically
+- [ADR 0007](../../adr/0007-crash-consistent-plugin-transactions.md) -- crash-consistent install and migration boundaries

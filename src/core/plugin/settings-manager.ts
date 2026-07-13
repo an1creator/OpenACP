@@ -1,7 +1,52 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import type { SettingsAPI } from './types.js'
 import type { ZodSchema } from 'zod'
+
+function secureSettingsDirectory(directory: string): void {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
+  fs.chmodSync(directory, 0o700)
+}
+
+function secureSettingsTree(basePath: string, settingsPath: string, create: boolean): void {
+  const target = path.dirname(settingsPath)
+  const relative = path.relative(basePath, target)
+  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Settings path escapes its base directory')
+  // The security boundary starts at basePath itself, not only its descendants.
+  secureSettingsDirectory(basePath)
+  let current = basePath
+  for (const segment of relative ? relative.split(path.sep) : []) {
+    current = path.join(current, segment)
+    if (create || fs.existsSync(current)) secureSettingsDirectory(current)
+  }
+}
+
+function repairSettingsPermissions(settingsPath: string, basePath: string): void {
+  if (!fs.existsSync(settingsPath)) return
+  secureSettingsTree(basePath, settingsPath, false)
+  fs.chmodSync(settingsPath, 0o600)
+}
+
+function atomicSettingsWrite(settingsPath: string, basePath: string, data: Record<string, unknown>): void {
+  const directory = path.dirname(settingsPath)
+  secureSettingsTree(basePath, settingsPath, true)
+  const temporary = `${settingsPath}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    fs.writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+    fs.chmodSync(temporary, 0o600)
+    const fd = fs.openSync(temporary, 'r')
+    try { fs.fsyncSync(fd) } finally { fs.closeSync(fd) }
+    fs.renameSync(temporary, settingsPath)
+    fs.chmodSync(settingsPath, 0o600)
+    try {
+      const directoryFd = fs.openSync(directory, 'r')
+      try { fs.fsyncSync(directoryFd) } finally { fs.closeSync(directoryFd) }
+    } catch { /* directory fsync is unsupported on some platforms */ }
+  } finally {
+    try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary) } catch { /* best effort cleanup */ }
+  }
+}
 
 /** Result of validating plugin settings against a Zod schema. */
 export interface ValidationResult {
@@ -18,7 +63,9 @@ export interface ValidationResult {
  * configuration, while storage is internal plugin state.
  */
 export class SettingsManager {
-  constructor(private basePath: string) {}
+  constructor(private basePath: string) {
+    secureSettingsDirectory(basePath)
+  }
 
   /** Returns the base path for all plugin settings directories. */
   getBasePath(): string {
@@ -28,12 +75,15 @@ export class SettingsManager {
   /** Create a SettingsAPI instance scoped to a specific plugin. */
   createAPI(pluginName: string): SettingsAPI {
     const settingsPath = this.getSettingsPath(pluginName)
-    return new SettingsAPIImpl(settingsPath)
+    return new SettingsAPIImpl(settingsPath, this.basePath)
   }
 
   /** Load a plugin's settings from disk. Returns empty object if file doesn't exist. */
   async loadSettings(pluginName: string): Promise<Record<string, unknown>> {
     const settingsPath = this.getSettingsPath(pluginName)
+    secureSettingsDirectory(this.basePath)
+    if (!fs.existsSync(settingsPath)) return {}
+    repairSettingsPermissions(settingsPath, this.basePath)
     try {
       const content = fs.readFileSync(settingsPath, 'utf-8')
       return JSON.parse(content)
@@ -84,10 +134,12 @@ export class SettingsManager {
 class SettingsAPIImpl implements SettingsAPI {
   private cache: Record<string, unknown> | null = null
 
-  constructor(private settingsPath: string) {}
+  constructor(private settingsPath: string, private basePath: string) {}
 
   private readFile(): Record<string, unknown> {
     if (this.cache !== null) return this.cache
+    secureSettingsDirectory(this.basePath)
+    if (fs.existsSync(this.settingsPath)) repairSettingsPermissions(this.settingsPath, this.basePath)
     try {
       const content = fs.readFileSync(this.settingsPath, 'utf-8')
       this.cache = JSON.parse(content)
@@ -99,9 +151,7 @@ class SettingsAPIImpl implements SettingsAPI {
   }
 
   private writeFile(data: Record<string, unknown>): void {
-    const dir = path.dirname(this.settingsPath)
-    fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(this.settingsPath, JSON.stringify(data, null, 2))
+    atomicSettingsWrite(this.settingsPath, this.basePath, data)
     this.cache = data
   }
 

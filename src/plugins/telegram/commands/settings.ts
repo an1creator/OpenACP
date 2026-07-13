@@ -33,6 +33,7 @@ async function buildSettingsKeyboard(core: OpenACPCore): Promise<InlineKeyboard>
 
   // Reuse the connector-neutral command renderer instead of duplicating proxy menus here.
   kb.text("🌐 Proxy Management", settingsCommandCallback("/proxy")).row();
+  kb.text("🎙 Speech-to-Text", settingsCommandCallback("/speech")).row();
   kb.text("◀️ Back to Menu", "s:back");
   return kb;
 }
@@ -70,9 +71,8 @@ export async function handleSettings(ctx: Context, core: OpenACPCore): Promise<v
  * handler delegates to the assistant session so the user can type a value
  * conversationally rather than using a keyboard.
  *
- * STT provider selection (`s:pick:speech.stt.provider`) checks whether an
- * API key is already configured; if not, it redirects to the assistant to
- * collect the key before applying the change.
+ * Speech-to-text has its own connector-neutral command surface and is linked
+ * from this menu rather than being implemented as Telegram-only callbacks.
  */
 export function setupSettingsCallbacks(
   bot: Bot,
@@ -136,32 +136,6 @@ export function setupSettingsCallbacks(
     if (!fieldDef) return;
 
     try {
-      // For speech.stt.provider: check if the selected provider has an API key configured
-      if (fieldPath === 'speech.stt.provider') {
-        const sm = core.settingsManager;
-        let hasApiKey = false;
-        if (sm) {
-          const speechSettings = await sm.loadSettings('@openacp/speech');
-          hasApiKey = !!(speechSettings.groqApiKey as string);
-        } else {
-          // speech config migrated to plugin settings; no API key available without settingsManager
-          hasApiKey = false;
-        }
-        if (!hasApiKey) {
-          // No API key — delegate to assistant to collect it
-          const assistant = getAssistantSession();
-          if (assistant) {
-            try { await ctx.answerCallbackQuery({ text: `🔑 API key needed — check Assistant topic` }); } catch { /* expired */ }
-            const prompt = `User wants to enable ${newValue} as Speech-to-Text provider, but no API key is configured yet. Guide them to get a ${newValue} API key and set it up. After they provide the key, run both commands: \`openacp config set speech.stt.providers.${newValue}.apiKey <key>\` and \`openacp config set speech.stt.provider ${newValue}\``;
-            await assistant.enqueuePrompt(prompt);
-            return;
-          }
-          // No assistant — just warn
-          try { await ctx.answerCallbackQuery({ text: `⚠️ Set API key first: openacp config set speech.stt.providers.${newValue}.apiKey <key>` }); } catch { /* expired */ }
-          return;
-        }
-      }
-
       await setFieldValueAsync(fieldDef, newValue, core.configManager);
 
       try { await ctx.answerCallbackQuery({ text: `✅ ${fieldPath} = ${newValue}` }); } catch { /* expired */ }

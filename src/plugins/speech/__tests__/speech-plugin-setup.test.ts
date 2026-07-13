@@ -4,6 +4,7 @@ import type { SpeechService } from "../speech-service.js";
 
 function makePluginCtx(overrides: {
   pluginConfig?: Record<string, unknown>
+  core?: unknown
 }) {
   let registeredService: SpeechService | undefined;
 
@@ -14,7 +15,7 @@ function makePluginCtx(overrides: {
     registerCommand: vi.fn(),
     registerEditableFields: vi.fn(),
     log: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
-    core: undefined,
+    core: overrides.core,
     sessions: undefined,
   } as any;
 
@@ -57,5 +58,26 @@ describe("speech plugin setup()", () => {
         expect.objectContaining({ key: 'localWhisperModel', hotReload: true }),
       ]),
     );
+    expect(ctx.registerEditableFields).toHaveBeenCalledWith(
+      expect.not.arrayContaining([expect.objectContaining({ key: 'localWhisperScriptPath' })]),
+    );
   });
+
+  it('keeps Groq requests separate from local runtime/model downloads', async () => {
+    const createFetch = vi.fn(() => globalThis.fetch)
+    const buildChildEnv = vi.fn(() => ({}))
+    const { ctx } = makePluginCtx({
+      pluginConfig: { sttProvider: 'groq', groqApiKey: 'gsk_test' },
+      core: {
+        proxyService: { createFetch, buildChildEnv },
+        lifecycleManager: { serviceRegistry: { get: vi.fn() } },
+      },
+    })
+
+    await speechPlugin.setup!(ctx)
+
+    expect(createFetch).toHaveBeenCalledWith('services.speech')
+    expect(buildChildEnv).not.toHaveBeenCalled()
+    expect(ctx.registerCommand).toHaveBeenCalledWith(expect.objectContaining({ name: 'speech' }))
+  })
 });

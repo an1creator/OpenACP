@@ -24,7 +24,9 @@ Built-in scopes include:
 - `channels.telegram` and `channels.default`
 - `agents.<name>` and `agents.default`
 - `services.npmUpdate`, `services.agentRegistry`,
-  `services.pluginInstaller`, `services.speechDownloads`, and `services.default`
+  `services.pluginInstaller`, `services.speech`, `services.speechDownloads`, and
+  `services.default`; Groq inherits `services.default` unless
+  `services.speech` has an exact route
 - `plugins.default`; plugins can register additional `plugins.<name>.<flow>`
   scopes through the core `proxy` service
 
@@ -148,10 +150,10 @@ are paginated; drafts cannot be resumed by another member or topic.
 - Telegram `/update`, `openacp update`, and interactive pre-start update checks
   use `services.npmUpdate` for both registry requests and npm child processes
   whenever an instance root is available.
-- ACP registry refresh and binary downloads use `services.agentRegistry`;
-  plugin registry and npm plugin installs (including `/tts install`) use
-  `services.pluginInstaller`; Whisper environment/pip/model downloads and Groq
-  STT requests use `services.speechDownloads`.
+- ACP registry refresh and binary downloads use `services.agentRegistry`.
+  The plugin catalog is packaged and always offline; npm plugin installs
+  (including `/tts install`) use `services.pluginInstaller`. Whisper environment/pip/model downloads use
+  `services.speechDownloads`, while Groq STT requests use `services.speech`.
 - A Telegram-affecting exact, category, global, or profile edit is tested with
   `getMe` before persistence. A failed test leaves the old route and transport.
 - HTTP/HTTPS agent routes set standard upper/lowercase proxy variables,
@@ -174,8 +176,8 @@ are paginated; drafts cannot be resumed by another member or topic.
   cancelled; an agent route edit cannot tear down an unrelated Telegram poll.
   An abandoned response on a retired transport is cancelled after a five-minute
   maximum lease so obsolete proxy agents cannot remain allocated forever.
-- Speech providers resolve `services.speechDownloads` at each remote request or
-  Whisper subprocess spawn, so profile rotation applies without daemon
+- Groq resolves `services.speech` at each remote request and Whisper resolves
+  `services.speechDownloads` at each subprocess spawn, so profile rotation applies without daemon
   restart. Binary ACP downloads use the same native stream contract with size,
   progress, cancellation, and cleanup handling.
 - Route writes are serialized and the REST API exposes a monotonically increasing
@@ -227,7 +229,7 @@ menu rendering:
 | Telegram channel | polling and API helpers use `channels.telegram` | an in-flight response finishes on the old profile while the next call uses the new profile | failed `getMe` candidate is not committed |
 | Agent catalog | standalone CLI refresh/install uses `services.agentRegistry` | a real local HTTP proxy serves both registry JSON and binary archive | corrupt policy fails closed before registry access |
 | ACP processes | `direct` removes inherited proxy variables | HTTP(S) env reaches new Codex/Cursor processes; SOCKS is reported best-effort | active sessions stay alive while only idle warm processes invalidate |
-| Plugin and speech downloads | independent service scopes can be direct | npm plugin children use `services.pluginInstaller`; Groq and Whisper children resolve `services.speechDownloads` on every action | TTS installs cannot accidentally inherit the speech-download route |
+| Plugin and speech downloads | independent service scopes can be direct | npm plugin children use `services.pluginInstaller`; Groq resolves `services.speech`; Whisper children resolve `services.speechDownloads` | TTS installs cannot accidentally inherit either STT route |
 | Policy persistence | valid dynamic scopes survive restart | two real Node processes serialize writes and stale dead owners recover | metadata/secrets mismatch, invalid references, and corrupt journals fail closed |
 | Transport lifecycle | unrelated route edits do not affect a live stream | saved fetch facades pick up profile rotation | body cancellation and bounded abandoned leases release retired agents |
 | Release artifacts | clean and dirty build roots produce the same files | two builds have identical SHA-256 and npm pack manifests | nested/stale `dist` files fail verification before publish |

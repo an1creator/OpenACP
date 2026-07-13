@@ -45,16 +45,13 @@ function authHeaders() {
 }
 
 function makeRegistry(entries: Record<string, Partial<PluginEntry>>): PluginRegistry {
+  const materialize = () => new Map(Object.entries(entries).map(([name, e]) => [name, {
+    version: '1.0.0', installedAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:00:00Z',
+    source: 'builtin' as const, enabled: true, settingsPath: '/tmp/settings.json', ...e,
+  }]))
   return {
-    list: () => new Map(Object.entries(entries).map(([name, e]) => [name, {
-      version: '1.0.0',
-      installedAt: '2024-01-01T00:00:00Z',
-      updatedAt: '2024-01-01T00:00:00Z',
-      source: 'builtin' as const,
-      enabled: true,
-      settingsPath: '/tmp/settings.json',
-      ...e,
-    }])),
+    list: materialize,
+    readSnapshot: async () => materialize(),
     get: (name: string) => {
       const e = entries[name]
       if (!e) return undefined
@@ -69,8 +66,8 @@ function makeRegistry(entries: Record<string, Partial<PluginEntry>>): PluginRegi
       }
     },
     load: async () => {},
-    setEnabled: () => {},
-    remove: () => {},
+    setEnabled: (name: string, enabled: boolean) => { if (entries[name]) entries[name].enabled = enabled },
+    remove: (name: string) => { delete entries[name] },
     save: async () => {},
     register: () => {},
   } as unknown as PluginRegistry
@@ -190,6 +187,77 @@ describe('plugin routes', () => {
   })
 
   describe('POST /api/v1/plugins/:name/enable', () => {
+    it('serializes double enable without calling setup twice', async () => {
+      const loaded: string[] = []
+      let bootCount = 0
+      const lm = makeLifecycleManager({
+        registryEntries: { '@openacp/context': { source: 'builtin', enabled: false } },
+        loadedPlugins: loaded,
+        bootFn: async (plugins) => {
+          bootCount++
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          loaded.push(plugins[0].name)
+        },
+      })
+      await buildServer(lm)
+      const request = () => server!.app.inject({ method: 'POST', url: '/api/v1/plugins/@openacp%2Fcontext/enable', headers: authHeaders() })
+      const [first, second] = await Promise.all([request(), request()])
+      expect([first.statusCode, second.statusCode]).toEqual([200, 200])
+      expect(bootCount).toBe(1)
+    })
+
+    it('linearizes disable after an in-flight enable', async () => {
+      const loaded: string[] = []
+      const events: string[] = []
+      let releaseBoot!: () => void
+      const bootGate = new Promise<void>((resolve) => { releaseBoot = resolve })
+      let announceBoot!: () => void
+      const bootStarted = new Promise<void>((resolve) => { announceBoot = resolve })
+      const lm = makeLifecycleManager({
+        registryEntries: { '@openacp/context': { source: 'builtin', enabled: false } }, loadedPlugins: loaded,
+        bootFn: async () => { events.push('enable:start'); announceBoot(); await bootGate; loaded.push('@openacp/context'); events.push('enable:end') },
+        unloadFn: async () => { events.push('disable'); loaded.splice(0) },
+      })
+      await buildServer(lm)
+      const enable = server!.app.inject({ method: 'POST', url: '/api/v1/plugins/@openacp%2Fcontext/enable', headers: authHeaders() })
+      await bootStarted
+      const disable = server!.app.inject({ method: 'POST', url: '/api/v1/plugins/@openacp%2Fcontext/disable', headers: authHeaders() })
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(events).toEqual(['enable:start'])
+      releaseBoot()
+      const [enabled, disabled] = await Promise.all([enable, disable])
+      expect([enabled.statusCode, disabled.statusCode]).toEqual([200, 200])
+      expect(events).toEqual(['enable:start', 'enable:end', 'disable'])
+    })
+
+    it('linearizes delete after an in-flight enable', async () => {
+      const name = '@community/test'
+      const loaded: string[] = []
+      const events: string[] = []
+      let releaseBoot!: () => void
+      const bootGate = new Promise<void>((resolve) => { releaseBoot = resolve })
+      let announceBoot!: () => void
+      const bootStarted = new Promise<void>((resolve) => { announceBoot = resolve })
+      const lm = makeLifecycleManager({
+        registryEntries: { [name]: { source: 'npm', enabled: false } }, loadedPlugins: loaded,
+        pluginDefs: [{ name, version: '1.0.0', setup: async () => {} } as OpenACPPlugin],
+        bootFn: async () => { events.push('enable:start'); announceBoot(); await bootGate; loaded.push(name); events.push('enable:end') },
+        unloadFn: async () => { events.push('delete'); loaded.splice(0) },
+      })
+      await buildServer(lm)
+      const encoded = encodeURIComponent(name)
+      const enable = server!.app.inject({ method: 'POST', url: `/api/v1/plugins/${encoded}/enable`, headers: authHeaders() })
+      await bootStarted
+      const remove = server!.app.inject({ method: 'DELETE', url: `/api/v1/plugins/${encoded}`, headers: authHeaders() })
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(events).toEqual(['enable:start'])
+      releaseBoot()
+      const [enabled, removed] = await Promise.all([enable, remove])
+      expect([enabled.statusCode, removed.statusCode]).toEqual([200, 200])
+      expect(events).toEqual(['enable:start', 'enable:end', 'delete'])
+      expect(lm.registry?.get(name)).toBeUndefined()
+    })
+
     it('enables and boots a disabled builtin plugin', async () => {
       let booted: string[] = []
       let registryEnabled: Record<string, boolean> = {}
@@ -397,6 +465,7 @@ describe('plugin routes', () => {
         installed: false,  // not in registry
       })
       expect(body.categories).toHaveLength(1)
+      expect(body.notice).toBeUndefined()
     })
 
     it('returns 503 when registry fetch fails', async () => {

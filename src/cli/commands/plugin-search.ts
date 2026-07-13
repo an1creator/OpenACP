@@ -3,7 +3,7 @@ import { isJsonMode, jsonSuccess, jsonError, muteForJson, ErrorCodes } from '../
 
 /**
  * `openacp plugin search` — Search the OpenACP plugin registry.
- * Queries the remote registry and displays matching plugins with install instructions.
+ * Searches the deterministic offline catalog packaged with this release.
  */
 export async function cmdPluginSearch(args: string[]): Promise<void> {
   const json = isJsonMode(args)
@@ -20,7 +20,6 @@ export async function cmdPluginSearch(args: string[]): Promise<void> {
 
   try {
     const results = await client.search(query)
-
     if (json) {
       jsonSuccess({
         results: results.map(p => ({
@@ -38,6 +37,7 @@ export async function cmdPluginSearch(args: string[]): Promise<void> {
 
     if (results.length === 0) {
       console.log(`No plugins found matching "${query}"`)
+      console.log('The maintained bundled catalog currently has no matching install promises. You can still install a full npm package name directly.')
       return
     }
 

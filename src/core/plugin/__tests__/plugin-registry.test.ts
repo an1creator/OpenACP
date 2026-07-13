@@ -68,6 +68,14 @@ describe('PluginRegistry', () => {
     })
   })
 
+  it('restores an exact entry after a failed install transaction', () => {
+    registry.register('plugin', { version: '1.0.0', source: 'npm', enabled: true, settingsPath: '/settings' })
+    const before = structuredClone(registry.get('plugin')!)
+    registry.register('plugin', { version: '2.0.0', source: 'npm', enabled: true, settingsPath: '/settings' })
+    registry.restore('plugin', before)
+    expect(registry.get('plugin')).toEqual(before)
+  })
+
   describe('setEnabled', () => {
     it('toggles enabled state and updates updatedAt', () => {
       registry.register('my-plugin', {
@@ -196,6 +204,47 @@ describe('PluginRegistry', () => {
   })
 
   describe('persistence', () => {
+    it('serializes concurrent registry writers without losing independent mutations', async () => {
+      const first = new PluginRegistry(registryPath)
+      const second = new PluginRegistry(registryPath)
+      await Promise.all([first.load(), second.load()])
+      first.register('plugin-a', { version: '1.0.0', source: 'npm', enabled: true, settingsPath: '/a' })
+      second.register('plugin-b', { version: '1.0.0', source: 'npm', enabled: true, settingsPath: '/b' })
+      await Promise.all([first.save(), second.save()])
+
+      const result = new PluginRegistry(registryPath)
+      await result.load()
+      expect([...result.list().keys()].sort()).toEqual(['plugin-a', 'plugin-b'])
+
+      const enableWriter = new PluginRegistry(registryPath)
+      const removeWriter = new PluginRegistry(registryPath)
+      await Promise.all([enableWriter.load(), removeWriter.load()])
+      enableWriter.setEnabled('plugin-a', false)
+      removeWriter.remove('plugin-b')
+      await Promise.all([enableWriter.save(), removeWriter.save()])
+      await result.load()
+      expect(result.get('plugin-a')?.enabled).toBe(false)
+      expect(result.get('plugin-b')).toBeUndefined()
+    })
+
+    it('fails closed before a registry mutation when an install journal is corrupt', async () => {
+      const guardedPath = path.join(tmpDir, 'plugins.json')
+      fs.writeFileSync(path.join(tmpDir, 'plugin-install.journal.json'), '{"version":999}', { mode: 0o600 })
+      const guarded = new PluginRegistry(guardedPath)
+      guarded.register('must-not-persist', { version: '1.0.0', source: 'npm', enabled: true, settingsPath: '/x' })
+      await expect(guarded.save()).rejects.toMatchObject({ code: 'PLUGIN_RECOVERY_FAILED' })
+      expect(fs.existsSync(guardedPath)).toBe(false)
+    })
+
+    it('readSnapshot never clears another pending mutation', async () => {
+      registry.register('pending-plugin', { version: '1.0.0', source: 'npm', enabled: true, settingsPath: '/pending' })
+      expect((await registry.readSnapshot()).has('pending-plugin')).toBe(false)
+      await registry.save()
+      const loaded = new PluginRegistry(registryPath)
+      await loaded.load()
+      expect(loaded.get('pending-plugin')).toBeDefined()
+    })
+
     it('save and load round-trip', async () => {
       registry.register('my-plugin', {
         version: '1.0.0',
@@ -217,6 +266,7 @@ describe('PluginRegistry', () => {
       expect(entry!.enabled).toBe(true)
       expect(entry!.settingsPath).toBe('/path/to/settings')
       expect(entry!.description).toBe('Test')
+      expect(fs.statSync(registryPath).mode & 0o777).toBe(0o600)
     })
 
     it('load with no file returns empty', async () => {

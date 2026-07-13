@@ -36,12 +36,14 @@ for (const file of files) {
   }
 }
 
-// 3. Copy registry snapshot to dist-publish/dist/data/
+// 3. Copy deterministic agent and plugin catalogs to dist-publish/dist/data/
 const snapshotSrc = path.join(root, 'src/data/registry-snapshot.json')
 const snapshotDataDir = path.join(distDir, 'data')
 fs.mkdirSync(snapshotDataDir, { recursive: true })
 fs.copyFileSync(snapshotSrc, path.join(snapshotDataDir, 'registry-snapshot.json'))
 console.log('Copied registry-snapshot.json to dist-publish/dist/data/')
+fs.copyFileSync(path.join(root, 'src/data/plugin-catalog.json'), path.join(snapshotDataDir, 'plugin-catalog.json'))
+console.log('Copied plugin-catalog.json to dist-publish/dist/data/')
 
 // 3b. Copy the native local Whisper runtime next to the flat speech bundle.
 const speechDir = path.join(distDir, 'speech')

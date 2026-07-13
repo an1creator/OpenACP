@@ -24,6 +24,8 @@ export class SpeechService {
   private sttProviders = new Map<string, STTProvider>();
   private ttsProviders = new Map<string, TTSProvider>();
   private providerFactory?: ProviderFactory;
+  private factoryOwnedSTT = new Set<string>();
+  private factoryOwnedTTS = new Set<string>();
 
   constructor(private config: SpeechServiceConfig) {}
 
@@ -35,11 +37,13 @@ export class SpeechService {
   /** Register an STT provider by name. Overwrites any existing provider with the same name. */
   registerSTTProvider(name: string, provider: STTProvider): void {
     this.sttProviders.set(name, provider);
+    this.factoryOwnedSTT.delete(name);
   }
 
   /** Register a TTS provider by name. Called by external TTS plugins (e.g. msedge-tts-plugin). */
   registerTTSProvider(name: string, provider: TTSProvider): void {
     this.ttsProviders.set(name, provider);
+    this.factoryOwnedTTS.delete(name);
   }
 
   /** Remove a TTS provider — called by external plugins on teardown. */
@@ -111,16 +115,21 @@ export class SpeechService {
    * (e.g. from `@openacp/msedge-tts-plugin`) are preserved rather than discarded.
    */
   refreshProviders(newConfig: SpeechServiceConfig): void {
+    if (!this.providerFactory) { this.config = newConfig; return }
+    // Construct the complete replacement first. A factory failure leaves the
+    // active config and providers untouched.
+    const built = this.providerFactory(newConfig);
+    const nextSTT = new Map(this.sttProviders);
+    const nextTTS = new Map(this.ttsProviders);
+    for (const name of this.factoryOwnedSTT) nextSTT.delete(name);
+    for (const name of this.factoryOwnedTTS) nextTTS.delete(name);
+    for (const [name, provider] of built.stt) nextSTT.set(name, provider);
+    for (const [name, provider] of built.tts) nextTTS.set(name, provider);
+
     this.config = newConfig;
-    if (this.providerFactory) {
-      const { stt, tts } = this.providerFactory(newConfig);
-      // Merge: factory providers overwrite, but externally-registered providers are preserved
-      for (const [name, provider] of stt) {
-        this.sttProviders.set(name, provider);
-      }
-      for (const [name, provider] of tts) {
-        this.ttsProviders.set(name, provider);
-      }
-    }
+    this.sttProviders = nextSTT;
+    this.ttsProviders = nextTTS;
+    this.factoryOwnedSTT = new Set(built.stt.keys());
+    this.factoryOwnedTTS = new Set(built.tts.keys());
   }
 }

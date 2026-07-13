@@ -1,81 +1,68 @@
-/** URL of the public OpenACP plugin registry (hosted on GitHub). */
-const REGISTRY_URL = 'https://raw.githubusercontent.com/Open-ACP/plugin-registry/main/registry.json'
-/** Registry data is cached for 1 minute to reduce network requests during repeated lookups. */
-const CACHE_TTL = 60 * 1000
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { z } from 'zod'
 
-/** Metadata for a plugin listed in the public OpenACP plugin registry. */
-export interface RegistryPlugin {
-  name: string
-  displayName?: string
-  description: string
-  npm: string
-  version: string
-  minCliVersion: string
-  category: string
-  tags: string[]
-  icon: string
-  author: string
-  repository: string
-  license: string
-  verified: boolean
-  featured: boolean
+const registryPluginSchema = z.object({
+  name: z.string().min(1), displayName: z.string().min(1).optional(), description: z.string(),
+  npm: z.string().min(1), version: z.string().min(1), minCliVersion: z.string().min(1),
+  category: z.string().min(1), tags: z.array(z.string()), icon: z.string(), author: z.string(),
+  repository: z.string(), license: z.string(), verified: z.boolean(), featured: z.boolean(),
+}).strict()
+
+const registrySchema = z.object({
+  version: z.number().int().positive(), generatedAt: z.string().min(1),
+  pluginCount: z.number().int().nonnegative(), plugins: z.array(registryPluginSchema),
+  categories: z.array(z.object({ id: z.string().min(1), name: z.string().min(1), icon: z.string() }).strict()),
+}).strict().superRefine((value, ctx) => {
+  if (value.pluginCount !== value.plugins.length) ctx.addIssue({ code: 'custom', message: 'pluginCount does not match plugins length' })
+})
+
+export type RegistryPlugin = z.infer<typeof registryPluginSchema>
+export type Registry = z.infer<typeof registrySchema>
+
+export class PluginCatalogError extends Error {
+  readonly code = 'PLUGIN_CATALOG_BUNDLED_INVALID'
+  constructor() {
+    super('The packaged plugin catalog is unavailable or invalid.')
+    this.name = 'PluginCatalogError'
+  }
 }
 
-/** The full registry manifest, fetched as a single JSON file. */
-export interface Registry {
-  version: number
-  generatedAt: string
-  pluginCount: number
-  plugins: RegistryPlugin[]
-  categories: Array<{ id: string; name: string; icon: string }>
+function bundledCatalogPath(): string {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url))
+  const candidates = [path.join(moduleDir, 'data', 'plugin-catalog.json'), path.resolve(moduleDir, '../../data/plugin-catalog.json')]
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0]
 }
 
-/**
- * Client for the public OpenACP plugin registry.
- *
- * The registry is a static JSON file on GitHub — no API server needed.
- * Results are cached in memory for 1 minute to avoid redundant fetches
- * during CLI operations like search + install.
- */
+function loadBundledCatalog(): Registry {
+  try {
+    const result = registrySchema.safeParse(JSON.parse(fs.readFileSync(bundledCatalogPath(), 'utf8')))
+    if (!result.success) throw new Error('schema mismatch')
+    return result.data
+  } catch {
+    throw new PluginCatalogError()
+  }
+}
+
+/** Deterministic offline client for the plugin catalog shipped with this release. */
 export class RegistryClient {
-  private cache: { data: Registry; fetchedAt: number } | null = null
-  private registryUrl: string
+  private cache: Registry | undefined
 
-  constructor(registryUrl?: string, private scopedFetch: typeof fetch = globalThis.fetch) {
-    this.registryUrl = registryUrl ?? REGISTRY_URL
-  }
-
-  /** Fetch the registry, returning cached data if still fresh. */
   async getRegistry(): Promise<Registry> {
-    if (this.cache && Date.now() - this.cache.fetchedAt < CACHE_TTL) {
-      return this.cache.data
-    }
-    const res = await this.scopedFetch(this.registryUrl)
-    if (!res.ok) throw new Error(`Failed to fetch registry: ${res.status}`)
-    const data = await res.json() as Registry
-    this.cache = { data, fetchedAt: Date.now() }
-    return data
+    return this.cache ??= loadBundledCatalog()
   }
 
-  /** Search plugins by name, description, or tags (case-insensitive substring match). */
   async search(query: string): Promise<RegistryPlugin[]> {
     const registry = await this.getRegistry()
-    const q = query.toLowerCase()
-    return registry.plugins.filter(p => {
-      const text = `${p.name} ${p.displayName ?? ''} ${p.description} ${p.tags?.join(' ') ?? ''}`.toLowerCase()
-      return text.includes(q)
-    })
+    const normalized = query.toLowerCase()
+    return registry.plugins.filter((plugin) => `${plugin.name} ${plugin.displayName ?? ''} ${plugin.description} ${plugin.tags.join(' ')}`.toLowerCase().includes(normalized))
   }
 
-  /** Resolve a registry plugin name to its npm package name. Returns null if not found. */
   async resolve(name: string): Promise<string | null> {
     const registry = await this.getRegistry()
-    const plugin = registry.plugins.find(p => p.name === name)
-    return plugin?.npm ?? null
+    return registry.plugins.find((plugin) => plugin.name === name)?.npm ?? null
   }
 
-  /** Force next getRegistry() call to refetch from network. */
-  clearCache(): void {
-    this.cache = null
-  }
+  clearCache(): void { this.cache = undefined }
 }

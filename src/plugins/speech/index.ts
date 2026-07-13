@@ -10,6 +10,7 @@ import {
   createNativeSTTProviders,
 } from './native-stt.js'
 import { installNpmPlugin } from '../../core/plugin/plugin-installer.js'
+import { registerSpeechSettingsCommand } from './settings-command.js'
 
 // TTS is provided by a separate optional plugin so the core speech plugin
 // doesn't bundle a large native dependency on every install.
@@ -182,7 +183,6 @@ const speechPlugin: OpenACPPlugin = {
       { key: 'localWhisperDevice', displayName: 'Local Whisper Device', type: 'select', scope: 'safe', hotReload: true, options: ['cpu', 'cuda', 'auto'] },
       { key: 'localWhisperComputeType', displayName: 'Local Whisper Compute Type', type: 'string', scope: 'safe', hotReload: true },
       { key: 'localWhisperTimeoutMs', displayName: 'Local Whisper Timeout (ms)', type: 'number', scope: 'safe', hotReload: true },
-      { key: 'localWhisperScriptPath', displayName: 'Local Whisper Script Path', type: 'string', scope: 'safe', hotReload: true },
       { key: 'ttsProvider', displayName: 'Text to Speech', type: 'select', scope: 'safe', hotReload: true, options: ['edge-tts'] },
     ])
 
@@ -194,7 +194,7 @@ const speechPlugin: OpenACPPlugin = {
     // hosts. A normal OpenACP boot always supplies ProxyService; corruption still
     // throws here and remains fail-closed rather than falling through.
     const network = core?.proxyService ? {
-      getFetch: () => core.proxyService.createFetch('services.speechDownloads'),
+      getFetch: () => core.proxyService.createFetch('services.speech'),
       getChildEnv: () => core.proxyService.buildChildEnv('services.speechDownloads', process.env as Record<string, string>),
     } : undefined
     const pluginInstallEnv = core?.proxyService
@@ -202,16 +202,15 @@ const speechPlugin: OpenACPPlugin = {
       : undefined
 
     const service = new SpeechService(speechConfig)
-    for (const [name, provider] of createNativeSTTProviders(speechConfig, network)) {
-      service.registerSTTProvider(name, provider)
-    }
 
     // TTS provider is now registered by @openacp/msedge-tts-plugin (no EdgeTTS here)
 
     // Register provider factory for hot-reload (STT only — TTS providers are managed by external plugins)
     service.setProviderFactory((cfg) => ({ stt: createNativeSTTProviders(cfg, network), tts: new Map() }))
+    service.refreshProviders(speechConfig)
 
     ctx.registerService('speech', service)
+    if (core) registerSpeechSettingsCommand(ctx, core, service)
 
     // Helper to look up the session and set voiceMode
     const setSessionVoiceMode = (pluginCtx: PluginContext, sessionId: string | null, voiceMode: 'off' | 'next' | 'on'): void => {

@@ -103,7 +103,7 @@ audio attachment
 - `local-whisper` runs on the OpenACP host without an API key and reuses its environment and model cache.
 - Groq provides an optional hosted STT path.
 - Failed transcription preserves the original audio instead of silently dropping it.
-- Providers and local model settings are available through plugin settings and the API.
+- Open **Settings → Speech-to-Text** (or use `/speech` on any command-capable connector) to choose Off, Local, or Groq and edit local model settings. Groq keys are write-only; changes hot-reload without replacing TTS providers.
 
 Local Whisper requires Python 3 and either `uv` or `python3-venv`; its runtime is prepared on first use. See [Voice and Speech](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/using-openacp/voice-and-speech.md).
 

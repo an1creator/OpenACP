@@ -39,9 +39,11 @@ export function buildSpeechServiceConfig(raw: Record<string, unknown>): SpeechSe
   const requestedProvider = readOptionalString(raw.sttProvider)
   const provider = requestedProvider === LOCAL_WHISPER_PROVIDER
     ? LOCAL_WHISPER_PROVIDER
-    : groqApiKey
+    : requestedProvider === 'groq' && groqApiKey
       ? 'groq'
-      : null
+      : raw.sttProvider === undefined && groqApiKey
+        ? 'groq'
+        : null
 
   const providers: Record<string, SpeechProviderConfig> = {}
   if (groqApiKey) providers.groq = { apiKey: groqApiKey }

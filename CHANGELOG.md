@@ -1,5 +1,43 @@
 ## Unreleased
 
+## 2026.713.1 - 2026-07-13
+
+### Added
+
+- Add connector-neutral Speech-to-Text settings under Settings with fail-closed
+  administrator authorization, secure write-only Groq key rotation,
+  connector-safe local faster-whisper controls, redacted review, and immediate provider reload
+  that preserves TTS registrations.
+- Replace the unavailable plugin-registry endpoint with a deterministic,
+  offline-only catalog shipped in the npm package. Direct npm package installs
+  remain available without giving packages a maintained-catalog endorsement.
+
+### Changed
+
+- Route Groq STT through `services.speech` while reserving
+  `services.speechDownloads` for the local Whisper runtime and first model
+  download. The durable Groq scope inherits `services.default` unless assigned
+  an exact route.
+
+### Fixed
+
+- Stage community npm plugins with lifecycle scripts disabled, validate the
+  complete OpenACP plugin contract and explicit install hook before activation,
+  serialize installers with a process-owned lock, and use a durable phase journal
+  to restore or finish package, settings, and registry state after failure or
+  process termination.
+- Restore the exact registry entry and previous settings when version migration
+  fails, and retain a durable quarantine when rollback persistence is incomplete
+  instead of starting new code against old or partial settings.
+- Persist plugin settings with atomic fsync/rename writes, mode `0600` files,
+  mode `0700` directories including the settings base, fail-closed permission
+  repair, and repair of permissive legacy modes.
+- Serialize every plugin-registry writer through the package mutation lock,
+  preserve concurrent independent updates, and require the journaled CLI install
+  plus restart instead of mutating the shared npm tree from runtime commands.
+- Atomically replace factory-owned STT providers on hot reload while preserving
+  external TTS providers and in-flight transcription references.
+
 ## 2026.712.12 - 2026-07-12
 
 ### Documentation

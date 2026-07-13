@@ -36,4 +36,9 @@ describe('native STT configuration', () => {
     const config = buildSpeechServiceConfig({ sttProvider: 'groq' })
     expect(config.stt.provider).toBeNull()
   })
+
+  it('keeps STT off when the provider is explicitly cleared but a legacy key remains', () => {
+    const config = buildSpeechServiceConfig({ sttProvider: null, groqApiKey: 'gsk_stored' })
+    expect(config.stt.provider).toBeNull()
+  })
 })

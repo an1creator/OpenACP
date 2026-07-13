@@ -9,7 +9,7 @@ import {
 import { handleSettings } from '../settings.js'
 
 describe('Telegram Settings menu', () => {
-  it('nests proxy management through the generic connector command callback', async () => {
+  it('nests proxy and speech management through generic connector command callbacks', async () => {
     const reply = vi.fn().mockResolvedValue(undefined)
     const ctx = { reply } as unknown as Context
     const core = {
@@ -27,6 +27,10 @@ describe('Telegram Settings menu', () => {
       text: '🌐 Proxy Management',
       callback_data: 'c/@settings:/proxy',
     })
+    expect(buttons).toContainEqual({
+      text: '🎙 Speech-to-Text',
+      callback_data: 'c/@settings:/speech',
+    })
     expect(buttons.at(-1)).toEqual({
       text: '◀️ Back to Menu',
       callback_data: 's:back',
@@ -37,6 +41,10 @@ describe('Telegram Settings menu', () => {
   it('decodes only the allow-listed Settings return envelope', () => {
     expect(decodeCommandCallback(settingsCommandCallback('/proxy'))).toEqual({
       command: '/proxy',
+      returnTarget: 'settings',
+    })
+    expect(decodeCommandCallback(settingsCommandCallback('/speech'))).toEqual({
+      command: '/speech',
       returnTarget: 'settings',
     })
     expect(decodeCommandCallback('c//proxy')).toEqual({ command: '/proxy' })

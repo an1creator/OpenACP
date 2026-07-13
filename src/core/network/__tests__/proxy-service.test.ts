@@ -40,6 +40,16 @@ describe('ProxyService', () => {
     expect(service.resolve('channels.discord').route).toBe('direct')
   })
 
+  it('keeps services.speech durable and inherits services.default until explicitly routed', async () => {
+    service.saveProfile({ id: 'speech', protocol: 'http', host: 'speech-proxy.test', port: 8080 })
+    await service.setRoute('services.default', 'profile:speech')
+    expect(service.getKnownScopes()).toContain('services.speech')
+    expect(service.resolve('services.speech')).toMatchObject({ route: 'profile:speech', resolvedFrom: 'services.default' })
+    await service.setRoute('services.speech', 'direct')
+    expect(service.resolve('services.speech')).toMatchObject({ route: 'direct', resolvedFrom: 'services.speech' })
+    expect(service.status().diagnostics.some((item) => item.scope === 'services.speech')).toBe(true)
+  })
+
   it('keeps create/update existence semantics atomic across service instances', async () => {
     const other = new ProxyService(root)
     const input = { id: 'race', protocol: 'http' as const, host: 'proxy.test', port: 8080 }

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { z } from 'zod'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -15,6 +15,7 @@ describe('SettingsManager', () => {
   })
 
   afterEach(() => {
+    vi.restoreAllMocks()
     fs.rmSync(tmpDir, { recursive: true })
   })
 
@@ -92,6 +93,55 @@ describe('SettingsManager', () => {
     const manager2 = new SettingsManager(tmpDir)
     const api2 = manager2.createAPI('my-plugin')
     expect(await api2.get('persist')).toBe('yes')
+  })
+
+  it('writes settings atomically with secret-safe file and directory modes', async () => {
+    const api = manager.createAPI('@openacp/speech')
+    await api.set('groqApiKey', 'gsk_private')
+    const settingsPath = manager.getSettingsPath('@openacp/speech')
+    expect(fs.statSync(settingsPath).mode & 0o777).toBe(0o600)
+    expect(fs.statSync(path.dirname(settingsPath)).mode & 0o777).toBe(0o700)
+    expect(fs.statSync(path.dirname(path.dirname(settingsPath))).mode & 0o777).toBe(0o700)
+    expect(fs.readdirSync(path.dirname(settingsPath)).filter((name) => name.endsWith('.tmp'))).toEqual([])
+  })
+
+  it('secures the settings base directory itself on construction and every access', async () => {
+    expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o700)
+    fs.chmodSync(tmpDir, 0o777)
+    await manager.loadSettings('nonexistent')
+    expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o700)
+    fs.chmodSync(tmpDir, 0o777)
+    await manager.createAPI('plugin').setAll({ secret: true })
+    expect(fs.statSync(tmpDir).mode & 0o777).toBe(0o700)
+  })
+
+  it('fails closed when the base directory mode cannot be secured', async () => {
+    fs.chmodSync(tmpDir, 0o777)
+    const originalChmod = fs.chmodSync.bind(fs)
+    vi.spyOn(fs, 'chmodSync').mockImplementation((target, mode) => {
+      if (path.resolve(String(target)) === path.resolve(tmpDir)) throw new Error('base chmod denied')
+      return originalChmod(target, mode)
+    })
+    await expect(manager.loadSettings('nonexistent')).rejects.toThrow('base chmod denied')
+  })
+
+  it('repairs permissive existing settings and parent modes before reading', async () => {
+    const settingsPath = manager.getSettingsPath('legacy-plugin')
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true, mode: 0o777 })
+    fs.chmodSync(path.dirname(settingsPath), 0o777)
+    fs.writeFileSync(settingsPath, '{"secret":"legacy"}', { mode: 0o644 })
+    fs.chmodSync(settingsPath, 0o644)
+    expect(await manager.loadSettings('legacy-plugin')).toEqual({ secret: 'legacy' })
+    expect(fs.statSync(settingsPath).mode & 0o777).toBe(0o600)
+    expect(fs.statSync(path.dirname(settingsPath)).mode & 0o777).toBe(0o700)
+  })
+
+  it('fails closed when existing settings permissions cannot be repaired', async () => {
+    const settingsPath = manager.getSettingsPath('locked-plugin')
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
+    fs.writeFileSync(settingsPath, '{"secret":"locked"}', { mode: 0o644 })
+    vi.spyOn(fs, 'chmodSync').mockImplementationOnce(() => { throw new Error('chmod denied') })
+    await expect(manager.loadSettings('locked-plugin')).rejects.toThrow('chmod denied')
   })
 
   it('isolates settings between plugins', async () => {

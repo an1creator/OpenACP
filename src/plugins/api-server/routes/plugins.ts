@@ -4,13 +4,14 @@ import type { RouteDeps } from './types.js'
 import { requireScopes } from '../middleware/auth.js'
 import { corePlugins } from '../../../plugins/core-plugins.js'
 import { RegistryClient } from '../../../core/plugin/registry-client.js'
+import { withPluginLifecycleMutex } from '../../../core/plugin/lifecycle-mutex.js'
 
 /**
  * Plugin management routes under `/api/v1/plugins`.
  *
  * All routes require `system:admin` scope.
  * - `GET /` — lists installed plugins with their runtime state (loaded, failed, essential).
- * - `GET /marketplace` — proxies the remote plugin registry, annotated with installed status.
+ * - `GET /marketplace` — reads the offline packaged catalog, annotated with installed status.
  * - `POST /:name/enable` — hot-loads a disabled plugin without restarting the server.
  * - `POST /:name/disable` — gracefully unloads an active plugin; blocks essential plugins.
  * - `DELETE /:name` — uninstalls an npm/local plugin; builtin plugins cannot be removed.
@@ -20,15 +21,7 @@ export async function pluginRoutes(
   deps: RouteDeps,
 ): Promise<void> {
   const { lifecycleManager } = deps
-  // Partial RouteDeps are supported by isolated API-plugin embedders/tests. A
-  // normal daemon always supplies core.proxyService and therefore uses the
-  // authoritative scoped transport; a corrupt policy throws and never falls
-  // back silently.
-  const proxyService = deps.core?.proxyService
-  const registryClient = new RegistryClient(
-    undefined,
-    proxyService?.createFetch('services.pluginInstaller') ?? globalThis.fetch,
-  )
+  const registryClient = new RegistryClient()
   const admin = [requireScopes('system:admin')]
 
   // GET /plugins — list all installed plugins with runtime state
@@ -38,13 +31,13 @@ export async function pluginRoutes(
     const registry = lifecycleManager.registry
     // Reload from disk so CLI-installed plugins appear without a server restart.
     // The polling flow in the App depends on this being up-to-date.
-    await registry.load()
+    const registrySnapshot = await registry.readSnapshot()
     const loadedSet = new Set(lifecycleManager.loadedPlugins)
     const failedSet = new Set(lifecycleManager.failedPlugins)
     const loadOrderMap = new Map(lifecycleManager.plugins.map((p) => [p.name, p]))
     const coreMap = new Map(corePlugins.map((p) => [p.name, p]))
 
-    const plugins = Array.from(registry.list().entries()).map(([name, entry]) => {
+    const plugins = Array.from(registrySnapshot.entries()).map(([name, entry]) => {
       const def = loadOrderMap.get(name) ?? coreMap.get(name)
       return {
         name,
@@ -62,7 +55,7 @@ export async function pluginRoutes(
     return { plugins }
   })
 
-  // GET /plugins/marketplace — proxy to RegistryClient with installed flag
+  // GET /plugins/marketplace — offline-first catalog with installed flag
   app.get('/marketplace', { preHandler: admin }, async (_req, reply) => {
     try {
       const data = await registryClient.getRegistry()
@@ -78,7 +71,13 @@ export async function pluginRoutes(
         installed: installedNames.has(p.name) || installedNames.has(p.npm),
       }))
 
-      return { plugins, categories: data.categories }
+      return {
+        plugins,
+        categories: data.categories,
+        notice: data.plugins.length === 0
+          ? 'The maintained catalog has no installable entries. Install a full npm package name directly.'
+          : undefined,
+      }
     } catch {
       return reply.status(503).send({ error: 'Marketplace unavailable' })
     }
@@ -91,8 +90,9 @@ export async function pluginRoutes(
     }
 
     const name = (req.params as { name: string }).name
-    const registry = lifecycleManager.registry
-    const entry = registry.get(name)
+    return withPluginLifecycleMutex(`${lifecycleManager.instanceRoot ?? 'default'}:${name}`, async () => {
+      const registry = lifecycleManager.registry!
+      const entry = registry.get(name)
 
     if (!entry) {
       return reply.status(404).send({ error: `Plugin "${name}" not found` })
@@ -131,16 +131,20 @@ export async function pluginRoutes(
       return reply.status(500).send({ error: `Plugin definition not found for "${name}"` })
     }
 
+    const wasEnabled = entry.enabled
     registry.setEnabled(name, true)
     await registry.save()
 
     await lifecycleManager.boot([pluginDef])
 
     if (lifecycleManager.failedPlugins.includes(name)) {
+      registry.setEnabled(name, wasEnabled)
+      await registry.save()
       return reply.status(500).send({ error: `Plugin "${name}" failed to start` })
     }
 
     return { ok: true }
+    })
   })
 
   // POST /plugins/:name/disable — unload and disable a plugin
@@ -150,8 +154,9 @@ export async function pluginRoutes(
     }
 
     const name = (req.params as { name: string }).name
-    const registry = lifecycleManager.registry
-    const entry = registry.get(name)
+    return withPluginLifecycleMutex(`${lifecycleManager.instanceRoot ?? 'default'}:${name}`, async () => {
+      const registry = lifecycleManager.registry!
+      const entry = registry.get(name)
 
     if (!entry) {
       return reply.status(404).send({ error: `Plugin "${name}" not found` })
@@ -171,6 +176,7 @@ export async function pluginRoutes(
     await registry.save()
 
     return { ok: true }
+    })
   })
 
   // DELETE /plugins/:name — uninstall (remove from registry, unload)
@@ -180,8 +186,9 @@ export async function pluginRoutes(
     }
 
     const name = (req.params as { name: string }).name
-    const registry = lifecycleManager.registry
-    const entry = registry.get(name)
+    return withPluginLifecycleMutex(`${lifecycleManager.instanceRoot ?? 'default'}:${name}`, async () => {
+      const registry = lifecycleManager.registry!
+      const entry = registry.get(name)
 
     if (!entry) {
       return reply.status(404).send({ error: `Plugin "${name}" not found` })
@@ -198,6 +205,7 @@ export async function pluginRoutes(
     await registry.save()
 
     return { ok: true }
+    })
   })
 
 }

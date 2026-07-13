@@ -94,4 +94,59 @@ describe("SpeechService", () => {
         .rejects.toThrow('STT provider "unknown" not registered');
     });
   });
+
+  describe('atomic provider refresh', () => {
+    it('removes factory-owned Groq references while preserving external TTS', async () => {
+      const groqConfig = makeConfig({ stt: { provider: 'groq', providers: { groq: { apiKey: 'secret' } } }, tts: { provider: 'edge', providers: {} } })
+      const service = new SpeechService(groqConfig)
+      const groq = { name: 'groq', transcribe: vi.fn().mockResolvedValue({ text: 'old' }) }
+      service.setProviderFactory((config) => ({
+        stt: config.stt.provider === 'groq' ? new Map([['groq', groq]]) : new Map(),
+        tts: new Map(),
+      }))
+      service.registerTTSProvider('edge', { name: 'edge', synthesize: vi.fn() })
+      service.refreshProviders(groqConfig)
+      expect(service.isTTSAvailable()).toBe(true)
+
+      service.refreshProviders(makeConfig({ tts: { provider: 'edge', providers: {} } }))
+      expect(service.isSTTAvailable()).toBe(false)
+      expect(service.isTTSAvailable()).toBe(true)
+      service.updateConfig(groqConfig)
+      await expect(service.transcribe(Buffer.from('x'), 'audio/wav')).rejects.toThrow('not registered')
+    })
+
+    it('keeps an in-flight transcription on its captured provider during an atomic swap', async () => {
+      let finish!: (value: { text: string }) => void
+      const pending = new Promise<{ text: string }>((resolve) => { finish = resolve })
+      const config = makeConfig({ stt: { provider: 'native', providers: { native: { apiKey: 'local' } } } })
+      const oldProvider = { name: 'native', transcribe: vi.fn(() => pending) }
+      const newProvider = { name: 'native', transcribe: vi.fn().mockResolvedValue({ text: 'new' }) }
+      const service = new SpeechService(config)
+      let current: STTProvider = oldProvider
+      service.setProviderFactory(() => ({ stt: new Map([['native', current]]), tts: new Map() }))
+      service.refreshProviders(config)
+      const inFlight = service.transcribe(Buffer.from('old'), 'audio/wav')
+      current = newProvider
+      service.refreshProviders(config)
+      finish({ text: 'old-complete' })
+      await expect(inFlight).resolves.toEqual({ text: 'old-complete' })
+      await expect(service.transcribe(Buffer.from('new'), 'audio/wav')).resolves.toEqual({ text: 'new' })
+    })
+
+    it('rolls back config and providers when replacement construction fails', async () => {
+      const config = makeConfig({ stt: { provider: 'native', providers: { native: { apiKey: 'local' } } } })
+      const provider = { name: 'native', transcribe: vi.fn().mockResolvedValue({ text: 'still-active' }) }
+      const service = new SpeechService(config)
+      let fail = false
+      service.setProviderFactory(() => {
+        if (fail) throw new Error('construction failed')
+        return { stt: new Map([['native', provider]]), tts: new Map() }
+      })
+      service.refreshProviders(config)
+      fail = true
+      expect(() => service.refreshProviders(makeConfig())).toThrow('construction failed')
+      expect(service.isSTTAvailable()).toBe(true)
+      await expect(service.transcribe(Buffer.from('x'), 'audio/wav')).resolves.toEqual({ text: 'still-active' })
+    })
+  })
 });

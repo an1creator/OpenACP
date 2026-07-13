@@ -5,6 +5,8 @@ import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { ProxyService } from '../proxy-service.js'
 
+const noConnectivityPreflight = async () => undefined
+
 async function listen(server: http.Server): Promise<number> {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
   return (server.address() as { port: number }).port
@@ -27,7 +29,7 @@ describe('scoped transport retirement', () => {
     }); servers.push(origin)
     const port = await listen(origin)
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-transport-life-'))
-    const proxy = new ProxyService(root)
+    const proxy = new ProxyService(root, undefined, undefined, noConnectivityPreflight)
     await proxy.setRoute('channels.telegram', 'direct')
     await proxy.setRoute('agents.cursor', 'direct')
     const response = await proxy.createFetch('channels.telegram')(`http://127.0.0.1:${port}/updates`)
@@ -46,7 +48,7 @@ describe('scoped transport retirement', () => {
     servers.push(oldProxy, newProxy)
     const oldPort = await listen(oldProxy); const newPort = await listen(newProxy)
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-profile-life-'))
-    const proxy = new ProxyService(root)
+    const proxy = new ProxyService(root, undefined, undefined, noConnectivityPreflight)
     proxy.saveProfile({ id: 'telegram', protocol: 'http', host: '127.0.0.1', port: oldPort })
     await proxy.setRoute('channels.telegram', 'profile:telegram')
     const fetchTelegram = proxy.createFetch('channels.telegram')
@@ -66,7 +68,7 @@ describe('scoped transport retirement', () => {
     servers.push(oldProxy, newProxy)
     const oldPort = await listen(oldProxy); const newPort = await listen(newProxy)
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-profile-abandoned-'))
-    const proxy = new ProxyService(root, 50)
+    const proxy = new ProxyService(root, 50, undefined, noConnectivityPreflight)
     proxy.saveProfile({ id: 'telegram', protocol: 'http', host: '127.0.0.1', port: oldPort })
     await proxy.setRoute('channels.telegram', 'profile:telegram')
     const fetchTelegram = proxy.createFetch('channels.telegram')
@@ -87,7 +89,7 @@ describe('scoped transport retirement', () => {
     servers.push(upstream)
     const port = await listen(upstream)
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-request-body-'))
-    const proxy = new ProxyService(root)
+    const proxy = new ProxyService(root, undefined, undefined, noConnectivityPreflight)
     proxy.saveProfile({ id: 'body', protocol: 'http', host: '127.0.0.1', port })
     await proxy.setRoute('services.agentRegistry', 'profile:body')
     const fetchRegistry = proxy.createFetch('services.agentRegistry')

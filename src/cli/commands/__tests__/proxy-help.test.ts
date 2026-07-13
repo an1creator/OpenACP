@@ -33,8 +33,8 @@ describe('proxy command discoverability', () => {
     const output = captureHelp(printHelp)
     expect(output).toContain('Tunnels:')
     expect(output).not.toContain('Tunnels & Network:')
-    expect(output).toContain('Proxy Management:')
-    expect(output.indexOf('Proxy Management:')).toBeGreaterThan(output.indexOf('Tunnels:'))
+    expect(output).toContain('Network proxy:')
+    expect(output.indexOf('Network proxy:')).toBeGreaterThan(output.indexOf('Tunnels:'))
     for (const command of COMPLETE_PROXY_COMMANDS) expect(output).toContain(command)
     expect(output).toContain('--reassign <route>')
     expect(output).toContain('--expected-revision <n>')
@@ -46,8 +46,8 @@ describe('proxy command discoverability', () => {
 
   it('documents every implemented profile and routing operation in proxy help', () => {
     const output = captureHelp(printProxyHelp)
-    expect(output).toContain('Profile Commands:')
-    expect(output).toContain('Routing Commands:')
+    expect(output).toContain('Proxy profiles:')
+    expect(output).toContain('Traffic routes:')
     for (const command of COMPLETE_PROXY_COMMANDS) expect(output).toContain(command)
     expect(output).toContain('clearCredentials=true')
     expect(output).toContain('Test a complete profile in memory without saving it')
@@ -58,7 +58,7 @@ describe('proxy command discoverability', () => {
   it('is discoverable in Telegram autocomplete and through Settings without a duplicate main-menu item', () => {
     expect(STATIC_COMMANDS).toContainEqual({
       command: 'proxy',
-      description: 'Manage scoped proxy routing',
+      description: 'Configure network proxy',
     })
     const menu = new MenuRegistry()
     registerCoreMenuItems(menu)

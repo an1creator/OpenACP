@@ -25,7 +25,7 @@ The agent then receives the transcription as a normal text prompt. If the agent 
 
 ### Configuring STT
 
-Open **Settings → Speech-to-Text** or run `/speech` on any connector that renders OpenACP commands. This is one connector-neutral command/config boundary backed by the existing `@openacp/speech` service; Telegram does not maintain a separate STT configuration. Select `local-whisper` for local transcription. The equivalent persisted settings are:
+In Telegram, open **Settings → Speech-to-text** or run `/speech`. The settings command is backed by the shared `@openacp/speech` service; Telegram does not maintain a separate STT configuration. The current Discord and Slack adapters do not register `/speech` as a native slash command, so configure them from the protected host terminal with `openacp plugin configure @openacp/speech`. Select `local-whisper` for local transcription. The equivalent persisted settings are:
 
 ```json
 {
@@ -40,9 +40,11 @@ Open **Settings → Speech-to-Text** or run `/speech` on any connector that rend
 }
 ```
 
-The interface exposes provider status plus language, model, beam size, VAD, device, compute type, and timeout. Changes apply immediately and preserve separately registered TTS providers.
+The status-first home reports **Off**, **Local selected**, or **Groq selected** separately from setup readiness. It keeps three jobs at the top level: **Transcription method**, **Settings & access**, and **Check setup**. **Settings & access** separates local configuration from Groq credentials without changing the selected method. Local language and model stay on the first local screen; lower-frequency beam, voice-activity filtering, device, compute type, and time limit live under **Performance & reliability**. **Check setup** verifies the currently selected local runtime or performs an authenticated Groq access check through `services.speech`. Changes apply immediately and preserve separately registered TTS providers.
 
-For Groq, add or replace the API key through the write-only secure-input flow, then select `groq`. Reviews show only whether a key is configured. Clearing the key deletes it and turns Groq off when active. The older behavior remains compatible: when a Groq key exists and `sttProvider` was never set, OpenACP activates Groq automatically; an explicit **Off** selection remains off.
+For Groq, **Add API key** or **Replace API key** captures a short-lived candidate through secure input. OpenACP binds that draft to the connector, user, and conversation, then calls Groq's authenticated models endpoint through `services.speech`; it does not upload user audio or persist the candidate during the check. A rejected or expired candidate is discarded while the saved key and active method remain unchanged. After a successful check, choose **Save and use Groq**, **Save key only**, or **Discard**. Reviews and status screens show only **Saved (hidden)** or **Not set**. **Clear API key** requires confirmation, deletes the key, and turns Groq off when active.
+
+The terminal installer/configurator follows the same secret boundary: Groq keys use hidden password input and an existing key is never prefilled or printed. A new candidate is checked before the complete settings snapshot is saved once; cancellation or a rejected candidate leaves the previous snapshot unchanged. The older behavior remains compatible: when a Groq key exists and `sttProvider` was never set, OpenACP activates Groq automatically; an explicit **Off** selection remains off.
 
 Speech settings require an administrator identity with `speech:manage`. Missing identity information and non-admin members fail closed before status or settings are read. Connectors that cannot guarantee private or delete-after-capture input must use protected host configuration instead of accepting a key in chat.
 
@@ -53,7 +55,7 @@ host. Leave it unset to use the runtime bundled in `@n1creator/openacp-cli`.
 
 ### STT error handling
 
-If transcription fails, the audio attachment is kept and passed to the agent as-is, with an error message in the topic. For local STT, check that Python can create virtual environments and that the first-run dependency/model download has network access through `services.speechDownloads`. Groq requests use the independent `services.speech` route; also check the API key and rate limit.
+If transcription fails, the audio attachment is kept and passed to the agent as-is, with an error message in the topic. Run **Check setup** first. For local transcription, check that Python can create virtual environments and that the first-run dependency/model download has network access through `services.speechDownloads`. Groq requests and access checks use the independent `services.speech` route; also check the API key and rate limit.
 
 ## Text-to-speech (TTS)
 

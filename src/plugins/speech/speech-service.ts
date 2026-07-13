@@ -11,6 +11,12 @@ import type { STTProvider, TTSProvider, STTOptions, STTResult, TTSOptions, TTSRe
  */
 export type ProviderFactory = (config: SpeechServiceConfig) => { stt: Map<string, STTProvider>; tts: Map<string, TTSProvider> };
 
+/** A fully-built provider replacement that can be committed without construction work. */
+export interface PreparedProviderRefresh {
+  commit(): void;
+  rollback(): void;
+}
+
 /**
  * Central service for speech-to-text and text-to-speech operations.
  *
@@ -26,29 +32,34 @@ export class SpeechService {
   private providerFactory?: ProviderFactory;
   private factoryOwnedSTT = new Set<string>();
   private factoryOwnedTTS = new Set<string>();
+  private runtimeRevision = 0;
 
   constructor(private config: SpeechServiceConfig) {}
 
   /** Set a factory function that can recreate providers from config (for hot-reload) */
   setProviderFactory(factory: ProviderFactory): void {
     this.providerFactory = factory;
+    this.runtimeRevision += 1;
   }
 
   /** Register an STT provider by name. Overwrites any existing provider with the same name. */
   registerSTTProvider(name: string, provider: STTProvider): void {
     this.sttProviders.set(name, provider);
     this.factoryOwnedSTT.delete(name);
+    this.runtimeRevision += 1;
   }
 
   /** Register a TTS provider by name. Called by external TTS plugins (e.g. msedge-tts-plugin). */
   registerTTSProvider(name: string, provider: TTSProvider): void {
     this.ttsProviders.set(name, provider);
     this.factoryOwnedTTS.delete(name);
+    this.runtimeRevision += 1;
   }
 
   /** Remove a TTS provider — called by external plugins on teardown. */
   unregisterTTSProvider(name: string): void {
     this.ttsProviders.delete(name);
+    this.runtimeRevision += 1;
   }
 
   /** Returns true if an STT provider is configured and has credentials. */
@@ -76,7 +87,7 @@ export class SpeechService {
   async transcribe(audioBuffer: Buffer, mimeType: string, options?: STTOptions): Promise<STTResult> {
     const providerName = this.config.stt.provider;
     if (!providerName || !this.config.stt.providers[providerName]?.apiKey) {
-      throw new Error("STT not configured. Set speech.stt.provider and API key in config.");
+      throw new Error("Speech-to-text is off or not ready. Open Settings → Speech-to-text or run /speech.");
     }
     const provider = this.sttProviders.get(providerName);
     if (!provider) {
@@ -105,6 +116,87 @@ export class SpeechService {
   /** Replace the active config without rebuilding providers. Use `refreshProviders` to also rebuild. */
   updateConfig(config: SpeechServiceConfig): void {
     this.config = config;
+    this.runtimeRevision += 1;
+  }
+
+  /**
+   * Build and validate a complete factory-owned provider replacement without
+   * changing the active runtime. The returned commit is revision-checked and
+   * preserves providers registered by external plugins. Rollback restores the
+   * exact config, maps, ownership sets, and provider object references captured
+   * immediately before commit.
+   */
+  prepareProviderRefresh(newConfig: SpeechServiceConfig): PreparedProviderRefresh {
+    if (!this.providerFactory) {
+      const baseRevision = this.runtimeRevision;
+      let previousConfig: SpeechServiceConfig | undefined;
+      let committed = false;
+      return {
+        commit: () => {
+          if (committed || this.runtimeRevision !== baseRevision) throw new Error('Speech runtime changed while provider refresh was being prepared');
+          previousConfig = this.config;
+          this.config = newConfig;
+          this.runtimeRevision = baseRevision + 1;
+          committed = true;
+        },
+        rollback: () => {
+          if (!committed || previousConfig === undefined) return;
+          if (this.runtimeRevision !== baseRevision + 1) throw new Error('Speech runtime changed before provider refresh rollback');
+          this.config = previousConfig;
+          this.runtimeRevision = baseRevision;
+          committed = false;
+        },
+      };
+    }
+
+    const baseRevision = this.runtimeRevision;
+    const built = this.providerFactory(newConfig);
+    let previous: {
+      config: SpeechServiceConfig;
+      sttProviders: Map<string, STTProvider>;
+      ttsProviders: Map<string, TTSProvider>;
+      factoryOwnedSTT: Set<string>;
+      factoryOwnedTTS: Set<string>;
+    } | undefined;
+    let committed = false;
+
+    return {
+      commit: () => {
+        if (committed || this.runtimeRevision !== baseRevision) throw new Error('Speech runtime changed while provider refresh was being prepared');
+        previous = {
+          config: this.config,
+          sttProviders: this.sttProviders,
+          ttsProviders: this.ttsProviders,
+          factoryOwnedSTT: this.factoryOwnedSTT,
+          factoryOwnedTTS: this.factoryOwnedTTS,
+        };
+        const nextSTT = new Map(this.sttProviders);
+        const nextTTS = new Map(this.ttsProviders);
+        for (const name of this.factoryOwnedSTT) nextSTT.delete(name);
+        for (const name of this.factoryOwnedTTS) nextTTS.delete(name);
+        for (const [name, provider] of built.stt) nextSTT.set(name, provider);
+        for (const [name, provider] of built.tts) nextTTS.set(name, provider);
+
+        this.config = newConfig;
+        this.sttProviders = nextSTT;
+        this.ttsProviders = nextTTS;
+        this.factoryOwnedSTT = new Set(built.stt.keys());
+        this.factoryOwnedTTS = new Set(built.tts.keys());
+        this.runtimeRevision = baseRevision + 1;
+        committed = true;
+      },
+      rollback: () => {
+        if (!committed || !previous) return;
+        if (this.runtimeRevision !== baseRevision + 1) throw new Error('Speech runtime changed before provider refresh rollback');
+        this.config = previous.config;
+        this.sttProviders = previous.sttProviders;
+        this.ttsProviders = previous.ttsProviders;
+        this.factoryOwnedSTT = previous.factoryOwnedSTT;
+        this.factoryOwnedTTS = previous.factoryOwnedTTS;
+        this.runtimeRevision = baseRevision;
+        committed = false;
+      },
+    };
   }
 
   /**
@@ -115,21 +207,6 @@ export class SpeechService {
    * (e.g. from `@openacp/msedge-tts-plugin`) are preserved rather than discarded.
    */
   refreshProviders(newConfig: SpeechServiceConfig): void {
-    if (!this.providerFactory) { this.config = newConfig; return }
-    // Construct the complete replacement first. A factory failure leaves the
-    // active config and providers untouched.
-    const built = this.providerFactory(newConfig);
-    const nextSTT = new Map(this.sttProviders);
-    const nextTTS = new Map(this.ttsProviders);
-    for (const name of this.factoryOwnedSTT) nextSTT.delete(name);
-    for (const name of this.factoryOwnedTTS) nextTTS.delete(name);
-    for (const [name, provider] of built.stt) nextSTT.set(name, provider);
-    for (const [name, provider] of built.tts) nextTTS.set(name, provider);
-
-    this.config = newConfig;
-    this.sttProviders = nextSTT;
-    this.ttsProviders = nextTTS;
-    this.factoryOwnedSTT = new Set(built.stt.keys());
-    this.factoryOwnedTTS = new Set(built.tts.keys());
+    this.prepareProviderRefresh(newConfig).commit();
   }
 }

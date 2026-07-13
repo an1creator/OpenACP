@@ -1,4 +1,5 @@
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import type { OpenACPPlugin, InstallContext, PluginContext } from '../../core/plugin/types.js'
 import type { OpenACPCore } from '../../core/core.js'
 import type { Session } from '../../core/sessions/session.js'
@@ -11,10 +12,63 @@ import {
 } from './native-stt.js'
 import { installNpmPlugin } from '../../core/plugin/plugin-installer.js'
 import { registerSpeechSettingsCommand } from './settings-command.js'
+import { GroqSTT } from './providers/groq.js'
 
 // TTS is provided by a separate optional plugin so the core speech plugin
 // doesn't bundle a large native dependency on every install.
 const EDGE_TTS_PLUGIN = '@openacp/msedge-tts-plugin'
+
+async function verifyTerminalGroqCandidate(ctx: InstallContext, key: string): Promise<void> {
+  const fetcher = ctx.instanceRoot
+    ? new (await import('../../core/network/proxy-service.js')).ProxyService(ctx.instanceRoot).createFetch('services.speech')
+    : globalThis.fetch
+  const result = await new GroqSTT(key, undefined, fetcher).checkAccess(AbortSignal.timeout(10_000))
+  if (!result.ok) throw new Error(`Groq API key was not saved: ${result.message}`)
+}
+
+interface TerminalSettingsPlan {
+  relevantFields: string[]
+  baseDigest: string
+  set: Record<string, unknown>
+  remove?: string[]
+}
+
+export class TerminalSpeechSettingsConflictError extends Error {
+  constructor() {
+    super('Speech settings changed while this wizard was open. Nothing was saved. Reopen the Speech configurator and review the latest values.')
+    this.name = 'TerminalSpeechSettingsConflictError'
+  }
+}
+
+function relevantSettingsDigest(settings: Record<string, unknown>, fields: string[]): string {
+  const snapshot = [...new Set(fields)].sort().map((field) => ({
+    field,
+    present: Object.prototype.hasOwnProperty.call(settings, field),
+    value: settings[field],
+  }))
+  return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')
+}
+
+function terminalSettingsPlan(
+  base: Record<string, unknown>,
+  relevantFields: string[],
+  set: Record<string, unknown>,
+  remove?: string[],
+): TerminalSettingsPlan {
+  return { relevantFields, baseDigest: relevantSettingsDigest(base, relevantFields), set, remove }
+}
+
+async function commitTerminalSettings(ctx: InstallContext, plan: TerminalSettingsPlan): Promise<void> {
+  if (!ctx.transactSettings) throw new Error('This OpenACP host does not support transactional terminal settings. Update OpenACP and reopen the Speech configurator.')
+  await ctx.transactSettings((current) => {
+    if (relevantSettingsDigest(current, plan.relevantFields) !== plan.baseDigest) {
+      throw new TerminalSpeechSettingsConflictError()
+    }
+    const next = { ...current, ...plan.set }
+    for (const field of plan.remove ?? []) delete next[field]
+    return { settings: next, result: undefined }
+  })
+}
 
 const speechPlugin: OpenACPPlugin = {
   name: '@openacp/speech',
@@ -28,6 +82,7 @@ const speechPlugin: OpenACPPlugin = {
 
   async install(ctx: InstallContext) {
     const { terminal, settings } = ctx
+    const baseSettings = await settings.getAll()
     const pluginsDir = ctx.instanceRoot ? path.join(ctx.instanceRoot, 'plugins') : undefined
     const installEnv = ctx.instanceRoot
       ? new (await import('../../core/network/proxy-service.js')).ProxyService(ctx.instanceRoot).buildChildEnv('services.pluginInstaller', process.env as Record<string, string>)
@@ -35,7 +90,7 @@ const speechPlugin: OpenACPPlugin = {
 
     // Interactive setup
     const enableStt = await terminal.confirm({
-      message: 'Enable speech-to-text (STT)?',
+      message: 'Enable voice-message transcription?',
       initialValue: false,
     })
 
@@ -46,26 +101,27 @@ const speechPlugin: OpenACPPlugin = {
 
     if (enableStt) {
       sttProvider = await terminal.select({
-        message: 'STT provider:',
+        message: 'Where should voice messages be transcribed?',
         options: [
-          { value: LOCAL_WHISPER_PROVIDER, label: 'Local faster-whisper', hint: 'Private and offline after the first model download' },
-          { value: 'groq', label: 'Groq (Whisper)', hint: 'Hosted API, requires an API key' },
+          { value: LOCAL_WHISPER_PROVIDER, label: 'Local (on this host)', hint: 'Downloads the model on first use, then processes locally' },
+          { value: 'groq', label: 'Groq (cloud)', hint: 'Sends audio to Groq and requires an API key' },
         ],
       })
 
       if (sttProvider === 'groq') {
-        groqApiKey = await terminal.text({
-          message: 'Groq API key:',
+        groqApiKey = await terminal.password({
+          message: 'Groq API key (input is hidden):',
           validate: (v) => (!v.trim() ? 'API key cannot be empty' : undefined),
         })
         groqApiKey = groqApiKey.trim()
+        await verifyTerminalGroqCandidate(ctx, groqApiKey)
       } else {
         localWhisperLanguage = (await terminal.text({
-          message: 'Local Whisper language:',
+          message: 'Spoken language code (for example ru or en):',
           defaultValue: LOCAL_WHISPER_DEFAULTS.language,
         })).trim() || LOCAL_WHISPER_DEFAULTS.language
         localWhisperModel = (await terminal.text({
-          message: 'Local Whisper model:',
+          message: 'Local transcription model (downloads on first use):',
           defaultValue: LOCAL_WHISPER_DEFAULTS.model,
         })).trim() || LOCAL_WHISPER_DEFAULTS.model
       }
@@ -96,7 +152,7 @@ const speechPlugin: OpenACPPlugin = {
       ttsVoice = ttsVoice.trim()
     }
 
-    await settings.setAll({
+    const installedSettings = {
       sttProvider,
       groqApiKey,
       localWhisperLanguage,
@@ -108,8 +164,13 @@ const speechPlugin: OpenACPPlugin = {
       localWhisperTimeoutMs: LOCAL_WHISPER_DEFAULTS.timeoutMs,
       ttsProvider: ttsProvider === 'none' ? null : ttsProvider,
       ttsVoice,
-    })
-    terminal.log.success('Speech settings saved')
+    }
+    await commitTerminalSettings(ctx, terminalSettingsPlan(
+      baseSettings,
+      Object.keys(installedSettings),
+      installedSettings,
+    ))
+    terminal.log.success('Speech settings saved. You can change transcription later in Settings → Speech-to-text or with /speech.')
   },
 
   async configure(ctx: InstallContext) {
@@ -119,7 +180,7 @@ const speechPlugin: OpenACPPlugin = {
     const choice = await terminal.select({
       message: 'What to configure?',
       options: [
-        { value: 'stt', label: 'Change STT provider/key' },
+        { value: 'stt', label: 'Speech-to-text method and access' },
         { value: 'tts', label: 'Change TTS provider/voice' },
         { value: 'done', label: 'Done' },
       ],
@@ -127,40 +188,66 @@ const speechPlugin: OpenACPPlugin = {
 
     if (choice === 'stt') {
       const provider = await terminal.select({
-        message: 'STT provider:',
+        message: 'Where should voice messages be transcribed?',
         options: [
-          { value: LOCAL_WHISPER_PROVIDER, label: 'Local faster-whisper', hint: 'Private and offline after the first model download' },
-          { value: 'groq', label: 'Groq (Whisper)', hint: 'Hosted API, requires an API key' },
-          { value: 'none', label: 'None (disable STT)' },
+          { value: LOCAL_WHISPER_PROVIDER, label: 'Local (on this host)', hint: 'Downloads the model on first use, then processes locally' },
+          { value: 'groq', label: 'Groq (cloud)', hint: 'Sends audio to Groq and requires an API key' },
+          { value: 'none', label: 'Off', hint: 'Do not convert voice messages to text' },
         ],
       })
-      await settings.set('sttProvider', provider === 'none' ? null : provider)
+      const set: Record<string, unknown> = { sttProvider: provider === 'none' ? null : provider }
+      const relevantFields = ['sttProvider']
+      let remove: string[] | undefined
       if (provider === 'groq') {
-        const key = await terminal.text({
-          message: 'Groq API key:',
-          defaultValue: (current.groqApiKey as string) ?? '',
-          validate: (v) => (!v.trim() ? 'API key cannot be empty' : undefined),
-        })
-        await settings.set('groqApiKey', key.trim())
+        const hasSavedKey = typeof current.groqApiKey === 'string' && current.groqApiKey.trim().length > 0
+        relevantFields.push('groqApiKey')
+        const keyAction = hasSavedKey
+          ? await terminal.select({
+              message: 'A Groq API key is saved and hidden. What should OpenACP do?',
+              options: [
+                { value: 'keep', label: 'Keep saved key' },
+                { value: 'replace', label: 'Replace saved key' },
+                { value: 'clear', label: 'Clear key and turn transcription off' },
+              ],
+            })
+          : 'replace'
+        if (keyAction === 'clear') {
+          set.sttProvider = null
+          remove = ['groqApiKey']
+          await commitTerminalSettings(ctx, terminalSettingsPlan(current, relevantFields, set, remove))
+          terminal.log.success('Groq API key cleared. Speech-to-text is off.')
+          return
+        }
+        if (keyAction === 'replace') {
+          const key = await terminal.password({
+            message: 'New Groq API key (input is hidden):',
+            validate: (v) => (!v.trim() ? 'API key cannot be empty' : undefined),
+          })
+          const candidate = key.trim()
+          await verifyTerminalGroqCandidate(ctx, candidate)
+          set.groqApiKey = candidate
+        }
       } else if (provider === LOCAL_WHISPER_PROVIDER) {
+        relevantFields.push('localWhisperLanguage', 'localWhisperModel')
         const language = await terminal.text({
-          message: 'Local Whisper language:',
+          message: 'Spoken language code (for example ru or en):',
           defaultValue: (current.localWhisperLanguage as string) ?? LOCAL_WHISPER_DEFAULTS.language,
         })
         const model = await terminal.text({
-          message: 'Local Whisper model:',
+          message: 'Local transcription model (downloads on first use):',
           defaultValue: (current.localWhisperModel as string) ?? LOCAL_WHISPER_DEFAULTS.model,
         })
-        await settings.set('localWhisperLanguage', language.trim() || LOCAL_WHISPER_DEFAULTS.language)
-        await settings.set('localWhisperModel', model.trim() || LOCAL_WHISPER_DEFAULTS.model)
+        set.localWhisperLanguage = language.trim() || LOCAL_WHISPER_DEFAULTS.language
+        set.localWhisperModel = model.trim() || LOCAL_WHISPER_DEFAULTS.model
       }
-      terminal.log.success('STT settings updated')
+      await commitTerminalSettings(ctx, terminalSettingsPlan(current, relevantFields, set, remove))
+      terminal.log.success('Speech-to-text settings updated')
     } else if (choice === 'tts') {
       const voice = await terminal.text({
         message: 'TTS voice (leave blank for default):',
         defaultValue: (current.ttsVoice as string) ?? '',
       })
-      await settings.set('ttsVoice', voice.trim())
+      await commitTerminalSettings(ctx, terminalSettingsPlan(current, ['ttsVoice'], { ttsVoice: voice.trim() }))
       terminal.log.success('TTS settings updated')
     }
   },
@@ -174,15 +261,15 @@ const speechPlugin: OpenACPPlugin = {
 
   async setup(ctx) {
     ctx.registerEditableFields([
-      { key: 'sttProvider', displayName: 'Speech to Text', type: 'select', scope: 'safe', hotReload: true, options: [LOCAL_WHISPER_PROVIDER, 'groq'] },
-      { key: 'groqApiKey', displayName: 'Groq STT API Key', type: 'string', scope: 'sensitive', hotReload: true },
-      { key: 'localWhisperLanguage', displayName: 'Local Whisper Language', type: 'string', scope: 'safe', hotReload: true },
-      { key: 'localWhisperModel', displayName: 'Local Whisper Model', type: 'string', scope: 'safe', hotReload: true },
-      { key: 'localWhisperBeamSize', displayName: 'Local Whisper Beam Size', type: 'number', scope: 'safe', hotReload: true },
-      { key: 'localWhisperVadFilter', displayName: 'Local Whisper VAD Filter', type: 'toggle', scope: 'safe', hotReload: true },
-      { key: 'localWhisperDevice', displayName: 'Local Whisper Device', type: 'select', scope: 'safe', hotReload: true, options: ['cpu', 'cuda', 'auto'] },
-      { key: 'localWhisperComputeType', displayName: 'Local Whisper Compute Type', type: 'string', scope: 'safe', hotReload: true },
-      { key: 'localWhisperTimeoutMs', displayName: 'Local Whisper Timeout (ms)', type: 'number', scope: 'safe', hotReload: true },
+      { key: 'sttProvider', displayName: 'Speech-to-text method', type: 'select', scope: 'safe', hotReload: true, options: [LOCAL_WHISPER_PROVIDER, 'groq'] },
+      { key: 'groqApiKey', displayName: 'Groq API Key', type: 'string', scope: 'sensitive', hotReload: true },
+      { key: 'localWhisperLanguage', displayName: 'Local Transcription Language', type: 'string', scope: 'safe', hotReload: true },
+      { key: 'localWhisperModel', displayName: 'Local Transcription Model', type: 'string', scope: 'safe', hotReload: true },
+      { key: 'localWhisperBeamSize', displayName: 'Local Recognition Beam Size', type: 'number', scope: 'safe', hotReload: true },
+      { key: 'localWhisperVadFilter', displayName: 'Local Voice Activity Filter', type: 'toggle', scope: 'safe', hotReload: true },
+      { key: 'localWhisperDevice', displayName: 'Local Processing Device', type: 'select', scope: 'safe', hotReload: true, options: ['cpu', 'cuda', 'auto'] },
+      { key: 'localWhisperComputeType', displayName: 'Local Compute Type', type: 'string', scope: 'safe', hotReload: true },
+      { key: 'localWhisperTimeoutMs', displayName: 'Local Processing Time Limit (ms)', type: 'number', scope: 'safe', hotReload: true },
       { key: 'ttsProvider', displayName: 'Text to Speech', type: 'select', scope: 'safe', hotReload: true, options: ['edge-tts'] },
     ])
 

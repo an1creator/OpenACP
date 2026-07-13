@@ -51,7 +51,7 @@ describe('network credential redaction', () => {
     const moduleUrl = new URL('../../network/proxy-service.ts', import.meta.url).href
     const script = `import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import debug from 'debug'; import { ProxyService } from ${JSON.stringify(moduleUrl)};
 debug('app:visible')('unrelated-debug-marker');
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'openacp-debug-')); const p=new ProxyService(root);
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'openacp-debug-')); const p=new ProxyService(root, undefined, undefined, async () => undefined);
 p.saveProfile({id:'p',protocol:'http',host:'127.0.0.1',port:9,username:'u',password:${JSON.stringify(secret)}});
 await p.setRoute('services.agentRegistry','profile:p'); try { await p.createFetch('services.agentRegistry')('http://example.invalid') } catch {}; fs.rmSync(root,{recursive:true,force:true});`
     const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', script], {

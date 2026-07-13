@@ -96,6 +96,33 @@ describe('proxy CLI automation contract', () => {
     expect(apiCall.mock.calls[0][1]).toContain('expectedRevision=18')
   })
 
+  it('renders status as human sections outside JSON mode without exposing credentials', async () => {
+    apiCall.mockResolvedValue(new Response(JSON.stringify({
+      profiles: [{ id: 'work', name: 'Work proxy', protocol: 'http', host: 'proxy.test', port: 8080, hasCredentials: true }],
+      routing: { global: 'direct', routes: { 'agents.codex': 'profile:work' } },
+      diagnostics: [{ scope: 'agents.codex', route: 'profile:work', resolvedFrom: 'agents.codex' }],
+      environment: { compatibilityMode: false, daemonWideProxyActive: false },
+    }), { status: 200 }))
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const { cmdProxy } = await import('../proxy.js')
+    await cmdProxy(['status'], '/tmp/instance')
+    const output = log.mock.calls.map(([line]) => String(line)).join('\n')
+    log.mockRestore()
+    expect(output).toContain('Network proxy')
+    expect(output).toContain('Proxy profiles')
+    expect(output).toContain('Saved route overrides')
+    expect(output).toContain('Effective routes')
+    expect(output).toContain('Route overrides: 1')
+    expect(output).toContain('Codex: Use profile “Work proxy”')
+    expect(output).toContain('(source: Codex)')
+    expect(output).toContain('http://proxy.test:8080')
+    expect(output).not.toContain('agents.codex')
+    expect(output).not.toContain('HTTP://')
+    expect(output).toContain('credentials saved (hidden)')
+    expect(output).not.toContain('password')
+    expect(output.trim().startsWith('{')).toBe(false)
+  })
+
   it('passes protected proxyUrl JSON as the exclusive endpoint representation', async () => {
     const file = fixture('url.json', JSON.stringify({ proxyUrl: 'socks5h://alice:secret@proxy.test:1080', name: 'Private' }))
     apiCall.mockResolvedValue(new Response(JSON.stringify({ ok: true, profile: { id: 'private', name: 'Private', hasCredentials: true } }), { status: 200 }))

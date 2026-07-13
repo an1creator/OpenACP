@@ -1,6 +1,7 @@
 import { readApiPort, apiCall } from '../api-client.js'
 import { isJsonMode, jsonSuccess, jsonError, muteForJson, ErrorCodes, type ErrorCode } from '../output.js'
 import { redactNetworkSecrets } from '../../core/security/network-redaction.js'
+import { proxyRouteSourceLabel, proxyScopeLabel } from '../../core/network/proxy-labels.js'
 import fs from 'node:fs'
 
 function option(args: string[], name: string): string | undefined {
@@ -11,18 +12,18 @@ function option(args: string[], name: string): string | undefined {
 
 export function printProxyHelp(): void {
   console.log(`
-\x1b[1mProxy Management\x1b[0m — profiles and scoped network routes
+\x1b[1mNetwork proxy\x1b[0m — saved proxy profiles and per-traffic routes
 \x1b[2mRequires a running OpenACP daemon. All commands support --json.\x1b[0m
 
-\x1b[1mProfile Commands:\x1b[0m
+\x1b[1mProxy profiles:\x1b[0m
   openacp proxy status
-      List redacted profiles, routing, registered scopes, and diagnostics.
+      Show hidden-credential profile status, saved routes, effective routes, and diagnostics.
   openacp proxy create <id> --from-json <0600-file> [--expected-revision <n>]
-      Create a profile; an existing ID returns PROXY_PROFILE_EXISTS.
+      Create a profile from a protected JSON file. Test it first with test-candidate.
   openacp proxy update <id> --from-json <0600-file> [--expected-revision <n>]
-      Update a profile. JSON may set clearCredentials=true.
+      Update an existing profile. JSON may replace credentials or set clearCredentials=true.
   openacp proxy import <id> --env-file <0600-file> [--name <label>] [--expected-revision <n>]
-      Import HTTP(S)_PROXY, ALL_PROXY, and NO_PROXY from a protected env file.
+      Import HTTP(S)_PROXY, ALL_PROXY, and NO_PROXY from a protected env file; secrets stay hidden.
   openacp proxy test-candidate <id> --from-json <0600-file>
       Test a complete profile in memory without saving it.
   openacp proxy test --profile <id> [--url <approved-https-url>]
@@ -30,20 +31,20 @@ export function printProxyHelp(): void {
   openacp proxy delete <id> [--reassign <direct|inherit|profile:id>] [--expected-revision <n>]
       Delete a profile; atomically reassign routes when the profile is in use.
 
-\x1b[1mRouting Commands:\x1b[0m
+\x1b[1mTraffic routes:\x1b[0m
   openacp proxy set <scope|global> <direct|inherit|profile:id> [--expected-revision <n>]
-      Set an exact, category-default, or global route.
+      Set an exact, category-default, or global route. "inherit" means use host proxy settings.
   openacp proxy clear <scope|global> [--expected-revision <n>]
-      Clear an override (global resets to inherit).
+      Remove a saved override so the scope uses its category/global parent (global resets to host proxy settings).
   openacp proxy test --scope <scope> [--url <approved-https-url>]
       Test the effective route for a registered scope.
 
-Scopes use exact/category names such as channels.telegram, channels.default,
+Technical scopes use exact/category names such as channels.telegram, channels.default,
 agents.codex, agents.default, services.npmUpdate, and plugins.default.
 JSON/env input paths must be mode-0600 regular files. Put username/password only
 inside those files, never in command arguments. Credentials are write-only and
 never printed by status, command output, diagnostics, or errors.
-Quick URL profile JSON may use either protocol/host/port fields or one write-only proxyUrl;
+Quick URL profile JSON may use either protocol/host/port fields or one hidden proxyUrl;
 the forms are mutually exclusive and proxyUrl must include an explicit port.
 `)
 }
@@ -160,6 +161,80 @@ function proxyErrorCode(code: string | undefined): typeof ErrorCodes[keyof typeo
   return code && known.has(code)
     ? code as typeof ErrorCodes[keyof typeof ErrorCodes]
     : ErrorCodes.PROXY_ERROR
+}
+
+function cliRouteLabel(route: unknown, profiles: Array<Record<string, unknown>> = []): string {
+  if (route === 'direct') return 'Connect directly'
+  if (route === 'inherit') return 'Use host proxy settings'
+  if (typeof route === 'string' && route.startsWith('profile:')) {
+    const id = route.slice('profile:'.length)
+    const profile = profiles.find((item) => item.id === id)
+    return `Use profile “${String(profile?.name ?? id)}”`
+  }
+  return String(route ?? 'Not set')
+}
+
+function printHumanProxyResult(command: string, data: Record<string, unknown>): void {
+  if (command === 'status' || command === 'list' || command === 'routes') {
+    const profiles = Array.isArray(data.profiles) ? data.profiles as Array<Record<string, unknown>> : []
+    const routing = data.routing && typeof data.routing === 'object' ? data.routing as { global?: unknown; routes?: Record<string, unknown> } : {}
+    const environment = data.environment && typeof data.environment === 'object' ? data.environment as { compatibilityMode?: boolean; daemonWideProxyActive?: boolean } : {}
+    const diagnostics = Array.isArray(data.diagnostics) ? data.diagnostics as Array<Record<string, unknown>> : []
+    console.log('Network proxy')
+    console.log(`  Mode: ${environment.compatibilityMode || environment.daemonWideProxyActive ? 'Compatibility mode (running daemon has proxy variables)' : 'Scoped routing'}`)
+    console.log(`  Default: ${cliRouteLabel(routing.global, profiles)}`)
+    console.log(`  Profiles: ${profiles.length} · Route overrides: ${Object.keys(routing.routes ?? {}).length}`)
+    console.log('\nProxy profiles')
+    if (!profiles.length) console.log('  None. Create and test a profile, then assign it to traffic.')
+    for (const profile of profiles) {
+      console.log(`  ${String(profile.name ?? profile.id)} — ${String(profile.protocol).toLowerCase()}://${String(profile.host)}:${String(profile.port)} — credentials ${profile.hasCredentials ? 'saved (hidden)' : 'not set'}`)
+    }
+    console.log('\nSaved route overrides')
+    const overrides = Object.entries(routing.routes ?? {})
+    if (!overrides.length) console.log('  None; traffic uses category or global defaults.')
+    for (const [scope, route] of overrides) console.log(`  ${proxyScopeLabel(scope)}: ${cliRouteLabel(route, profiles)}`)
+    console.log('\nEffective routes')
+    if (!diagnostics.length) console.log('  No registered routes.')
+    for (const item of diagnostics) {
+      const scope = String(item.scope ?? '')
+      const source = String(item.resolvedFrom ?? 'global')
+      console.log(`  ${proxyScopeLabel(scope)}: ${cliRouteLabel(item.route, profiles)} (source: ${proxyRouteSourceLabel(source)})${item.warning ? ` — ${String(item.warning)}` : ''}`)
+    }
+    return
+  }
+  if (command === 'test' || command === 'test-candidate') {
+    const target = data.target && typeof data.target === 'object' ? data.target as Record<string, unknown> : {}
+    console.log(`Connection test passed${data.status ? ` (HTTP ${String(data.status)})` : ''}.`)
+    if (target.scope) console.log(`  Traffic: ${proxyScopeLabel(String(target.scope))}`)
+    if (target.profile) console.log(`  Proxy profile: ${String(target.profile)}`)
+    console.log('No settings were changed.')
+    return
+  }
+  const profile = data.profile && typeof data.profile === 'object' ? data.profile as Record<string, unknown> : undefined
+  if (profile) {
+    console.log(`Proxy profile “${String(profile.name ?? profile.id)}” was saved.`)
+    console.log(`  Endpoint: ${String(profile.protocol).toLowerCase()}://${String(profile.host)}:${String(profile.port)}`)
+    console.log(`  Credentials: ${profile.hasCredentials ? 'Saved (hidden)' : 'Not set'}`)
+    console.log(`Next: run openacp proxy test --profile ${String(profile.id)}, then assign it with /proxy or openacp proxy set <scope> profile:${String(profile.id)}.`)
+    return
+  }
+  if (command === 'set') {
+    const change = data.change && typeof data.change === 'object' ? data.change as Record<string, unknown> : {}
+    console.log(`Route updated: ${proxyScopeLabel(String(change.scope ?? 'traffic'))} now uses ${cliRouteLabel(change.route)}.`)
+    if (change.activeAgentProcessesUnaffected) console.log('Existing coding-agent sessions keep their current connection; new sessions use the updated route.')
+    return
+  }
+  if (command === 'clear') {
+    const resolution = data.resolution && typeof data.resolution === 'object' ? data.resolution as Record<string, unknown> : {}
+    console.log(`Route override removed. Effective route: ${cliRouteLabel(resolution.route)} (source: ${proxyRouteSourceLabel(String(resolution.resolvedFrom ?? 'global'))}).`)
+    return
+  }
+  if (command === 'delete') {
+    const reassigned = Array.isArray(data.reassignedScopes) ? data.reassignedScopes : []
+    console.log(`Proxy profile deleted.${reassigned.length ? ` Reassigned traffic: ${reassigned.map((scope) => proxyScopeLabel(String(scope))).join(', ')}.` : ''}`)
+    return
+  }
+  console.log('Proxy command completed.')
 }
 
 /** Operational CLI for the daemon's redacted proxy API. */
@@ -299,5 +374,5 @@ export async function cmdProxy(args: string[], instanceRoot?: string, extractedN
     process.exit(1)
   }
   if (json) jsonSuccess(data)
-  console.log(JSON.stringify(data, null, 2))
+  printHumanProxyResult(command, data)
 }

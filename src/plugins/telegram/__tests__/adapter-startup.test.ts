@@ -239,7 +239,7 @@ describe('TelegramAdapter startup sequence', () => {
 
     expect(bot.api.setMyCommands).toHaveBeenCalledTimes(6)
     expect(bot.commandScopes.get('default:neutral')).toContainEqual({
-      command: 'proxy', description: 'Manage scoped proxy routing',
+      command: 'proxy', description: 'Configure network proxy',
     })
     expect(bot.commandScopes.get('chat:neutral')).toContainEqual({
       command: 'community', description: 'Community command',
@@ -270,7 +270,7 @@ describe('TelegramAdapter startup sequence', () => {
 
     expect(bot.commandScopes.get('default:neutral')).toContainEqual({
       command: 'proxy',
-      description: 'Manage scoped proxy routing',
+      description: 'Configure network proxy',
     })
     expect(bot.commandScopes.get('chat:neutral')).toContainEqual({
       command: 'community',
@@ -321,7 +321,7 @@ describe('TelegramAdapter startup sequence', () => {
       for (const scope of ['default', 'chat']) {
         const commands = bot.commandScopes.get(`${scope}:${locale}`)!
         expect(commands).toHaveLength(100)
-        expect(commands).toContainEqual({ command: 'proxy', description: 'Manage scoped proxy routing' })
+        expect(commands).toContainEqual({ command: 'proxy', description: 'Configure network proxy' })
         expect(commands).not.toContainEqual(expect.objectContaining({ command: 'empty_description' }))
         expect(commands).not.toContainEqual(expect.objectContaining({ command: 'long_description' }))
       }
@@ -514,7 +514,7 @@ describe('TelegramAdapter startup sequence', () => {
       editMessageText,
     })
     expect(setRoute).not.toHaveBeenCalled()
-    expect(editMessageText).toHaveBeenCalledWith(expect.stringContaining('network:proxy:manage'), expect.any(Object))
+    expect(editMessageText).toHaveBeenCalledWith(expect.stringContaining('Administrator permission'), expect.any(Object))
   })
 
   it('opens the canonical proxy home through the generic Settings command callback', async () => {
@@ -526,6 +526,8 @@ describe('TelegramAdapter startup sequence', () => {
     const core = makeMockCore() as any
     const registry = new CommandRegistry()
     const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    core.proxyService.listProfiles = vi.fn().mockReturnValue([])
+    core.proxyService.status = vi.fn().mockReturnValue({ revision: 1, diagnostics: [], routing: { global: 'inherit', routes: {} } })
     core.lifecycleManager.serviceRegistry.get = vi.fn((name: string) => name === 'command-registry' ? registry : name === 'identity' ? identity : null)
     registerProxyCommand(registry, core)
     const adapter = new TelegramAdapter(core, makeTelegramConfig())
@@ -543,13 +545,12 @@ describe('TelegramAdapter startup sequence', () => {
       editMessageText,
     })
 
-    expect(editMessageText).toHaveBeenCalledWith('🌐 Proxy management', {
+    expect(editMessageText).toHaveBeenCalledWith(expect.stringContaining('🌐 Network proxy\nMode: Scoped routing\nDefault: Use host proxy settings'), {
       reply_markup: {
         inline_keyboard: [
-          [{ text: 'Profiles', callback_data: 'c//proxy profiles' }],
-          [{ text: 'Routing', callback_data: 'c//proxy routing' }],
-          [{ text: 'Diagnostics', callback_data: 'c//proxy diagnostics' }],
-          [{ text: 'Help', callback_data: 'c//proxy help' }],
+          [{ text: 'Routes', callback_data: 'c//proxy routing' }],
+          [{ text: 'Proxy profiles', callback_data: 'c//proxy profiles' }],
+          [{ text: 'Test connections', callback_data: 'c//proxy diagnostics' }],
         ],
       },
     })
@@ -589,7 +590,7 @@ describe('TelegramAdapter startup sequence', () => {
     })
     const homeKeyboard = editMessageText.mock.calls.at(-1)![1].reply_markup.inline_keyboard
     expect(homeKeyboard.at(-1)).toEqual([{ text: '◀️ Back to Settings', callback_data: 's:back:refresh' }])
-    const profilesCallback = homeKeyboard[0][0].callback_data
+    const profilesCallback = homeKeyboard.flat().find((button: any) => button.text === 'Proxy profiles').callback_data
     expect(profilesCallback).toBe('c/@settings:/proxy profiles')
 
     await callback!.handler({
@@ -741,5 +742,24 @@ describe('TelegramAdapter startup sequence', () => {
     }, next)
     expect(next).toHaveBeenCalledTimes(1)
     expect(deleteMessage).not.toHaveBeenCalled()
+  })
+
+  it('keeps long proxy and speech draft callbacks within Telegram’s 64-byte limit', async () => {
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+    await adapter.start()
+    const bot = MockBot.instances.at(-1)!
+    const id = 'a'.repeat(36)
+    await (adapter as any).renderCommandResponse({
+      type: 'menu', title: 'Draft actions', options: [
+        { label: 'Save Groq key', command: `/speech groq-save ${id} use` },
+        { label: 'Save proxy profile', command: `/proxy wizard-save ${id}` },
+      ],
+    }, makeTelegramConfig().chatId, 321, '77', 'settings')
+    const markup = bot.api.sendMessage.mock.calls.at(-1)![2].reply_markup.inline_keyboard
+    const callbacks = markup.flat().map((button: any) => button.callback_data)
+    expect(callbacks.every((value: string) => Buffer.byteLength(value, 'utf8') <= 64)).toBe(true)
+    expect(callbacks.slice(0, 2).every((value: string) => value.startsWith('c/#'))).toBe(true)
   })
 })

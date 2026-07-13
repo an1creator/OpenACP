@@ -233,6 +233,14 @@ export interface InstallContext {
   log: Logger
   /** Root of the OpenACP instance directory (e.g. ~/.openacp) */
   instanceRoot?: string
+  /** Atomically derive lifecycle settings from a fresh cross-process-locked snapshot. */
+  transactSettings?<T>(prepare: (current: Record<string, unknown>) => {
+    settings: Record<string, unknown>
+    result: T
+  } | Promise<{
+    settings: Record<string, unknown>
+    result: T
+  }>): Promise<T>
 }
 
 // ─── Migrate Context (for boot-time migration) ───

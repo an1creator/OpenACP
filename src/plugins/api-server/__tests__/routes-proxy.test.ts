@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import Fastify from 'fastify'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ProxyService } from '../../../core/network/proxy-service.js'
+import { ProxyRouteTestError, ProxyService } from '../../../core/network/proxy-service.js'
 import { proxyRoutes } from '../routes/proxy.js'
 import { globalErrorHandler } from '../middleware/error-handler.js'
 
@@ -17,7 +17,9 @@ describe('proxy API routes', () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-proxy-api-'))
     app = Fastify()
     app.setErrorHandler(globalErrorHandler)
-    service = new ProxyService(root)
+    // API contract tests isolate routing semantics from the real internet;
+    // ProxyService unit tests exercise the default approved-target preflight.
+    service = new ProxyService(root, undefined, undefined, async () => undefined)
     authScopes = ['*']
     app.decorateRequest('auth', null)
     app.addHook('onRequest', async (request) => {
@@ -146,6 +148,20 @@ describe('proxy API routes', () => {
     const unknown = await app.inject({ method: 'PUT', url: '/api/v1/proxy/routes/plugins.unknown.flow', payload: { route: 'direct' } })
     expect(unknown.statusCode).toBe(400)
     expect(unknown.json().error.code).toBe('PROXY_UNKNOWN_SCOPE')
+  })
+
+  it('maps clear and delete preflight failures to typed 400 responses', async () => {
+    vi.spyOn(service, 'clearRoute').mockRejectedValueOnce(new ProxyRouteTestError('agents.codex', new Error('parent unavailable')))
+    const clear = await app.inject({ method: 'DELETE', url: '/api/v1/proxy/routes/agents.codex' })
+    expect(clear.statusCode).toBe(400)
+    expect(clear.json().error.code).toBe('PROXY_ROUTE_TEST_FAILED')
+
+    await service.createProfileSafely({ id: 'keep', protocol: 'http', host: 'keep.test', port: 8080 })
+    vi.spyOn(service, 'deleteProfileSafely').mockRejectedValueOnce(new ProxyRouteTestError('agents.codex', new Error('replacement unavailable')))
+    const deletion = await app.inject({ method: 'DELETE', url: '/api/v1/proxy/profiles/keep?reassign=direct' })
+    expect(deletion.statusCode).toBe(400)
+    expect(deletion.json().error.code).toBe('PROXY_ROUTE_TEST_FAILED')
+    expect(service.getProfile('keep')).toBeDefined()
   })
 
   it('blocks private custom test targets before transport dispatch', async () => {

@@ -12,7 +12,8 @@ import { workspaceCheck } from "./checks/workspace.js";
 import { pluginsCheck } from "./checks/plugins.js";
 import { daemonCheck } from "./checks/daemon.js";
 import { tunnelCheck } from "./checks/tunnel.js";
-import { proxyCheck } from './checks/proxy.js';
+import { inspectDaemonProxyEnvironment, proxyCheck } from './checks/proxy.js';
+import { speechCheck } from './checks/speech.js';
 
 /** All registered checks, sorted by order before execution. */
 const ALL_CHECKS: DoctorCheck[] = [
@@ -24,6 +25,7 @@ const ALL_CHECKS: DoctorCheck[] = [
   pluginsCheck,
   daemonCheck,
   tunnelCheck,
+  speechCheck,
   proxyCheck,
 ];
 
@@ -147,6 +149,7 @@ export class DoctorEngine {
       portFilePath: path.join(dataDir, "api.port"),
       pluginsDir: path.join(dataDir, "plugins"),
       logsDir,
+      daemonProxyEnvironment: inspectDaemonProxyEnvironment(path.join(dataDir, "openacp.pid"), dataDir),
       fetchForScope: (scope) => this.proxyService.createFetch(scope),
     };
   }

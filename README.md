@@ -103,7 +103,7 @@ audio attachment
 - `local-whisper` runs on the OpenACP host without an API key and reuses its environment and model cache.
 - Groq provides an optional hosted STT path.
 - Failed transcription preserves the original audio instead of silently dropping it.
-- Open **Settings → Speech-to-Text** (or use `/speech` on any command-capable connector) to choose Off, Local, or Groq and edit local model settings. Groq keys are write-only; changes hot-reload without replacing TTS providers.
+- In Telegram, open **Settings → Speech-to-text** or use `/speech` to see the selected method and setup state, choose Off, Local, or Groq, and edit local settings. Discord and Slack use the same service after host configuration with `openacp plugin configure @openacp/speech`; their current adapters do not register a native `/speech` slash command. A candidate Groq key is checked before it can replace the saved hidden key; changes hot-reload without replacing TTS providers.
 
 Local Whisper requires Python 3 and either `uv` or `python3-venv`; its runtime is prepared on first use. See [Voice and Speech](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/using-openacp/voice-and-speech.md).
 
@@ -119,9 +119,9 @@ agents.cursor: direct
 services.default: direct
 ```
 
-- In Telegram, open **Settings → Proxy Management** or use `/proxy`; other connectors can expose the same connector-neutral command model.
+- In Telegram, open **Settings → Network proxy** or use `/proxy`. Current Discord and Slack adapters do not register a native `/proxy` slash command, so manage their shared routes with the CLI or authenticated REST API. The status-first menu separates saved overrides from effective inherited routes and lets a tested profile be assigned directly to human-labelled traffic.
 - CLI and REST automation are available through `openacp proxy` and `/api/v1/proxy`.
-- `direct` removes inherited proxy environment variables from the selected ACP process; `inherit` follows the parent scope.
+- `direct` removes inherited proxy environment variables from the selected ACP process. An explicit `inherit` route uses host proxy environment variables; clearing an exact override returns that traffic to its category/global parent route.
 - Credentials are write-only, stored separately in a mode-0600 secret store, and never returned in route or status data.
 - Protected JSON imports accept a write-only **Quick URL** in `proxyUrl`; it requires an explicit port and is mutually exclusive with separate endpoint or credential fields.
 - Telegram deletes credential replies before use; environments without that guarantee use protected CLI/API input files.

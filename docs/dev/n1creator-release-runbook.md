@@ -22,7 +22,7 @@ npm pack --dry-run ./dist-publish-sdk
 The root and SDK versions must match the release tag. Version format is
 `YYYY.MMDD.patch`, with the patch counter restarting at `1` on each new calendar
 day. `CHANGELOG.md` must contain a heading beginning with the exact version (for
-example, `## 2026.713.1 - 2026-07-13`). The tag commit must be reachable from
+example, `## 2026.713.2 - 2026-07-13`). The tag commit must be reachable from
 `origin/main`.
 
 ## First publication
@@ -56,7 +56,7 @@ provenance for the release.
 Push the verified commit to `main`, then create and push the matching tag:
 
 ```bash
-VERSION=2026.713.1
+VERSION=2026.713.2
 git tag "v${VERSION}"
 git push origin main
 git push origin "v${VERSION}"

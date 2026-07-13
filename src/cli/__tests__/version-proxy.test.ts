@@ -11,7 +11,7 @@ describe('CLI update scoped network', () => {
 
   it('uses services.npmUpdate for both registry fetch and npm child env', async () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-update-proxy-'))
-    const service = new ProxyService(root)
+    const service = new ProxyService(root, undefined, undefined, async () => undefined)
     service.saveProfile({ id: 'updates', protocol: 'http', host: 'proxy.test', port: 8080, username: 'u', password: 'p' })
     await service.setRoute('services.npmUpdate', 'profile:updates')
     const network = getUpdateNetwork(root)

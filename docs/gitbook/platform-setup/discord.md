@@ -194,13 +194,17 @@ Slash commands are registered automatically when OpenACP starts (guild-scoped, s
 | `/verbosity` | Deprecated alias for `/outputmode` |
 | `/bypass` | Toggle auto-approval of all permission requests |
 | `/tts [on\|off]` | Toggle text-to-speech for the current session |
-| `/settings` | Change configuration in-chat |
-| `/doctor` | Run system diagnostics |
+| `/settings` | Change the configuration fields exposed by the Discord adapter |
+| `/doctor` | Check OpenACP health |
 | `/integrate` | Manage agent integrations |
 | `/restart` | Restart OpenACP |
 | `/update` | Update to the latest version |
 | `/clear` | Reset the assistant session history |
 | `/help` | Show help |
+
+---
+
+The current Discord adapter does not register `/speech` or `/proxy` as Discord slash commands. Voice attachments still use the shared speech service once it is configured. Manage Speech-to-text with `openacp plugin configure @openacp/speech`, and manage scoped routing with `openacp proxy` or the protected REST API. Discord command interactions do not provide the secure/delete-after-capture text input required for Groq or proxy credentials.
 
 ---
 

@@ -127,19 +127,40 @@ async function assertPackagedProxyContract(): Promise<void> {
     const proxyHelp = execFileSync(process.execPath, [cli, '--dir', workspace, 'proxy', '--help'], {
       cwd: workspace, env, encoding: 'utf8',
     })
-    const required = [
-      'Proxy Management', 'openacp proxy status', 'openacp proxy create',
+    const normalizeHelp = (value: string): string => value
+      .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    const normalizedMainHelp = normalizeHelp(mainHelp)
+    const normalizedProxyHelp = normalizeHelp(proxyHelp)
+    const proxyCommands = [
+      'openacp proxy status', 'openacp proxy create',
       'openacp proxy update', 'openacp proxy import', 'openacp proxy test-candidate',
       'openacp proxy set', 'openacp proxy clear', 'openacp proxy test --scope',
-      'openacp proxy test --profile', 'openacp proxy delete', '0600', 'write-only',
-      'Quick URL', 'proxyUrl',
+      'openacp proxy test --profile', 'openacp proxy delete',
     ]
-    if (mainHelp.includes('Tunnels & Network:')) {
+    const topLevelRequired = [
+      'Network proxy', ...proxyCommands, 'regular files with mode 0600',
+      'Credentials are hidden', 'status, command output, diagnostics, and errors never print them',
+      'write-only proxyUrl',
+      'mutually exclusive',
+    ]
+    const proxyHelpRequired = [
+      'Network proxy', 'Proxy profiles', 'Traffic routes', ...proxyCommands,
+      '"inherit" means use host proxy settings',
+      'Remove a saved override so the scope uses its category/global parent',
+      'mode-0600 regular files', 'never in command arguments',
+      'Credentials are write-only', 'never printed by status',
+      'Quick URL', 'proxyUrl', 'mutually exclusive', 'explicit port',
+    ]
+    if (normalizedMainHelp.includes('Tunnels & Network:')) {
       throw new Error('Packaged top-level help still hides proxy management under tunnels')
     }
-    for (const fragment of required) {
-      if (!mainHelp.includes(fragment)) throw new Error(`Packaged top-level help is missing: ${fragment}`)
-      if (!proxyHelp.includes(fragment)) throw new Error(`Packaged proxy help is missing: ${fragment}`)
+    for (const fragment of topLevelRequired) {
+      if (!normalizedMainHelp.includes(fragment)) throw new Error(`Packaged top-level help is missing: ${fragment}`)
+    }
+    for (const fragment of proxyHelpRequired) {
+      if (!normalizedProxyHelp.includes(fragment)) throw new Error(`Packaged proxy help is missing: ${fragment}`)
     }
     const packagedReadme = fs.readFileSync(path.join(root, 'dist-publish', 'README.md'), 'utf8')
     for (const fragment of ['Quick URL', 'proxyUrl', 'mode-0600']) {

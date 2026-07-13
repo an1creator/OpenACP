@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
 describe('release metadata', () => {
-  const version = '2026.713.1'
-  const previousVersion = '2026.712.12'
+  const version = '2026.713.2'
+  const previousVersion = '2026.713.1'
 
   it('keeps package, SDK peer floor, and changelog on the exact release', () => {
     const cli = JSON.parse(fs.readFileSync('package.json', 'utf8'))
@@ -14,14 +14,14 @@ describe('release metadata', () => {
     expect(cli.version).toBe(version)
     expect(sdk.version).toBe(version)
     expect(sdk.peerDependencies['@n1creator/openacp-cli']).toBe(`>=${version}`)
-    expect(version).toBe(`2026.${Number('0713')}.1`)
+    expect(version).toBe(`2026.${Number('0713')}.2`)
     expect(changelog).toMatch(new RegExp(`^## Unreleased\\r?\\n\\r?\\n## ${version.replaceAll('.', '\\.')} - 2026-07-13$`, 'm'))
     expect(changelog.match(new RegExp(`^## ${version.replaceAll('.', '\\.')} - 2026-07-13$`, 'gm'))).toHaveLength(1)
     expect(changelog.slice(changelog.indexOf(`## ${version}`), changelog.indexOf(`## ${previousVersion}`)).trim()).not.toBe('')
-    const taggedSection = changelog.slice(changelog.indexOf(`## ${previousVersion}`), changelog.indexOf('## 2026.712.11'))
-    expect(createHash('sha256').update(taggedSection).digest('hex')).toBe('aa63ad52d1569e251c9c472433057456aa8fbf10d656d023a66f58e234e3a0b3')
+    const taggedSection = changelog.slice(changelog.indexOf(`## ${previousVersion}`), changelog.indexOf('## 2026.712.12'))
+    expect(createHash('sha256').update(taggedSection).digest('hex')).toBe('35b3108b6464dbea432742b3881e1fe5d16fd669dcdde3a040db2f7911161589')
     expect(lockfile).toContain("version: link:../..")
-    expect(lockfile).not.toContain('2026.712.10')
-    expect(changelog).not.toContain('2026.712.13')
+    expect(lockfile).not.toContain(previousVersion)
+    expect(changelog).not.toContain('2026.713.3')
   })
 })

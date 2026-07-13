@@ -32,5 +32,6 @@ export function createInstallContext(opts: CreateInstallContextOpts): InstallCon
     dataDir,
     log: rootLog.child({ plugin: pluginName }),
     instanceRoot,
+    transactSettings: (prepare) => settingsManager.transactPluginSettings(pluginName, prepare),
   }
 }

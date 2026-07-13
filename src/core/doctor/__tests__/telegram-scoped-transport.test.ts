@@ -79,7 +79,7 @@ describe('Telegram doctor scoped transport', () => {
   it.each(['direct', 'profile'] as const)('passes in a clean environment through the %s route', async (route) => {
     const forbiddenGlobalFetch = vi.fn().mockRejectedValue(new Error('unexpected global fetch'))
     vi.stubGlobal('fetch', forbiddenGlobalFetch)
-    const service = new ProxyService(root)
+    const service = new ProxyService(root, undefined, undefined, async () => undefined)
     if (route === 'profile') {
       service.saveProfile({ id: 'usa', protocol: 'http', host: 'proxy.test', port: 8081, username: 'user', password: 'secret' })
       await service.setRoute('channels.telegram', 'profile:usa')
@@ -109,7 +109,7 @@ describe('Telegram doctor scoped transport', () => {
       }
       return Response.json({ ok: true, result: [] })
     })
-    const service = new ProxyService(root)
+    const service = new ProxyService(root, undefined, undefined, async () => undefined)
     await service.setRoute('channels.telegram', 'direct')
 
     const results = await telegramCheck.run(context(service))
@@ -130,7 +130,7 @@ describe('Telegram doctor scoped transport', () => {
       })
       ownership.save(ledger)
     })
-    const service = new ProxyService(root)
+    const service = new ProxyService(root, undefined, undefined, async () => undefined)
     await service.setRoute('channels.telegram', 'direct')
 
     const results = await telegramCheck.run(context(service))
@@ -150,7 +150,7 @@ describe('Telegram doctor scoped transport', () => {
       }
       return Response.json({ ok: true, result: [{ command: 'proxy', description: 'Manage proxy' }] })
     })
-    const service = new ProxyService(root)
+    const service = new ProxyService(root, undefined, undefined, async () => undefined)
     await service.setRoute('channels.telegram', 'direct')
 
     const results = await telegramCheck.run(context(service))
@@ -166,7 +166,7 @@ describe('Telegram doctor scoped transport', () => {
       if (String(input).endsWith('/getMyCommands')) throw new Error('temporary network failure')
       return telegramResponse(input)
     })
-    const service = new ProxyService(root)
+    const service = new ProxyService(root, undefined, undefined, async () => undefined)
     await service.setRoute('channels.telegram', 'direct')
 
     const results = await telegramCheck.run(context(service))
@@ -178,7 +178,7 @@ describe('Telegram doctor scoped transport', () => {
   })
 
   it('returns an actionable failure when the configured route cannot be resolved', async () => {
-    const ctx = context(new ProxyService(root))
+    const ctx = context(new ProxyService(root, undefined, undefined, async () => undefined))
     ctx.fetchForScope = () => { throw new Error('Proxy profile "missing" does not exist') }
     const results = await telegramCheck.run(ctx)
     expect(results.at(-1)).toMatchObject({ status: 'fail' })
@@ -187,7 +187,7 @@ describe('Telegram doctor scoped transport', () => {
   })
 
   it('redacts Telegram and proxy credentials from transport failures', async () => {
-    const ctx = context(new ProxyService(root))
+    const ctx = context(new ProxyService(root, undefined, undefined, async () => undefined))
     const proxyPassword = 'proxy-password'
     ctx.fetchForScope = () => (async () => {
       throw new Error(

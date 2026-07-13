@@ -24,7 +24,7 @@ describe('Groq STT scoped transport', () => {
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-groq-proxy-'))
-    const proxy = new ProxyService(root)
+    const proxy = new ProxyService(root, undefined, undefined, async () => undefined)
     proxy.saveProfile({ id: 'speech', protocol: 'http', host: '127.0.0.1', port })
     await proxy.setRoute('services.default', 'direct')
     await proxy.setRoute('services.speech', 'profile:speech')

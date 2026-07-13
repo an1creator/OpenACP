@@ -61,7 +61,7 @@ describe("SpeechService", () => {
     it("throws when STT not configured", async () => {
       const svc = new SpeechService(makeConfig());
       await expect(svc.transcribe(Buffer.from("test"), "audio/wav"))
-        .rejects.toThrow("STT not configured");
+        .rejects.toThrow("Speech-to-text is off or not ready");
     });
 
     it("delegates to registered provider", async () => {

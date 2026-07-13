@@ -1,6 +1,6 @@
 # Chat Commands
 
-OpenACP responds to commands sent in your chat platform. This page covers every available command, how to use it, and which platforms support it.
+OpenACP responds to commands sent in supported chat platforms. This page covers the built-in Telegram and Discord command surfaces; external adapters can expose a smaller set.
 
 ## Platform comparison
 
@@ -16,7 +16,9 @@ OpenACP responds to commands sent in your chat platform. This page covers every 
 | `/menu` | Yes | Yes | Show interactive menu |
 | `/resume` | Yes | No | Resume from Entire checkpoints |
 | `/settings` | Yes | Yes | Change configuration in-chat |
-| `/doctor` | Yes | Yes | Run system diagnostics |
+| `/doctor` | Yes | Yes | Check OpenACP health |
+| `/speech` | Yes | No direct slash command | Manage native speech-to-text; use the protected host configurator for Discord |
+| `/proxy` | Yes | No direct slash command | Manage scoped proxy routing; use CLI/API for Discord |
 | `/tunnel` | Yes | No | Create a public URL for a local port |
 | `/tunnels` | Yes | No | List active tunnels |
 | `/enable_bypass` | Yes | No | Auto-approve all permissions |
@@ -116,7 +118,15 @@ Open an interactive settings panel. Toggle and select configuration values witho
 
 ### `/doctor`
 
-Run system diagnostics. Checks configuration, agent dependencies, disk access, and connectivity. Results are shown inline with pass/warn/fail status. Fixable issues show a "Fix" button.
+Check OpenACP health, including configuration, agent dependencies, disk access, and connectivity. Results are shown inline with pass/warn/fail status. Fixable issues show a "Fix" button.
+
+### `/speech` (Telegram)
+
+Open the native Speech-to-text status and settings flow. It separates the selected method (Off, Local, or Groq) from setup readiness. Groq keys are checked before save and remain hidden. Discord and Slack do not currently register a native `/speech` slash command; run `openacp plugin configure @openacp/speech` on the host instead.
+
+### `/proxy` (Telegram)
+
+Open scoped network routing. Create and test proxy profiles, then assign them to messaging connectors, coding agents, OpenACP services, or plugins. Discord and Slack do not currently register a native `/proxy` slash command; use `openacp proxy` or the proxy REST API from a protected client.
 
 ### `/tunnel <port> [label]` (Telegram only)
 

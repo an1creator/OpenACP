@@ -281,6 +281,15 @@ interface SettingsAPI {
 }
 ```
 
+Every read returns a fresh on-disk snapshot. Mutating calls are serialized per
+plugin across OpenACP processes, compare the snapshot revision before the atomic
+replacement, and retry from fresh state when a concurrent writer wins. This
+prevents `set()`, `delete()`, and read-modify-write updates from silently losing
+another process's change. Interactive lifecycle hooks that derive a multi-field
+update use `InstallContext.transactSettings()` to work from the latest locked
+snapshot. Settings directories use mode `0700`; settings and lock metadata files
+use mode `0600`.
+
 ### SettingsManager
 
 Core module that creates `SettingsAPI` instances per plugin and handles validation.

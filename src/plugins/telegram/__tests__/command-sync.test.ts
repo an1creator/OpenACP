@@ -28,8 +28,8 @@ function makeApi(initial: Record<string, TelegramBotCommand[]>) {
 
 const desired: TelegramBotCommand[] = [
   { command: 'new', description: 'Create new session' },
-  { command: 'proxy', description: 'Manage scoped proxy routing' },
-  { command: 'doctor', description: 'Run system diagnostics' },
+  { command: 'proxy', description: 'Configure network proxy' },
+  { command: 'doctor', description: 'Check OpenACP health' },
 ]
 const historical = new Set(['new', 'doctor', 'clear', 'summary'])
 const owner: TelegramCommandOwnerIdentity = {

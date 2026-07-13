@@ -14,7 +14,7 @@ vi.mock('proxy-agent', () => ({
   },
 }))
 
-import { ProxyProfileExistsError, ProxyProfileNotFoundError, ProxyService, ProxyValidationError, PROXY_ENV_KEYS } from '../proxy-service.js'
+import { ProxyProfileExistsError, ProxyProfileNotFoundError, ProxyRouteTestError, ProxyService, ProxyValidationError, PROXY_ENV_KEYS } from '../proxy-service.js'
 
 describe('ProxyService', () => {
   let root: string
@@ -265,6 +265,106 @@ describe('ProxyService', () => {
     await expect(service.setRoute('channels.telegram', 'profile:bad')).rejects.toThrow('unreachable')
     expect(service.resolve('channels.telegram').route).toBe('direct')
     expect(changed).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['coding-agent route', 'agents.codex'],
+    ['service route', 'services.speech'],
+    ['category default', 'agents.default'],
+  ])('preflights and rolls back a %s without requiring a specialized tester', async (_label, scope) => {
+    const revision = service.status().revision
+    fetchMock.mockRejectedValueOnce(new Error('approved target unreachable'))
+
+    await expect(service.setRoute(scope, 'direct')).rejects.toBeInstanceOf(ProxyRouteTestError)
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.ipify.org?format=json',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    )
+    expect(service.resolve(scope).route).toBe('inherit')
+    expect(service.status().revision).toBe(revision)
+  })
+
+  it.each([
+    ['global', 'global'],
+    ['category', 'agents.default'],
+  ])('deduplicates the generic preflight for a %s change with one effective transport', async (_label, scope) => {
+    const codexTester = vi.fn(async () => {})
+    const cursorTester = vi.fn(async () => {})
+    service.registerRouteTester('agents.codex', codexTester)
+    service.registerRouteTester('agents.cursor', cursorTester)
+    fetchMock.mockClear()
+
+    await service.setRoute(scope, 'direct')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(codexTester).toHaveBeenCalledOnce()
+    expect(cursorTester).toHaveBeenCalledOnce()
+  })
+
+  it('preflights each distinct candidate transport while keeping transport identities secret-free', async () => {
+    const current = (service as any).store.load()
+    current.routing.global = 'inherit'
+    current.routing.routes['agents.codex'] = 'direct'
+    const candidate = structuredClone(current)
+    candidate.routing.global = 'direct'
+    candidate.routing.routes['agents.codex'] = 'inherit'
+    fetchMock.mockClear()
+
+    await (service as any).testCandidateRoutes(current, candidate)
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    const inheritedSecret = process.env.HTTPS_PROXY
+    process.env.HTTPS_PROXY = 'http://secret-user:secret-password@proxy.internal:8080'
+    try {
+      const identity = (service as any).candidateTransportIdentity({ scope: 'agents.codex', route: 'inherit', resolvedFrom: 'global' })
+      expect(identity).toBe('{"route":"inherit"}')
+      expect(identity).not.toContain('secret-user')
+      expect(identity).not.toContain('proxy.internal')
+    } finally {
+      if (inheritedSecret === undefined) delete process.env.HTTPS_PROXY
+      else process.env.HTTPS_PROXY = inheritedSecret
+    }
+  })
+
+  it('bounds a many-scope mutation to one generic preflight timeout window', async () => {
+    vi.useFakeTimers()
+    try {
+      const preflight = vi.fn(async () => new Promise<void>((resolve) => setTimeout(resolve, 25)))
+      const bounded = new ProxyService(root, 5 * 60_000, process.allowedNodeEnvironmentFlags, preflight)
+      const pending = bounded.setRoute('global', 'direct')
+
+      await vi.advanceTimersByTimeAsync(25)
+      await pending
+
+      expect(preflight).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('preflights clear and preserves the explicit route when reachability fails', async () => {
+    await service.setRoute('services.speech', 'direct')
+    const revision = service.status().revision
+    fetchMock.mockRejectedValueOnce(new Error('parent route unreachable'))
+
+    await expect(service.clearRoute('services.speech')).rejects.toBeInstanceOf(ProxyRouteTestError)
+
+    expect(service.resolve('services.speech')).toMatchObject({ route: 'direct', resolvedFrom: 'services.speech' })
+    expect(service.status().revision).toBe(revision)
+  })
+
+  it('preflights deletion reassignment and preserves both profile and route on failure', async () => {
+    service.saveProfile({ id: 'old', protocol: 'http', host: 'old.test', port: 8080 })
+    await service.setRoute('agents.codex', 'profile:old')
+    const revision = service.status().revision
+    fetchMock.mockRejectedValueOnce(new Error('replacement unreachable'))
+
+    await expect(service.deleteProfileSafely('old', 'direct')).rejects.toBeInstanceOf(ProxyRouteTestError)
+
+    expect(service.getProfile('old')).toBeDefined()
+    expect(service.resolve('agents.codex').route).toBe('profile:old')
+    expect(service.status().revision).toBe(revision)
   })
 
   it('redacts Telegram path tokens from transactional route errors', async () => {

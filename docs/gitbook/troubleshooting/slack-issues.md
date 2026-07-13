@@ -75,16 +75,17 @@ If you haven't finished initial setup, see the [Slack Setup guide](../platform-s
 
 ### Voice messages are not transcribed
 
-**Symptoms:** You send a voice memo in Slack but the agent receives no text, or receives the file path instead of a transcription.
+**Symptoms:** You send a voice memo in Slack but no transcription appears, or the original audio attachment reaches the agent unchanged.
 
-**Cause:** Slack voice clips are audio files. OpenACP downloads the file and passes it to the agent as an audio attachment — but this requires the bot to have the `files:read` scope, and the agent must support audio input.
+**Cause:** Slack voice clips are audio files. OpenACP first downloads the clip, which requires the bot's `files:read` scope. For an agent with native audio capability, OpenACP intentionally keeps the audio attachment. For other agents, the shared `@openacp/speech` service replaces the attachment with transcribed text only when Local or Groq speech-to-text is enabled and ready.
 
 If the download returns an HTML login page instead of binary audio, the `files:read` scope is missing.
 
 **Solution:**
 1. Add `files:read` to your bot's OAuth scopes: **OAuth & Permissions → Bot Token Scopes → Add `files:read`**.
 2. Reinstall the app to the workspace (Slack requires reinstallation after scope changes): **Settings → Install App → Reinstall**.
-3. Confirm your agent supports audio input — agents that do not expose audio capability receive the file path as text instead.
+3. On the protected OpenACP host, run `openacp plugin configure @openacp/speech` and select **Local** or **Groq**. Slack does not expose a secure credential-entry flow. Local downloads and runs the model on the host; Groq checks a candidate API key before saving it hidden.
+4. Run `openacp doctor` to check the selected speech-to-text method and its readiness. If transcription fails, OpenACP reports the error and keeps the original audio attachment instead of silently discarding it.
 
 ---
 

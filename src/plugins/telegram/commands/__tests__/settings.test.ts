@@ -24,11 +24,11 @@ describe('Telegram Settings menu', () => {
       callback_data: string
     }>
     expect(buttons).toContainEqual({
-      text: '🌐 Proxy Management',
+      text: '🌐 Network proxy',
       callback_data: 'c/@settings:/proxy',
     })
     expect(buttons).toContainEqual({
-      text: '🎙 Speech-to-Text',
+      text: '🎙 Speech-to-text',
       callback_data: 'c/@settings:/speech',
     })
     expect(buttons.at(-1)).toEqual({
@@ -36,6 +36,7 @@ describe('Telegram Settings menu', () => {
       callback_data: 's:back',
     })
     expect(buttons.some((button) => button.callback_data === 'c//proxy')).toBe(false)
+    expect(buttons.slice(0, 2).map((button) => button.text)).toEqual(['🎙 Speech-to-text', '🌐 Network proxy'])
   })
 
   it('decodes only the allow-listed Settings return envelope', () => {

@@ -28,7 +28,11 @@ const PROXY_ENV_KEYS = [
   'NODE_USE_ENV_PROXY',
 ] as const
 
+/** Fixed public HTTPS endpoint used for mutation preflight and manual diagnostics. */
+export const PROXY_CONNECTIVITY_TEST_URL = 'https://api.ipify.org?format=json'
+
 type RouteTester = (fetcher: typeof fetch) => Promise<void>
+type ConnectivityPreflight = (fetcher: typeof fetch) => Promise<void>
 type RouteChangedListener = (scope: string, route: ProxyRoute) => void | Promise<void>
 type ManagedFetch = typeof fetch & { destroy?: () => void }
 interface TransportEntry {
@@ -129,6 +133,21 @@ function safeError(error: unknown): Error {
   return new Error(redactNetworkSecrets(message))
 }
 
+async function approvedTargetPreflight(fetcher: typeof fetch): Promise<void> {
+  let response: Response | undefined
+  try {
+    response = await fetcher(PROXY_CONNECTIVITY_TEST_URL, {
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!response.ok) throw new Error(`Connectivity check returned HTTP ${response.status}`)
+  } finally {
+    // Drain the tiny fixed diagnostic response. Cancelling a Response adapted
+    // from node-fetch can close its Web controller while the Node stream is
+    // still forwarding buffered bytes, causing an asynchronous ERR_INVALID_STATE.
+    try { if (response?.body) await response.arrayBuffer() } catch {}
+  }
+}
+
 /** Scoped network policy. It never mutates process.env or a global fetch dispatcher. */
 export class ProxyService {
   private readonly store: ProxyStore
@@ -151,6 +170,7 @@ export class ProxyService {
     instanceRoot: string,
     private readonly retiredLeaseTimeoutMs = 5 * 60_000,
     private readonly allowedNodeEnvironmentFlags: ReadonlySet<string> = process.allowedNodeEnvironmentFlags,
+    private readonly connectivityPreflight: ConnectivityPreflight = approvedTargetPreflight,
   ) {
     this.store = new ProxyStore(instanceRoot)
     try {
@@ -325,18 +345,18 @@ export class ProxyService {
     const { profile: candidate, nextSecrets } = this.buildProfile(input, config, secrets)
     const affectedScopes = this.scopesUsingProfile(config, input.id)
     const candidateSecret = nextSecrets[input.id]
-    // Test the candidate entirely in memory. The active profile and Telegram
-    // transport remain untouched until all protected scopes accept it.
-    for (const [scope, tester] of this.testers) {
-      if (this.resolve(scope).profile?.id === input.id) {
-        const fetcher = this.createProfileFetch(candidate, candidateSecret)
-        try {
-          await tester(fetcher)
-        } catch (error) {
-          throw new ProxyProfileTestError(input.id, error)
-        } finally {
-          fetcher.destroy?.()
-        }
+    // Every affected scope uses the same in-memory candidate transport. Run the
+    // generic reachability check once, then retain every scope-specific health
+    // check; otherwise a global profile can multiply the 10-second timeout.
+    if (affectedScopes.length) {
+      const fetcher = this.createProfileFetch(candidate, candidateSecret)
+      try {
+        await this.connectivityPreflight(fetcher)
+        for (const scope of affectedScopes) await this.testers.get(scope)?.(fetcher)
+      } catch (error) {
+        throw new ProxyProfileTestError(input.id, error)
+      } finally {
+        fetcher.destroy?.()
       }
     }
     this.invalidatePolicyBeforeCommit(config, input.id)
@@ -641,7 +661,7 @@ export class ProxyService {
     return env
   }
 
-  async test(scope: string, targetUrl = 'https://api.ipify.org?format=json'): Promise<{ ok: boolean; status?: number; error?: string }> {
+  async test(scope: string, targetUrl = PROXY_CONNECTIVITY_TEST_URL): Promise<{ ok: boolean; status?: number; error?: string }> {
     if (!this.getKnownScopes().includes(scope)) throw new ProxyUnknownScopeError(scope)
     let response: Response | undefined
     try {
@@ -657,7 +677,7 @@ export class ProxyService {
     let fetcher: ManagedFetch | undefined; let response: Response | undefined
     try {
       fetcher = this.createTransport('services.proxyTest', `profile:${id}`)
-      response = await fetcher(targetUrl ?? 'https://api.ipify.org?format=json', {
+      response = await fetcher(targetUrl ?? PROXY_CONNECTIVITY_TEST_URL, {
         signal: AbortSignal.timeout(10_000),
       })
       return { ok: response.ok, status: response.status }
@@ -673,7 +693,7 @@ export class ProxyService {
     const fetcher = this.createProfileFetch(profile, nextSecrets[profile.id])
     let response: Response | undefined
     try {
-      response = await fetcher(targetUrl ?? 'https://api.ipify.org?format=json', {
+      response = await fetcher(targetUrl ?? PROXY_CONNECTIVITY_TEST_URL, {
         signal: AbortSignal.timeout(10_000),
       })
       return { ok: response.ok, status: response.status }
@@ -730,15 +750,34 @@ export class ProxyService {
     current: ReturnType<ProxyStore['load']>,
     candidate: ReturnType<ProxyStore['load']>,
   ): Promise<void> {
-    for (const [scope, tester] of this.testers) {
-      const before = this.resolveFromConfig(scope, current)
+    // Every effective route mutation gets a real reachability preflight, even
+    // when its consumer has not registered a service-specific health tester.
+    // This keeps agent/service/default/clear/delete writes transactional rather
+    // than protecting only the handful of scopes with specialized testers.
+    const groups = new Map<string, Array<{ scope: string; route: ProxyRoute }>>()
+    for (const scope of this.changedResolutionScopes(current, candidate)) {
       const after = this.resolveFromConfig(scope, candidate)
-      if (before.route !== after.route || before.profile?.id !== after.profile?.id) {
-        // Candidate route is passed explicitly; persistence happens only after this succeeds.
-        const fetcher = this.createTransport(scope, after.route)
-        try { await tester(fetcher) } finally { fetcher.destroy?.() }
+      // Public profile metadata is sufficient to distinguish transports here.
+      // Inherited proxy URLs and write-only credentials never enter this key.
+      const transportKey = this.candidateTransportIdentity(after)
+      groups.set(transportKey, [...(groups.get(transportKey) ?? []), { scope, route: after.route }])
+    }
+    for (const group of groups.values()) {
+      const first = group[0]
+      // Candidate route is passed explicitly; persistence happens only after
+      // this fixed, approved HTTPS target and every scope-specific tester pass.
+      const fetcher = this.createTransport(first.scope, first.route)
+      try {
+        await this.connectivityPreflight(fetcher)
+        for (const { scope } of group) await this.testers.get(scope)?.(fetcher)
+      } finally {
+        fetcher.destroy?.()
       }
     }
+  }
+
+  private candidateTransportIdentity(resolution: ProxyRouteResolution): string {
+    return JSON.stringify({ route: resolution.route, profile: resolution.profile })
   }
 
   private createProfileFetch(

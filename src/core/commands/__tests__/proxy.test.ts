@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { CommandRegistry } from '../../command-registry.js'
 import { clearProxyDraftsForChannel, PROXY_CAPABILITY_ERROR, registerProxyCommand } from '../proxy.js'
 import { ProxyRevisionConflictError } from '../../network/proxy-store.js'
+import { ProxyRouteTestError } from '../../network/proxy-service.js'
 
 function baseArgs() {
   return { raw: '', sessionId: null, channelId: 'test', userId: 'user', reply: vi.fn() }
@@ -23,10 +24,13 @@ describe('/proxy command', () => {
     registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } })
     const menu = await registry.execute('/proxy', baseArgs())
     expect(menu.type).toBe('menu')
+    expect((menu as any).title).toContain('Mode: Scoped routing')
+    expect((menu as any).title).toContain('Default: Use host proxy settings')
+    expect((menu as any).options.map((option: any) => option.label)).toEqual(['Routes', 'Proxy profiles', 'Test connections'])
     const result = await registry.execute('/proxy set agents.codex profile:usa', baseArgs())
     expect(proxyService.setRoute).toHaveBeenCalledWith('agents.codex', 'profile:usa', undefined)
-    expect(result).toMatchObject({ type: 'text' })
-    expect((result as any).text).toContain('active sessions were not restarted')
+    expect(result).toMatchObject({ type: 'menu' })
+    expect((result as any).title).toContain('Existing sessions keep their current connection')
     expect(identity.getUserByIdentity).toHaveBeenCalledTimes(3) // one read gate, then read + mutation re-check
     expect((await registry.execute('/proxy categories', baseArgs())).type).toBe('menu')
     expect((await registry.execute('/proxy category agents', baseArgs())).type).toBe('menu')
@@ -114,6 +118,153 @@ describe('/proxy command', () => {
     expect(secondCategory.options.some((option: any) => option.command === '/proxy scope plugins.connector9 3 0')).toBe(true)
   })
 
+  it('keeps dynamic category and assignment pickers bounded with opaque callbacks', async () => {
+    const registry = new CommandRegistry()
+    const scopes = Array.from({ length: 151 }, (_, index) => `category-${String(index).padStart(3, '0')}-${'x'.repeat(44)}.connector-${'y'.repeat(48)}`)
+    const profile = { id: `profile-${'p'.repeat(56)}`, name: 'Long ID profile', protocol: 'http', host: 'proxy.test', port: 8080 }
+    const proxyService = {
+      status: () => ({ revision: 37, diagnostics: [], routing: { global: 'inherit', routes: {} } }),
+      listProfiles: () => [profile],
+      getProfile: (id: string) => id === profile.id ? profile : undefined,
+      getKnownScopes: () => scopes,
+      resolve: (scope: string) => ({ scope, route: 'inherit', resolvedFrom: 'global' }),
+    }
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } } as any)
+
+    let categories = await registry.execute('/proxy categories 37 0', baseArgs()) as any
+    let categoryPages = 0
+    while (true) {
+      categoryPages++
+      expect(categories.options.length).toBeLessThanOrEqual(100)
+      expect(categories.options.every((option: any) => Buffer.byteLength(option.command, 'utf8') <= 64)).toBe(true)
+      const next = categories.options.find((option: any) => option.label === 'Next')
+      if (!next) break
+      const previousCommand = categories.options.find((option: any) => option.label === 'Previous')?.command
+      categories = await registry.execute(next.command, baseArgs()) as any
+      if (previousCommand) expect(categories.options.some((option: any) => option.label === 'Previous')).toBe(true)
+    }
+    expect(categoryPages).toBe(19)
+
+    const categoryCommand = categories.options.find((option: any) => !['Previous', 'Back'].includes(option.label)).command
+    const category = await registry.execute(categoryCommand, baseArgs()) as any
+    expect(category.options.length).toBeLessThanOrEqual(100)
+    expect(category.options.every((option: any) => Buffer.byteLength(option.command, 'utf8') <= 64)).toBe(true)
+    expect(category.options.some((option: any) => option.label === 'Back')).toBe(true)
+    const scope = await registry.execute(category.options[0].command, baseArgs()) as any
+    expect(scope.options.every((option: any) => Buffer.byteLength(option.command, 'utf8') <= 64)).toBe(true)
+
+    let assignment = await registry.execute(`/proxy assign ${profile.id}`, baseArgs()) as any
+    let assignmentPages = 0
+    while (true) {
+      assignmentPages++
+      expect(assignment.options.length).toBeLessThanOrEqual(100)
+      expect(assignment.options.every((option: any) => Buffer.byteLength(option.command, 'utf8') <= 64)).toBe(true)
+      const next = assignment.options.find((option: any) => option.label === 'Next')
+      if (!next) break
+      assignment = await registry.execute(next.command, baseArgs()) as any
+    }
+    expect(assignmentPages).toBe(19)
+    const assignmentCategoryCommand = assignment.options.find((option: any) => !['Default for all traffic', 'Previous', 'Back to profile'].includes(option.label)).command
+    const assignmentCategory = await registry.execute(assignmentCategoryCommand, baseArgs()) as any
+    expect(assignmentCategory.options.every((option: any) => Buffer.byteLength(option.command, 'utf8') <= 64)).toBe(true)
+    const confirmation = await registry.execute(assignmentCategory.options[0].command, baseArgs()) as any
+    expect(Buffer.byteLength(confirmation.onYes, 'utf8')).toBeLessThanOrEqual(64)
+    expect(Buffer.byteLength(confirmation.onNo, 'utf8')).toBeLessThanOrEqual(64)
+  })
+
+  it('summarizes and paginates long effective routes within connector limits', async () => {
+    const registry = new CommandRegistry()
+    const diagnostics = Array.from({ length: 40 }, (_, index) => ({
+      scope: `plugins.connector-${index}-${'x'.repeat(90)}`,
+      route: 'direct' as const,
+      resolvedFrom: 'global',
+      warning: `Capability note ${'w'.repeat(120)}`,
+      childProcessSupport: 'not-applicable' as const,
+    }))
+    const proxyService = {
+      status: () => ({ revision: 3, diagnostics, routing: { global: 'direct', routes: {} } }),
+      listProfiles: () => [],
+    }
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } } as any)
+
+    const overview = await registry.execute('/proxy routes', baseArgs()) as any
+    expect(overview.title).toContain('Plugins: 40 connections')
+    const detailCommand = overview.options.find((option: any) => option.label.startsWith('Plugins')).command
+    let detail = await registry.execute(detailCommand, baseArgs()) as any
+    let pages = 0
+    while (true) {
+      pages++
+      expect(detail.title.length).toBeLessThan(3_900)
+      expect(detail.options.every((option: any) => Buffer.byteLength(option.command, 'utf8') <= 64)).toBe(true)
+      const next = detail.options.find((option: any) => option.label === 'Next')
+      if (!next) break
+      detail = await registry.execute(next.command, baseArgs()) as any
+    }
+    expect(pages).toBeGreaterThan(1)
+  })
+
+  it('keeps proxy policy unchanged and offers recovery when clear or delete preflight fails', async () => {
+    const registry = new CommandRegistry()
+    const profile = { id: 'old', name: 'Old proxy', protocol: 'http', host: 'old.test', port: 8080 }
+    const clearRoute = vi.fn().mockRejectedValue(new ProxyRouteTestError('agents.codex', new Error('parent unavailable')))
+    const deleteProfileSafely = vi.fn().mockRejectedValue(new ProxyRouteTestError('agents.codex', new Error('replacement unavailable')))
+    const proxyService = {
+      status: () => ({ revision: 7, diagnostics: [], routing: { global: 'inherit', routes: { 'agents.codex': 'profile:old' } } }),
+      getProfile: (id: string) => id === 'old' ? profile : undefined,
+      listProfiles: () => [profile],
+      resolve: () => ({ route: 'profile:old', resolvedFrom: 'agents.codex' }),
+      clearRoute, deleteProfileSafely,
+    }
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } } as any)
+
+    const clear = await registry.execute('/proxy clear agents.codex 7', baseArgs()) as any
+    expect(clear.title).toContain('kept its current override')
+    expect(clear.title).toContain('No settings were changed')
+    expect(clear.options.map((option: any) => option.label)).toEqual(['Retry parent route', 'Choose another route', 'Proxy home'])
+
+    const deletion = await registry.execute('/proxy delete-confirm old 7 direct', baseArgs()) as any
+    expect(deletion.title).toContain('was not deleted')
+    expect(deletion.title).toContain('no traffic was changed')
+    expect(deletion.options).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: 'Retry deletion', command: '/proxy delete-confirm old 7 direct' }),
+      expect.objectContaining({ label: 'Choose another replacement', command: '/proxy delete old 7 0' }),
+    ]))
+    expect(clearRoute).toHaveBeenCalledWith('agents.codex', 7)
+    expect(deleteProfileSafely).toHaveBeenCalledWith('old', 'direct', 7)
+  })
+
+  it('summarizes and paginates large profile assignment and delete screens', async () => {
+    const registry = new CommandRegistry()
+    const profile = { id: 'shared', name: 'Shared proxy', protocol: 'http', host: 'shared.test', port: 8080 }
+    const routes = Object.fromEntries(Array.from({ length: 35 }, (_, index) => [
+      `plugins.connector-${index}-${'x'.repeat(80)}`,
+      'profile:shared',
+    ]))
+    const proxyService = {
+      status: () => ({ revision: 9, diagnostics: [], routing: { global: 'profile:shared', routes } }),
+      getProfile: (id: string) => id === 'shared' ? profile : undefined,
+      listProfiles: () => [profile],
+    }
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } } as any)
+
+    const profileMenu = await registry.execute('/proxy profile shared', baseArgs()) as any
+    expect(profileMenu.title).toContain('Assigned to: 36 traffic routes')
+    expect(profileMenu.title.length).toBeLessThan(1_000)
+    const assignmentCommand = profileMenu.options.find((option: any) => option.label === 'View current assignments').command
+    const firstAssignments = await registry.execute(assignmentCommand, baseArgs()) as any
+    expect(firstAssignments.title.length).toBeLessThan(3_900)
+    expect(firstAssignments.options).toContainEqual(expect.objectContaining({ label: 'Next' }))
+
+    const deletion = await registry.execute('/proxy delete shared 9 0', baseArgs()) as any
+    expect(deletion.title).toContain('used by 36 traffic routes')
+    expect(deletion.title.length).toBeLessThan(1_000)
+    expect(deletion.options).toContainEqual(expect.objectContaining({ label: 'Review current assignments' }))
+  })
+
   it('supports a button-only global/scope journey with profile pages, clear, back, and cancel', async () => {
     const registry = new CommandRegistry()
     const profiles = Array.from({ length: 8 }, (_, index) => ({ id: `p${index}`, name: `P${index}`, protocol: 'http', host: `p${index}.test`, port: 8080 }))
@@ -127,15 +278,17 @@ describe('/proxy command', () => {
     const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
     registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } } as any)
     const root = await registry.execute('/proxy', baseArgs()) as any
-    const routing = await registry.execute(root.options.find((option: any) => option.label === 'Routing').command, baseArgs()) as any
-    const global = routing.options.find((option: any) => option.label === 'Global default route')
+    const routing = await registry.execute(root.options.find((option: any) => option.label === 'Routes').command, baseArgs()) as any
+    const global = routing.options.find((option: any) => option.label === 'Default for all traffic')
     const globalMenu = await registry.execute(global.command, baseArgs()) as any
     expect(globalMenu.options.some((option: any) => option.command === '/proxy scope global 4 1')).toBe(true)
     const page2 = await registry.execute('/proxy scope global 4 1', baseArgs()) as any
     expect(page2.options.some((option: any) => option.command === '/proxy scope global 4 0')).toBe(true)
-    await registry.execute(page2.options.find((option: any) => option.label === 'Clear override').command, baseArgs())
-    expect(proxyService.clearRoute).toHaveBeenCalledWith('global', 4)
-    expect(page2.options.find((option: any) => option.label === 'Back').command).toBe('/proxy status')
+    expect(page2.options.some((option: any) => option.label === 'Use parent route')).toBe(false)
+    const agentScope = await registry.execute('/proxy scope agents.codex 4 0', baseArgs()) as any
+    await registry.execute(agentScope.options.find((option: any) => option.label.startsWith('Use parent route')).command, baseArgs())
+    expect(proxyService.clearRoute).toHaveBeenCalledWith('agents.codex', 4)
+    expect(page2.options.find((option: any) => option.label === 'Back').command).toBe('/proxy routing')
     const profileMenu = await registry.execute('/proxy profile p0', baseArgs()) as any
     const deleteMenu = await registry.execute(profileMenu.options.find((option: any) => option.label === 'Delete profile').command, baseArgs()) as any
     expect(deleteMenu.options.find((option: any) => option.label === 'Cancel').command).toBe('/proxy profiles')
@@ -163,13 +316,13 @@ describe('/proxy command', () => {
     const draftId = start.command.split(' ')[2]
     const hijack = await registry.execute(`/proxy wizard-field ${draftId} password`, other) as any
     expect(hijack).toMatchObject({ type: 'error' })
-    const protocolMenu = await registry.execute(named.options.find((option: any) => option.label === 'Manual endpoint setup').command, owner) as any
+    const protocolMenu = await registry.execute(named.options.find((option: any) => option.label === 'Enter details manually').command, owner) as any
     const hostPrompt = await registry.execute(protocolMenu.options.find((option: any) => option.label === 'HTTP').command, owner) as any
     const portMenu = await registry.execute(hostPrompt.command, {
       ...owner, interaction: { ...interaction, capturedInput: { value: 'proxy.example', sensitive: false } },
     }) as any
-    const authMenu = await registry.execute(portMenu.options.find((option: any) => option.label === 'Use default (8080)').command, owner) as any
-    const usernamePrompt = await registry.execute(authMenu.options.find((option: any) => option.label === 'Use authentication').command, owner) as any
+    const authMenu = await registry.execute(portMenu.options.find((option: any) => option.label === 'Suggested port: 8080').command, owner) as any
+    const usernamePrompt = await registry.execute(authMenu.options.find((option: any) => option.label === 'Add credentials').command, owner) as any
     const passwordPrompt = await registry.execute(usernamePrompt.command, {
       ...owner, interaction: { ...interaction, capturedInput: { value: 'alice', sensitive: true } },
     }) as any
@@ -203,11 +356,12 @@ describe('/proxy command', () => {
     registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } } as any)
     const args = { ...baseArgs(), interaction: { textInput: true, secureInput: 'delete-after-capture' as const } }
     const selected = await registry.execute('/proxy profile existing', args) as any
-    const review = await registry.execute(selected.options.find((option: any) => option.label === 'Edit endpoint or credentials').command, args) as any
+    expect(selected.title).toContain('Credentials: Saved (hidden)')
+    const review = await registry.execute(selected.options.find((option: any) => option.label === 'Edit profile').command, args) as any
     expect(review.options.map((option: any) => option.label)).toEqual(expect.arrayContaining([
-      'Replace with proxy URL', 'Set endpoint manually', 'Rotate credentials', 'Clear authentication',
+      'Paste a different proxy URL', 'Edit endpoint manually', 'Replace credentials', 'Clear credentials',
     ]))
-    const usernamePrompt = await registry.execute(review.options.find((option: any) => option.label === 'Rotate credentials').command, args) as any
+    const usernamePrompt = await registry.execute(review.options.find((option: any) => option.label === 'Replace credentials').command, args) as any
     const passwordPrompt = await registry.execute(usernamePrompt.command, {
       ...args, interaction: { ...args.interaction, capturedInput: { value: 'new-user', sensitive: true } },
     }) as any
@@ -236,6 +390,47 @@ describe('/proxy command', () => {
     expect(failed.options.map((option: any) => option.label)).toEqual(['Retry test', 'Review and edit', 'Cancel'])
   })
 
+  it('separates saved override, effective route, and source with human labels', async () => {
+    const registry = new CommandRegistry()
+    const proxyService = {
+      status: () => ({ revision: 6, diagnostics: [], routing: { global: 'direct', routes: { 'agents.default': 'profile:work' } } }),
+      listProfiles: () => [{ id: 'work', name: 'Work proxy', protocol: 'http', host: 'proxy.test', port: 8080 }],
+      getProfile: () => ({ id: 'work', name: 'Work proxy' }),
+      resolve: () => ({ route: 'profile:work', resolvedFrom: 'agents.default' }),
+    }
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } } as any)
+    const scope = await registry.execute('/proxy scope agents.codex', baseArgs()) as any
+    expect(scope.title).toContain('Saved override: None (uses parent route)')
+    expect(scope.title).toContain('Effective route: Use profile “Work proxy”')
+    expect(scope.title).toContain('Source: Coding agents default')
+    expect(scope.title).not.toContain('agents.default')
+    expect(scope.options).toContainEqual(expect.objectContaining({ label: 'Use parent route ✓' }))
+  })
+
+  it('assigns a selected profile without making the user rediscover it', async () => {
+    const registry = new CommandRegistry()
+    const profile = { id: 'work', name: 'Work proxy', protocol: 'http', host: 'proxy.test', port: 8080, hasCredentials: true, failClosed: true }
+    const setRoute = vi.fn(async () => ({ activeAgentProcessesUnaffected: true }))
+    const proxyService = {
+      status: () => ({ revision: 8, diagnostics: [], routing: { global: 'direct', routes: {} } }),
+      listProfiles: () => [profile], getProfile: (id: string) => id === 'work' ? profile : undefined,
+      getKnownScopes: () => ['agents.default', 'agents.codex'],
+      resolve: () => ({ route: 'direct', resolvedFrom: 'global' }), setRoute,
+    }
+    const identity = { getUserByIdentity: vi.fn().mockResolvedValue({ role: 'admin' }) }
+    registerProxyCommand(registry, { proxyService, lifecycleManager: { serviceRegistry: { get: () => identity } } } as any)
+    const start = await registry.execute('/proxy assign work', baseArgs()) as any
+    expect(start.title).toContain('Assign “Work proxy”')
+    const category = await registry.execute(start.options.find((option: any) => option.label === 'Coding agents').command, baseArgs()) as any
+    const confirm = await registry.execute(category.options.find((option: any) => option.label === 'Codex').command, baseArgs()) as any
+    expect(confirm).toMatchObject({ type: 'confirm' })
+    const saved = await registry.execute(confirm.onYes, baseArgs()) as any
+    expect(setRoute).toHaveBeenCalledWith('agents.codex', 'profile:work', 8)
+    expect(saved.title).toContain('Codex now uses proxy profile “Work proxy”')
+    expect(saved.options).toContainEqual(expect.objectContaining({ command: '/proxy profile work' }))
+  })
+
   it('requires explicit no-auth choice instead of accepting the dash sentinel during create', async () => {
     const registry = new CommandRegistry()
     const proxyService = {
@@ -248,11 +443,11 @@ describe('/proxy command', () => {
     const args = { ...baseArgs(), interaction }
     const start = await registry.execute('/proxy add', args) as any
     const named = await registry.execute(start.command, { ...args, interaction: { ...interaction, capturedInput: { value: 'Manual Auth', sensitive: false } } }) as any
-    const protocols = await registry.execute(named.options.find((option: any) => option.label === 'Manual endpoint setup').command, args) as any
+    const protocols = await registry.execute(named.options.find((option: any) => option.label === 'Enter details manually').command, args) as any
     const host = await registry.execute(protocols.options.find((option: any) => option.label === 'HTTP').command, args) as any
     const ports = await registry.execute(host.command, { ...args, interaction: { ...interaction, capturedInput: { value: 'proxy.test', sensitive: false } } }) as any
-    const auth = await registry.execute(ports.options.find((option: any) => option.label === 'Use default (8080)').command, args) as any
-    const username = await registry.execute(auth.options.find((option: any) => option.label === 'Use authentication').command, args) as any
+    const auth = await registry.execute(ports.options.find((option: any) => option.label === 'Suggested port: 8080').command, args) as any
+    const username = await registry.execute(auth.options.find((option: any) => option.label === 'Add credentials').command, args) as any
     const invalid = await registry.execute(username.command, { ...args, interaction: { ...interaction, capturedInput: { value: '-', sensitive: true } } }) as any
 
     expect(invalid.title).toContain('sentinel is not supported')
@@ -273,7 +468,7 @@ describe('/proxy command', () => {
     const interaction = { textInput: true, secureInput: 'delete-after-capture' as const }
     const args = { ...baseArgs(), interaction }
     const review = await registry.execute('/proxy edit rotate', args) as any
-    const username = await registry.execute(review.options.find((option: any) => option.label === 'Rotate credentials').command, args) as any
+    const username = await registry.execute(review.options.find((option: any) => option.label === 'Replace credentials').command, args) as any
     const password = await registry.execute(username.command, { ...args, interaction: { ...interaction, capturedInput: { value: 'new-user', sensitive: true } } }) as any
     const invalid = await registry.execute(password.command, { ...args, interaction: { ...interaction, capturedInput: { value: '-', sensitive: true } } }) as any
 
@@ -342,11 +537,11 @@ describe('/proxy command', () => {
 
     const scope = await registry.execute('/proxy scope agents.codex 11 0', baseArgs()) as any
     expect(scope.options.find((option: any) => option.label === 'Next profiles').command).toBe('/proxy scope agents.codex 11 1')
-    const staleSet = await registry.execute(scope.options.find((option: any) => option.label === 'Direct').command, baseArgs()) as any
-    expect(staleSet.title).toContain('No changes were made')
+    const staleSet = await registry.execute(scope.options.find((option: any) => option.label === 'Connect directly').command, baseArgs()) as any
+    expect(staleSet.title).toContain('action was not applied')
     expect(setRoute).toHaveBeenCalledWith('agents.codex', 'direct', 11)
-    const staleClear = await registry.execute(scope.options.find((option: any) => option.label === 'Clear override').command, baseArgs()) as any
-    expect(staleClear.options).toContainEqual(expect.objectContaining({ label: 'Refresh' }))
+    const staleClear = await registry.execute(scope.options.find((option: any) => option.label.startsWith('Use parent route')).command, baseArgs()) as any
+    expect(staleClear.options).toContainEqual(expect.objectContaining({ label: 'Refresh this screen' }))
     expect(clearRoute).toHaveBeenCalledWith('agents.codex', 11)
   })
 
@@ -369,7 +564,7 @@ describe('/proxy command', () => {
     expect(second.options.find((option: any) => option.label === 'Previous replacements').command).toBe('/proxy delete old 21 0')
     expect(second.options.some((option: any) => option.command === '/proxy delete-confirm old 21 profile:p6')).toBe(true)
     const stale = await registry.execute('/proxy delete-confirm old 21 profile:p6', baseArgs()) as any
-    expect(stale.title).toContain('No changes were made')
+    expect(stale.title).toContain('action was not applied')
     expect(deleteProfileSafely).toHaveBeenCalledWith('old', 'profile:p6', 21)
   })
 })

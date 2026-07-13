@@ -227,7 +227,7 @@ async function configurePlugin(name: string, instanceRoot?: string): Promise<voi
   const root = instanceRoot!
   const basePath = path.join(root, 'plugins', 'data')
   const settingsManager = new SettingsManager(basePath)
-  const ctx = createInstallContext({ pluginName: name, settingsManager, basePath })
+  const ctx = createInstallContext({ pluginName: name, settingsManager, basePath, instanceRoot: root })
 
   if (plugin.configure) {
     await plugin.configure(ctx)
@@ -297,7 +297,7 @@ async function installPlugin(input: string, instanceRoot?: string, json = false)
   if (builtinPlugin) {
     // Built-in plugin — run install hook directly
     if (builtinPlugin.install) {
-      const ctx = createInstallContext({ pluginName: builtinPlugin.name, settingsManager, basePath })
+      const ctx = createInstallContext({ pluginName: builtinPlugin.name, settingsManager, basePath, instanceRoot: root })
       await builtinPlugin.install(ctx)
     }
 
@@ -436,7 +436,7 @@ async function uninstallPlugin(name: string, purge: boolean, instanceRoot?: stri
       const { createInstallContext } = await import('../../core/plugin/install-context.js')
       const basePath = path.join(root, 'plugins', 'data')
       const settingsManager = new SettingsManager(basePath)
-      const ctx = createInstallContext({ pluginName: name, settingsManager, basePath })
+      const ctx = createInstallContext({ pluginName: name, settingsManager, basePath, instanceRoot: root })
       await plugin.uninstall(ctx, { purge })
     }
   } catch {

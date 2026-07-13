@@ -2,6 +2,13 @@ import type { STTProvider, STTOptions, STTResult } from '../speech-types.js';
 
 // Groq's Whisper-compatible transcription endpoint (OpenAI-compatible API)
 const GROQ_API_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
+const GROQ_MODELS_URL = "https://api.groq.com/openai/v1/models";
+
+export interface GroqAccessCheck {
+  ok: boolean;
+  status?: number;
+  message: string;
+}
 
 /**
  * Speech-to-text provider backed by Groq's hosted Whisper API.
@@ -21,7 +28,28 @@ export class GroqSTT implements STTProvider {
     private scopedFetch: typeof fetch = globalThis.fetch,
     private getScopedFetch?: () => typeof fetch,
     private endpoint = GROQ_API_URL,
+    private accessEndpoint = GROQ_MODELS_URL,
   ) {}
+
+  /** Validate credentials without sending audio or exposing a provider response body. */
+  async checkAccess(signal?: AbortSignal): Promise<GroqAccessCheck> {
+    let response: Response;
+    try {
+      response = await (this.getScopedFetch?.() ?? this.scopedFetch)(this.accessEndpoint, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.apiKey}` },
+        signal,
+      });
+    } catch {
+      return { ok: false, message: "Could not reach Groq through the configured speech route." };
+    }
+    try { await response.body?.cancel(); } catch { /* access checks never inspect provider bodies */ }
+    if (response.ok) return { ok: true, status: response.status, message: "Groq accepted the API key." };
+    if (response.status === 401) return { ok: false, status: 401, message: "Groq rejected the API key." };
+    if (response.status === 403) return { ok: false, status: 403, message: "The API key does not have access to Groq transcription." };
+    if (response.status === 429) return { ok: false, status: 429, message: "Groq temporarily rate-limited the access check. Try again later." };
+    return { ok: false, status: response.status, message: `Groq access check failed (HTTP ${response.status}).` };
+  }
 
   /**
    * Transcribes audio using the Groq Whisper API.
@@ -47,7 +75,7 @@ export class GroqSTT implements STTProvider {
     });
 
     if (!resp.ok) {
-      const body = await resp.text();
+      try { await resp.body?.cancel(); } catch { /* release failed response without reading provider text */ }
       if (resp.status === 401) {
         throw new Error("Invalid Groq API key. Check your key at console.groq.com.");
       }
@@ -57,7 +85,7 @@ export class GroqSTT implements STTProvider {
       if (resp.status === 429) {
         throw new Error("Groq rate limit exceeded. Free tier: 28,800 seconds/day. Try again later.");
       }
-      throw new Error(`Groq STT error (${resp.status}): ${body}`);
+      throw new Error(`Groq transcription failed (HTTP ${resp.status}). Check Groq status and run /speech → Check setup.`);
     }
 
     const data = await resp.json() as { text: string; language?: string; duration?: number };

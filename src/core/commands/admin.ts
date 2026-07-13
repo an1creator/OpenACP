@@ -40,7 +40,7 @@ export function registerAdminCommands(registry: CommandRegistry, _core: unknown)
 
   registry.register({
     name: 'doctor',
-    description: 'Run system diagnostics',
+    description: 'Check OpenACP health',
     category: 'system',
     handler: async () => {
       return { type: 'text', text: 'Running diagnostics...' } satisfies CommandResponse

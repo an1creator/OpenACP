@@ -77,6 +77,19 @@ describe("GroqSTT", () => {
       .rejects.toThrow(/invalid.*api.*key/i);
   });
 
+  it('checks candidate access without uploading audio or returning provider bodies', async () => {
+    const scoped = vi.fn()
+      .mockResolvedValueOnce(new Response('{}', { status: 200 }))
+      .mockResolvedValueOnce(new Response('secret provider response', { status: 401 }))
+    const provider = new GroqSTT('gsk_candidate', undefined, scoped as typeof fetch)
+    await expect(provider.checkAccess()).resolves.toEqual({ ok: true, status: 200, message: 'Groq accepted the API key.' })
+    const rejected = await provider.checkAccess()
+    expect(rejected).toEqual({ ok: false, status: 401, message: 'Groq rejected the API key.' })
+    expect(JSON.stringify(rejected)).not.toContain('secret provider response')
+    expect(scoped).toHaveBeenCalledWith('https://api.groq.com/openai/v1/models', expect.objectContaining({ method: 'GET' }))
+    expect(scoped.mock.calls.every(([, init]) => init.body === undefined)).toBe(true)
+  });
+
   it("throws on 429 with rate limit message", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,

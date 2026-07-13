@@ -416,7 +416,7 @@ openacp config set defaultAgent gemini --json
 
 ## doctor
 
-Runs system diagnostics. Checks config validity, agent availability, dependencies, and connectivity. Fixable issues can be auto-repaired interactively.
+Checks OpenACP health: config validity, agent availability, dependencies, connectivity, Speech-to-text readiness, and network-proxy mode. Human output starts with the outcome and issues; `--json` preserves the full stable report.
 
 **Usage**
 ```
@@ -1007,6 +1007,12 @@ Checks npm for the latest version of `@n1creator/openacp-cli` and installs it if
 Manages scoped proxy profiles and routes through the running daemon. Responses
 are redacted. JSON/env input paths must be mode-0600 regular files; credentials
 belong inside those files and are never accepted as command arguments.
+
+Without `--json`, `status` renders human sections for mode, proxy profiles,
+saved overrides, and effective routes. With `--json`, the API-shaped status is
+unchanged. In routing commands, `inherit` explicitly means **use host proxy
+settings**; `clear` removes a scope override so category/global precedence
+applies.
 
 ```bash
 openacp proxy status [--json]

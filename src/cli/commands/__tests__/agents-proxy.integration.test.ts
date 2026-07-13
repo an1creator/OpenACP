@@ -43,7 +43,7 @@ describe('standalone agents CLI scoped transport', () => {
     })
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve))
     const port = (server.address() as { port: number }).port
-    const proxy = new ProxyService(root)
+    const proxy = new ProxyService(root, undefined, undefined, async () => undefined)
     proxy.saveProfile({ id: 'cli', protocol: 'http', host: '127.0.0.1', port })
     await proxy.setRoute('services.agentRegistry', 'profile:cli')
     process.env.OPENACP_AGENT_REGISTRY_URL = 'http://registry.invalid/registry.json'

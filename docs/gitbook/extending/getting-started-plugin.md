@@ -100,20 +100,20 @@ Key fields in the generated `package.json`:
     "prepublishOnly": "npm run build"
   },
   "engines": {
-    "openacp": ">=2026.713.1"
+    "openacp": ">=2026.713.2"
   },
   "peerDependencies": {
-    "@n1creator/openacp-cli": ">=2026.713.1"
+    "@n1creator/openacp-cli": ">=2026.713.2"
   },
   "devDependencies": {
-    "@n1creator/openacp-plugin-sdk": "2026.713.1",
+    "@n1creator/openacp-plugin-sdk": "2026.713.2",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
   }
 }
 ```
 
-The example reflects the current `2026.713.1` release. The scaffold substitutes
+The example reflects the current `2026.713.2` release. The scaffold substitutes
 the version of the installed CLI: `engines.openacp` and the CLI peer dependency
 use `>=<cli-version>`, while the SDK dev dependency uses the exact same calendar
 version. This keeps plugin types aligned with the minimum compatible CLI.

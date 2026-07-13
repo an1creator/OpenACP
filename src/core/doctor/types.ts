@@ -16,6 +16,13 @@
 
 import type { Config } from "../config/config.js";
 
+export interface DaemonProxyEnvironment {
+  state: 'known' | 'not-running' | 'unavailable';
+  /** Proxy variable names only. Values are never retained or exposed. */
+  variableNames: string[];
+  source: 'current-process' | 'proc' | 'none';
+}
+
 /** Shared context passed to all doctor checks, built once per run. */
 export interface DoctorContext {
   /** Parsed and validated config, or null if config couldn't be loaded. */
@@ -29,6 +36,8 @@ export interface DoctorContext {
   portFilePath: string;
   pluginsDir: string;
   logsDir: string;
+  /** Best-effort snapshot of the running daemon environment, containing names only. */
+  daemonProxyEnvironment?: DaemonProxyEnvironment;
   /** Resolve external requests through the authoritative scoped proxy policy. */
   fetchForScope(scope: string): typeof fetch;
 }

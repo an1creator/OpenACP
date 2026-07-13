@@ -23,7 +23,7 @@ printf '{"name":"fake-tts","version":"1.0.0","type":"module","main":"index.js"}'
 printf 'export default {name:"fake-tts",version:"1.0.0",setup:async()=>{},install:async()=>{}}\n' > "$prefix/node_modules/fake-tts/index.js"
 printf '%s' "\${HTTPS_PROXY:-missing}" > "$prefix/seen-proxy.txt"
 `, { mode: 0o700 })
-    const service = new ProxyService(root)
+    const service = new ProxyService(root, undefined, undefined, async () => undefined)
     service.saveProfile({ id: 'speech', protocol: 'http', host: 'old.test', port: 8080 })
     await service.setRoute('services.pluginInstaller', 'profile:speech')
     const inherited = { ...process.env, PATH: `${bin}:${process.env.PATH}` } as Record<string, string>

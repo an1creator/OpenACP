@@ -1,5 +1,45 @@
 ## Unreleased
 
+## 2026.713.2 - 2026-07-13
+
+### Added
+
+- Add readiness checks for the bundled local Speech-to-text runtime and doctor
+  coverage for the selected method, setup state, hidden Groq credential state,
+  and independent `services.speech` / `services.speechDownloads` routes.
+
+### Changed
+
+- Simplify the connector settings information architecture around status-first
+  **Network proxy** and **Speech-to-text** homes. Human traffic labels, separate
+  saved/effective proxy routes, explicit transcription method and readiness,
+  and grouped advanced local options make the common paths easier to scan.
+- Make human doctor output outcome-first, place failures and warnings before a
+  compact pass count, and add direct Telegram actions for rerunning diagnostics
+  or opening Speech-to-text and Network proxy settings. JSON output retains the
+  complete stable report for automation.
+
+### Fixed
+
+- Complete the connector-neutral proxy profile lifecycle with tested create and
+  edit flows, direct profile assignment, transactional deletion/reassignment,
+  stable category pagination, opaque bounded callbacks, and one preflight per
+  route change instead of duplicate connectivity checks.
+- Serialize plugin settings across OpenACP processes and commit interactive
+  Speech configuration against a fresh locked snapshot. Independent updates are
+  preserved, while same-field conflicts stop with an actionable error instead
+  of silently overwriting newer values.
+- Make settings locks distinguish a reused PID from the original owner, retain
+  exact live owners regardless of age, recover bounded incomplete locks, and
+  harden metadata and reclamation against symlink substitution.
+
+### Security
+
+- Keep Groq credentials write-only and connector-bound, validate a short-lived
+  candidate through `services.speech` before it can replace the saved key, and
+  discard rejected, expired, or cancelled candidates without changing the
+  active transcription method.
+
 ## 2026.713.1 - 2026-07-13
 
 ### Added

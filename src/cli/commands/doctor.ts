@@ -1,8 +1,9 @@
 import { wantsHelp } from './helpers.js'
 import { isJsonMode, jsonSuccess, muteForJson } from '../output.js'
+import { doctorHeadline, doctorSummary } from '../../core/doctor/format.js'
 
 /**
- * `openacp doctor` — Run system diagnostics and optionally fix issues.
+ * `openacp doctor` — Check OpenACP health and optionally fix issues.
  *
  * In dry-run mode (or with --json), checks are reported but no fixes are applied.
  * In interactive mode, fixable issues prompt the user before applying.
@@ -14,7 +15,7 @@ export async function cmdDoctor(args: string[], instanceRoot?: string): Promise<
 
   if (!json && wantsHelp(args)) {
     console.log(`
-\x1b[1mopenacp doctor\x1b[0m — Run system diagnostics
+\x1b[1mopenacp doctor\x1b[0m — Check OpenACP health
 
 \x1b[1mUsage:\x1b[0m
   openacp doctor [--dry-run]
@@ -68,12 +69,14 @@ Fixable issues can be auto-repaired when not using --dry-run.
     })
   }
 
-  // Render results
+  // Render issues first so the next action is visible without scanning passes.
   const icons = { pass: "\x1b[32m✅\x1b[0m", warn: "\x1b[33m⚠️\x1b[0m", fail: "\x1b[31m❌\x1b[0m" };
+  const { passed, failed } = report.summary;
+  console.log(`\x1b[1m${doctorHeadline(report.summary)}\x1b[0m — ${doctorSummary(report.summary)}\n`);
 
-  for (const category of report.categories) {
+  for (const category of report.categories.filter((item) => item.results.some((result) => result.status !== 'pass'))) {
     console.log(`\x1b[1m\x1b[36m${category.name}\x1b[0m`);
-    for (const result of category.results) {
+    for (const result of category.results.filter((item) => item.status !== 'pass')) {
       console.log(`  ${icons[result.status]} ${result.message}`);
     }
     console.log();
@@ -105,10 +108,7 @@ Fixable issues can be auto-repaired when not using --dry-run.
     console.log();
   }
 
-  // Summary
-  const { passed, warnings, failed, fixed } = report.summary;
-  const fixedStr = fixed > 0 ? `, ${fixed} fixed` : "";
-  console.log(`Result: ${passed} passed, ${warnings} warnings, ${failed} failed${fixedStr}`);
+  console.log(`${passed} passed`);
 
   if (failed > 0) {
     process.exit(1);

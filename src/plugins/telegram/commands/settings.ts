@@ -18,6 +18,10 @@ async function buildSettingsKeyboard(core: OpenACPCore): Promise<InlineKeyboard>
   const fields = getSafeFields();
   const kb = new InlineKeyboard();
 
+  // Put task-level feature settings before the lower-level field list.
+  kb.text("🎙 Speech-to-text", settingsCommandCallback("/speech")).row();
+  kb.text("🌐 Network proxy", settingsCommandCallback("/proxy")).row();
+
   for (const field of fields) {
     const value = getConfigValue(core.configManager.get() as any, field.path);
     const label = formatFieldLabel(field, value);
@@ -31,9 +35,6 @@ async function buildSettingsKeyboard(core: OpenACPCore): Promise<InlineKeyboard>
     }
   }
 
-  // Reuse the connector-neutral command renderer instead of duplicating proxy menus here.
-  kb.text("🌐 Proxy Management", settingsCommandCallback("/proxy")).row();
-  kb.text("🎙 Speech-to-Text", settingsCommandCallback("/speech")).row();
   kb.text("◀️ Back to Menu", "s:back");
   return kb;
 }
@@ -58,7 +59,7 @@ function formatFieldLabel(field: ConfigFieldDef, value: unknown): string {
  */
 export async function handleSettings(ctx: Context, core: OpenACPCore): Promise<void> {
   const kb = await buildSettingsKeyboard(core);
-  await ctx.reply(`<b>⚙️ Settings</b>\nTap to change:`, {
+  await ctx.reply(`<b>⚙️ Settings</b>\nChoose a section. Changes that need a restart are marked.`, {
     parse_mode: "HTML",
     reply_markup: kb,
   });
@@ -140,7 +141,7 @@ export function setupSettingsCallbacks(
 
       try { await ctx.answerCallbackQuery({ text: `✅ ${fieldPath} = ${newValue}` }); } catch { /* expired */ }
       try {
-        await ctx.editMessageText(`<b>⚙️ Settings</b>\nTap to change:`, {
+        await ctx.editMessageText(`<b>⚙️ Settings</b>\nChoose a section. Changes that need a restart are marked.`, {
           parse_mode: "HTML",
           reply_markup: await buildSettingsKeyboard(core),
         });
@@ -185,7 +186,7 @@ export function setupSettingsCallbacks(
   bot.callbackQuery("s:back:refresh", async (ctx) => {
     try { await ctx.answerCallbackQuery(); } catch { /* expired */ }
     try {
-      await ctx.editMessageText(`<b>⚙️ Settings</b>\nTap to change:`, {
+      await ctx.editMessageText(`<b>⚙️ Settings</b>\nChoose a section. Changes that need a restart are marked.`, {
         parse_mode: "HTML",
         reply_markup: await buildSettingsKeyboard(core),
       });

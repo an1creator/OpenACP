@@ -80,12 +80,15 @@ openacp proxy test --profile usa
 openacp proxy delete usa --reassign direct --expected-revision 14
 ```
 
-In Telegram, open **Settings → Proxy Management** or use `/proxy` directly. The
+In Telegram, open **Settings → Network proxy** or use `/proxy` directly. The
 main action menu keeps one Settings entry instead of duplicating proxy management
 beside it; already-sent legacy proxy buttons continue to open the same home. The
-connector-neutral menus support profile listing, full add/edit flows, a quick
-write-only proxy URL mode, manual endpoint setup, candidate testing before save,
-credential clearing,
+connector-neutral home starts with the current mode, global default, profile
+count, and route-override count. **Routes** uses human traffic labels; every scope shows its saved override,
+effective route, and resolution source separately. **Proxy profiles** supports
+full add/edit flows, a quick hidden proxy URL mode, manual endpoint setup,
+candidate testing before save, credential replacement/clearing, and direct
+**Assign this profile** navigation that preserves the selected profile,
 transactional deletion with route reassignment, the routing matrix, route
 selectors, and connectivity tests, so other adapters can render the same
 management model. Wizard drafts exist only in memory for ten minutes, are bound
@@ -122,6 +125,12 @@ Connectors that cannot guarantee private or delete-before-dispatch input must no
 accept credential text and render that fallback instead. For non-interactive
 automation, `create`, `update`, and `test-candidate` accept a mode-0600 JSON file;
 secrets must not be placed in command-line arguments.
+
+In the route UI, **Use host proxy settings** persists the literal `inherit`
+route. **Use parent route** removes the exact override so category/global route
+precedence applies. These actions are intentionally separate; the scope detail
+screen marks the saved choice and reports the resulting effective route and
+source before any change.
 
 Quick mode accepts a single `http://`, `https://`, `socks5://`, or `socks5h://`
 URL with an explicit port. Percent-encoded credentials and bracketed IPv6 are

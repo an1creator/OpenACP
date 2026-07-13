@@ -16,7 +16,7 @@ openacp doctor
 
 From inside Telegram or Discord, send `/doctor` in the Assistant topic.
 
-Each check produces one or more results with a status of `pass`, `warn`, or `fail`. A summary line at the end shows total counts.
+Each check produces one or more results with a status of `pass`, `warn`, or `fail`. Interactive output starts with the overall result, shows failures and warnings before a compact pass count, and keeps Telegram output below its message limit. Telegram also provides **Run again**, **Speech-to-text settings**, and **Network proxy settings** actions. `--json` keeps the stable full report schema for automation.
 
 ---
 
@@ -33,6 +33,8 @@ Each check produces one or more results with a status of `pass`, `warn`, or `fai
 | **Plugins** | Plugins directory exists; each installed plugin can be loaded without errors |
 | **Daemon** | PID file is valid and the process is alive; API port file is valid; API port is in use by OpenACP (not another process) |
 | **Tunnel** | Tunnel is enabled; configured provider is recognized; `cloudflared` binary is present (for Cloudflare provider); tunnel port is in valid range |
+| **Speech-to-text** | Selected method, local runtime readiness or authenticated Groq access, hidden key status, and the `services.speech` / `services.speechDownloads` route boundary |
+| **Network proxy** | Native scoped-routing store health and whether the running daemon itself has legacy proxy variables. On Linux, the daemon process is inspected by variable name only; caller-shell variables are reported separately and never treated as proof of daemon compatibility mode. |
 
 ---
 

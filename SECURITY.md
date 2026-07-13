@@ -6,7 +6,7 @@ Security fixes are applied to the current maintained release line.
 
 | Version | Supported |
 |---------|-----------|
-| `2026.713.1` | Yes |
+| `2026.713.2` | Yes |
 | Earlier releases | No |
 
 Update with `openacp update` before reporting an issue that may already be

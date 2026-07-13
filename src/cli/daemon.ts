@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { expandHome } from '../core/config/config.js'
+import { removeDaemonIdentity, writeDaemonIdentity } from '../core/instance/daemon-identity.js'
 
 // Daemon lifecycle utilities.
 // The daemon model runs the server as a detached child process (PID file tracking).
@@ -44,6 +45,7 @@ export function writePidFile(pidPath: string, pid: number): void {
   const dir = path.dirname(pidPath)
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(pidPath, String(pid))
+  writeDaemonIdentity(pidPath, pid)
 }
 
 /** Read a PID from a file. Returns null if the file is missing or malformed. */
@@ -64,6 +66,7 @@ export function removePidFile(pidPath: string): void {
   } catch {
     // ignore if already gone
   }
+  removeDaemonIdentity(pidPath)
 }
 
 /**

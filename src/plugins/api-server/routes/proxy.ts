@@ -3,13 +3,13 @@ import { z } from 'zod'
 import type { RouteDeps } from './types.js'
 import { requireScopes } from '../middleware/auth.js'
 import { AuthError, BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../middleware/error-handler.js'
-import { ProxyProfileExistsError, ProxyProfileNotFoundError, ProxyProfileTestError, ProxyRouteTestError, ProxyValidationError } from '../../../core/network/proxy-service.js'
+import { PROXY_CONNECTIVITY_TEST_URL, ProxyProfileExistsError, ProxyProfileNotFoundError, ProxyProfileTestError, ProxyRouteTestError, ProxyValidationError } from '../../../core/network/proxy-service.js'
 import { ProxyRevisionConflictError, ProxyStoreCorruptError } from '../../../core/network/proxy-store.js'
 import { hasScope } from '../auth/roles.js'
 import { lookup } from 'node:dns/promises'
 import net from 'node:net'
 
-const SAFE_TEST_HOSTS = new Set(['api.ipify.org', 'ifconfig.me', 'httpbin.org'])
+const SAFE_TEST_HOSTS = new Set([new URL(PROXY_CONNECTIVITY_TEST_URL).hostname, 'ifconfig.me', 'httpbin.org'])
 
 const RouteSchema = z.string().refine(
   (value) => value === 'direct' || value === 'inherit' || /^profile:[a-z0-9][a-z0-9._-]{0,63}$/i.test(value),
@@ -38,10 +38,10 @@ function refineProfileInput(
 ): void {
   const componentFields = [value.protocol, value.host, value.port, value.username, value.password, value.clearCredentials]
   if (value.proxyUrl !== undefined && componentFields.some((field) => field !== undefined)) {
-    ctx.addIssue({ code: 'custom', message: 'proxyUrl is mutually exclusive with endpoint and credential fields' })
+    ctx.addIssue({ code: 'custom', message: 'Use either proxyUrl or separate endpoint/credential fields, not both' })
   }
   if (value.proxyUrl === undefined && (!value.protocol || !value.host || value.port === undefined)) {
-    ctx.addIssue({ code: 'custom', message: 'protocol, host, and port are required when proxyUrl is not provided' })
+    ctx.addIssue({ code: 'custom', message: 'Provide protocol, host, and port when proxyUrl is not used' })
   }
 }
 
@@ -155,6 +155,7 @@ export async function proxyRoutes(app: FastifyInstance, deps: RouteDeps): Promis
 
 function throwProxyApiError(error: unknown): never {
   if (error instanceof ProxyRevisionConflictError) throw new ConflictError(error.code, error.message)
+  if (error instanceof ProxyRouteTestError) throw new BadRequestError(error.code, error.message)
   if (error instanceof ProxyProfileExistsError) throw new ConflictError(error.code, `${error.message}; use PUT to update it`)
   if (error instanceof ProxyStoreCorruptError) throw new ServiceUnavailableError(error.code, error.message)
   if (error instanceof ProxyProfileNotFoundError) throw new NotFoundError(error.code, error.message)

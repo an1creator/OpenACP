@@ -276,58 +276,43 @@ To set a default for all sessions, add `outputMode` to your config:
 
 ---
 
-## Voice Support (Speech-to-Text and Text-to-Speech)
+## Voice support (speech-to-text and text-to-speech)
 
 The Slack adapter supports voice interactions — record audio clips and optionally receive spoken replies.
 
-### Speech-to-Text (STT)
+### Speech-to-text (STT)
 
-Record an audio clip using Slack's built-in microphone button. OpenACP transcribes it using [Groq Whisper](https://console.groq.com/) (free tier: ~8 hours/day) and sends the transcribed text to the agent.
+Record an audio clip using Slack's built-in microphone button. The adapter passes it to the shared OpenACP speech service, which can use either Local Whisper on the host or Groq's hosted Whisper API.
 
-1. Get a free Groq API key at [console.groq.com](https://console.groq.com/).
-2. Add this to `<instance-root>/config.json`:
-
-```json
-{
-  "speech": {
-    "stt": {
-      "provider": "groq",
-      "providers": {
-        "groq": {
-          "apiKey": "gsk_..."
-        }
-      }
-    }
-  }
-}
-```
-
-Or use environment variables:
+Configure the speech plugin from the protected terminal:
 
 ```bash
-export OPENACP_SPEECH_STT_PROVIDER=groq
-export OPENACP_SPEECH_GROQ_API_KEY=gsk_...
+openacp plugin configure @openacp/speech
 ```
 
-3. Ensure your bot has the `files:read` scope (Step 3). If you added this scope after the initial install, reinstall the app to your workspace.
+Choose **Local (on this host)** for private local transcription; the runtime and selected model are prepared on first use. Choose **Groq (cloud)** to use a Groq API key. The configurator captures the key with hidden terminal input, checks it before saving, and stores it in the speech plugin's protected settings rather than the legacy `config.json` speech tree.
+
+For managed deployments, the equivalent environment variables are:
+
+```bash
+export OPENACP_SPEECH_STT_PROVIDER=local-whisper
+export OPENACP_SPEECH_LOCAL_WHISPER_LANGUAGE=ru
+export OPENACP_SPEECH_LOCAL_WHISPER_MODEL=base
+
+# Or select Groq and inject its key through your secret manager:
+# OPENACP_SPEECH_STT_PROVIDER=groq
+# OPENACP_SPEECH_GROQ_API_KEY=<secret>
+```
+
+Ensure your bot has the `files:read` scope (Step 3). If you added this scope after the initial install, reinstall the app to your workspace.
 
 After restarting OpenACP, send an audio clip in a session channel. A transcription confirmation appears: `🎤 You said: ...`.
 
+Slack does not currently register native `/speech` or `/proxy` slash commands, and its command renderer has no secure credential-input flow. Use the protected host configurator for Speech-to-text and `openacp proxy` (or the authenticated REST API) for network routing. This does not limit Slack voice transcription after the shared service is configured.
+
 ### Text-to-Speech (TTS)
 
-TTS uses Microsoft Edge TTS (free, no API key required). The agent's reply is synthesized into audio and uploaded as a playable file in the session channel.
-
-Add this to `<instance-root>/config.json`:
-
-```json
-{
-  "speech": {
-    "tts": {
-      "provider": "edge-tts"
-    }
-  }
-}
-```
+TTS uses the optional Microsoft Edge TTS plugin (free, no API key required). Select it during Speech plugin installation, or configure the installed speech plugin from the host. The agent's reply is synthesized into audio and uploaded as a playable file in the session channel.
 
 Ensure your bot has the `files:write` scope (Step 3). Reinstall the app if this scope was added after initial installation.
 

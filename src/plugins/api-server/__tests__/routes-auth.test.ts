@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { createApiServer } from '../server.js';
 import { TokenStore } from '../auth/token-store.js';
 import { authRoutes } from '../routes/auth.js';
@@ -135,6 +135,20 @@ describe('auth routes', () => {
       });
 
       expect(response.statusCode).toBe(404);
+    });
+
+    it('does not report a durable revocation when persistence fails', async () => {
+      const stored = tokenStore.create({ role: 'operator', name: 'durability', expire: '1h' });
+      vi.spyOn(tokenStore, 'flush').mockRejectedValueOnce(new Error('injected persistence failure'));
+
+      const response = await server!.app.inject({
+        method: 'DELETE',
+        url: `/api/v1/auth/tokens/${stored.id}`,
+        headers: authHeaders(),
+      });
+
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } });
     });
   });
 

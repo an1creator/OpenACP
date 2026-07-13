@@ -45,6 +45,7 @@ describe('POST /exchange', () => {
           expire: code.expire,
           scopes: code.scopes,
         })
+        await store.flush()
         const rfd = new Date(token.refreshDeadline).getTime() / 1000
         const accessToken = signToken(
           { sub: token.id, role: token.role, scopes: token.scopes, rfd },
@@ -98,6 +99,20 @@ describe('POST /exchange', () => {
     })
 
     expect(res.statusCode).toBe(401)
+  })
+
+  it('does not return credentials when the exchanged state is not durable', async () => {
+    const created = store.createCode({ role: 'operator', name: 'durability', expire: '24h' })
+    vi.spyOn(store, 'flush').mockRejectedValueOnce(new Error('injected persistence failure'))
+
+    const res = await server.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/exchange',
+      payload: { code: created.code },
+    })
+
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } })
   })
 
   it('returns 401 for already-used code', async () => {

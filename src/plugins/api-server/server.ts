@@ -47,6 +47,14 @@ export interface ApiServerInstance {
 export async function createApiServer(options: ApiServerOptions): Promise<ApiServerInstance> {
   const app = Fastify({ logger: options.logger ?? false, forceCloseConnections: true });
 
+  // Token mutations are persisted asynchronously. Fastify owns the request
+  // producers that use this store, so app.close() is the lifecycle boundary at
+  // which all in-flight and coalesced writes must be drained before callers can
+  // remove instance resources.
+  app.addHook('onClose', async () => {
+    if (options.tokenStore) await options.tokenStore.close();
+  });
+
   // Zod validation
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);

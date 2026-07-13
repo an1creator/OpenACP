@@ -7,6 +7,30 @@ import type { StoredToken, CreateTokenOpts, StoredCode, CreateCodeOpts } from '.
 // short enough that a stolen token has a bounded blast radius.
 const REFRESH_DEADLINE_MS = 7 * 24 * 60 * 60 * 1000;
 
+type TokenStoreState = 'open' | 'closing' | 'closed';
+type TokenStoreWriter = (filePath: string, data: string, encoding: BufferEncoding) => Promise<void>;
+
+/** Thrown when a caller tries to mutate a token store after shutdown has begun. */
+export class TokenStoreClosedError extends Error {
+  readonly code = 'TOKEN_STORE_CLOSED';
+
+  constructor(operation: string, state: Exclude<TokenStoreState, 'open'>) {
+    super(`Cannot ${operation}: token store is ${state}`);
+    this.name = 'TokenStoreClosedError';
+  }
+}
+
+/** Observable durability failure reported by flush(), close(), and explicit save(). */
+export class TokenStorePersistenceError extends Error {
+  readonly code = 'TOKEN_STORE_PERSISTENCE_FAILED';
+
+  constructor(cause: unknown) {
+    super('Failed to persist token store');
+    this.name = 'TokenStorePersistenceError';
+    (this as Error & { cause: unknown }).cause = cause;
+  }
+}
+
 function generateTokenId(): string {
   return `tok_${randomBytes(12).toString('hex')}`;
 }
@@ -45,13 +69,27 @@ export class TokenStore {
   private codes = new Map<string, StoredCode>();
   private savePromise: Promise<void> | null = null;
   private savePending = false;
+  private saveError: TokenStorePersistenceError | null = null;
+  private closePromise: Promise<void> | null = null;
+  private state: TokenStoreState = 'open';
 
-  constructor(private filePath: string) {}
+  constructor(
+    private filePath: string,
+    private readonly writer: TokenStoreWriter = writeFile,
+  ) {}
+
+  private assertOpen(operation: string): void {
+    if (this.state !== 'open') {
+      throw new TokenStoreClosedError(operation, this.state);
+    }
+  }
 
   /** Loads token and code state from disk. Safe to call at startup; missing file is not an error. */
   async load(): Promise<void> {
+    this.assertOpen('load token data');
     try {
       const data = await readFile(this.filePath, 'utf-8');
+      this.assertOpen('load token data');
       let parsed: { tokens: StoredToken[]; codes?: StoredCode[] };
       try {
         parsed = JSON.parse(data) as { tokens: StoredToken[]; codes?: StoredCode[] };
@@ -75,19 +113,28 @@ export class TokenStore {
       for (const code of parsed.codes ?? []) {
         this.codes.set(code.code, code);
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof TokenStoreClosedError) throw err;
+      this.assertOpen('load token data');
       // File does not exist yet — start with empty store
       this.tokens.clear();
       this.codes.clear();
     }
   }
 
+  /** Requests a persistence pass and waits until the coalesced queue is durable. */
   async save(): Promise<void> {
+    this.assertOpen('save token data');
+    this.enqueueSave();
+    await this.drainSaveQueue();
+  }
+
+  private async writeSnapshot(): Promise<void> {
     const data = {
       tokens: Array.from(this.tokens.values()),
       codes: Array.from(this.codes.values()),
     };
-    await writeFile(this.filePath, JSON.stringify(data, null, 2), 'utf-8');
+    await this.writer(this.filePath, JSON.stringify(data, null, 2), 'utf-8');
   }
 
   /**
@@ -95,25 +142,47 @@ export class TokenStore {
    * so the next save fires immediately after the current one completes.
    */
   private scheduleSave(): void {
+    this.assertOpen('schedule token persistence');
+    this.enqueueSave();
+  }
+
+  /**
+   * Internal queue entry point. It is also used by close() to persist mutations
+   * that were accepted while the store was open, such as a debounced lastUsedAt.
+   */
+  private enqueueSave(): void {
     if (this.savePromise) {
       this.savePending = true;
       return;
     }
-    this.savePromise = this.save()
-      .catch((err) => {
-        console.error("[TokenStore] Failed to persist token data:", err);
-      })
+    this.savePromise = this.writeSnapshot()
+      .then(
+        () => {
+          // A later successful snapshot contains the complete current state, so it
+          // recovers an earlier transient failure while the store remains open.
+          this.saveError = null;
+        },
+        (err: unknown) => {
+          this.saveError = err instanceof TokenStorePersistenceError
+            ? err
+            : new TokenStorePersistenceError(err);
+          // The queue handles the rejection to avoid an unhandled promise while
+          // flush()/close() surface the retained durability error to their caller.
+          console.error('[TokenStore] Failed to persist token data:', err);
+        },
+      )
       .finally(() => {
         this.savePromise = null;
         if (this.savePending) {
           this.savePending = false;
-          this.scheduleSave();
+          this.enqueueSave();
         }
       });
   }
 
   /** Creates a new token record and schedules a persist. Returns the stored token including its generated id. */
   create(opts: CreateTokenOpts): StoredToken {
+    this.assertOpen('create a token');
     const now = new Date();
     const token: StoredToken = {
       id: generateTokenId(),
@@ -136,6 +205,7 @@ export class TokenStore {
 
   /** Marks a token as revoked; future auth checks will reject it immediately. */
   revoke(id: string): void {
+    this.assertOpen('revoke a token');
     const token = this.tokens.get(id);
     if (token) {
       token.revoked = true;
@@ -157,6 +227,7 @@ export class TokenStore {
    * so flushing on every call would cause excessive disk I/O.
    */
   updateLastUsed(id: string): void {
+    this.assertOpen('update token usage');
     const token = this.tokens.get(id);
     if (token) {
       token.lastUsedAt = new Date().toISOString();
@@ -164,24 +235,56 @@ export class TokenStore {
       if (!this.lastUsedSaveTimer) {
         this.lastUsedSaveTimer = setTimeout(() => {
           this.lastUsedSaveTimer = null;
-          this.scheduleSave();
+          // close() clears this timer, but the state guard also prevents a queued
+          // callback from resurrecting persistence after shutdown has started.
+          if (this.state === 'open') this.scheduleSave();
         }, 60_000);
       }
     }
   }
 
-  /** Wait for any in-flight and pending saves to complete */
-  async flush(): Promise<void> {
+  private async drainSaveQueue(): Promise<void> {
     if (this.lastUsedSaveTimer) {
       clearTimeout(this.lastUsedSaveTimer);
       this.lastUsedSaveTimer = null;
-      this.scheduleSave();
+      this.enqueueSave();
     }
-    while (this.savePromise || this.savePending) {
+    while (this.savePromise) {
       if (this.savePromise) await this.savePromise;
-      // After awaiting, scheduleSave may have re-fired if savePending was true.
-      // Loop until fully drained.
+      // The completed save may have started a coalesced successor. Keep draining
+      // until the queue reaches a stable terminal state.
     }
+    if (this.saveError) throw this.saveError;
+  }
+
+  /** Wait for all accepted mutations to become durable. */
+  flush(): Promise<void> {
+    if (this.state !== 'open') {
+      return this.closePromise ?? Promise.reject(
+        new TokenStoreClosedError('flush token data', this.state),
+      );
+    }
+    return this.drainSaveQueue();
+  }
+
+  /**
+   * Stops delayed work and drains every save already owned by this store.
+   *
+   * Callers must first stop request producers, then await close() before removing
+   * the store directory. The promise is idempotent so both the HTTP server close
+   * hook and its owning plugin teardown can enforce the same lifecycle boundary.
+   */
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
+
+    // This synchronous transition is the mutation barrier. JavaScript cannot
+    // interleave another operation before every subsequent mutator sees closing.
+    this.state = 'closing';
+    this.closePromise = this.drainSaveQueue().finally(() => {
+      this.destroy();
+      this.state = 'closed';
+    });
+    return this.closePromise;
   }
 
   destroy(): void {
@@ -193,6 +296,7 @@ export class TokenStore {
 
   /** Associate a user ID with a token. Called by identity plugin after /identity/setup. */
   setUserId(tokenId: string, userId: string): void {
+    this.assertOpen('associate a user with a token');
     const token = this.tokens.get(tokenId);
     if (token) {
       token.userId = userId;
@@ -226,6 +330,7 @@ export class TokenStore {
    * the App, which exchanges it for a proper JWT without ever exposing the raw API secret.
    */
   createCode(opts: CreateCodeOpts): StoredCode {
+    this.assertOpen('create an authorization code');
     const code = randomBytes(16).toString('hex');
     const now = new Date();
     const ttl = opts.codeTtlMs ?? 30 * 60 * 1000; // 30 minutes
@@ -260,6 +365,7 @@ export class TokenStore {
    * same code will only succeed once.
    */
   exchangeCode(code: string): StoredCode | undefined {
+    this.assertOpen('exchange an authorization code');
     const stored = this.codes.get(code);
     if (!stored) return undefined;
     if (stored.used) return undefined;
@@ -277,6 +383,7 @@ export class TokenStore {
   }
 
   revokeCode(code: string): void {
+    this.assertOpen('revoke an authorization code');
     this.codes.delete(code);
     this.scheduleSave();
   }
@@ -289,6 +396,7 @@ export class TokenStore {
    * "token revoked" error can be returned instead of "token unknown".
    */
   cleanup(): void {
+    this.assertOpen('clean up token data');
     const now = Date.now();
     for (const [id, token] of this.tokens) {
       if (new Date(token.refreshDeadline).getTime() < now) {

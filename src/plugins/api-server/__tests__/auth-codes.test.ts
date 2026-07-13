@@ -157,6 +157,7 @@ describe('Auth code endpoints', () => {
           expire: code.expire,
           scopes: code.scopes,
         })
+        await store.flush()
         const rfd = new Date(token.refreshDeadline).getTime() / 1000
         const accessToken = signToken(
           { sub: token.id, role: token.role, scopes: token.scopes, rfd },
@@ -194,6 +195,20 @@ describe('Auth code endpoints', () => {
     const body = res.json()
     expect(body.code).toMatch(/^[0-9a-f]{32}$/)
     expect(body.expiresAt).toBeDefined()
+  })
+
+  it('POST /api/v1/auth/codes does not return a code when persistence fails', async () => {
+    vi.spyOn(store, 'flush').mockRejectedValueOnce(new Error('injected persistence failure'))
+
+    const res = await server.app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/codes',
+      headers: { authorization: `Bearer ${SECRET}` },
+      payload: { role: 'admin', name: 'not-durable', expire: '24h' },
+    })
+
+    expect(res.statusCode).toBe(500)
+    expect(res.json()).toMatchObject({ error: { code: 'INTERNAL_ERROR' } })
   })
 
   it('POST /api/v1/auth/codes rejects non-secret auth', async () => {

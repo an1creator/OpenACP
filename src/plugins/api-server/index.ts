@@ -331,6 +331,7 @@ function createApiServerPlugin(): OpenACPPlugin {
             expire: code.expire,
             scopes: code.scopes,
           })
+          await tokenStore.flush()
           const rfd = new Date(token.refreshDeadline).getTime() / 1000
           const accessToken = signToken(
             { sub: token.id, role: token.role, scopes: token.scopes, rfd },
@@ -440,23 +441,53 @@ function createApiServerPlugin(): OpenACPPlugin {
     },
 
     async teardown() {
+      let teardownError: unknown
+      let hasTeardownError = false
+      const recordTeardownError = (err: unknown, step: string) => {
+        if (!hasTeardownError) {
+          teardownError = err
+          hasTeardownError = true
+          return
+        }
+        if (err !== teardownError) {
+          log.error({ err, step }, 'Additional API server teardown failure')
+        }
+      }
+
       if (cleanupInterval) {
         clearInterval(cleanupInterval)
         cleanupInterval = null
       }
-      if (tokenStoreRef) {
-        tokenStoreRef.destroy()
-        tokenStoreRef = null
-      }
       if (sseManagerRef) {
-        sseManagerRef.stop()
+        const currentSseManager = sseManagerRef
         sseManagerRef = null
+        try {
+          currentSseManager.stop()
+        } catch (err) {
+          recordTeardownError(err, 'sse-manager')
+        }
       }
       if (server) {
-        await server.stop()
+        const currentServer = server
         server = null
+        try {
+          await currentServer.stop()
+        } catch (err) {
+          recordTeardownError(err, 'fastify-server')
+        }
+      }
+      if (tokenStoreRef) {
+        const currentTokenStore = tokenStoreRef
+        tokenStoreRef = null
+        try {
+          await currentTokenStore.close()
+        } catch (err) {
+          recordTeardownError(err, 'token-store')
+        }
       }
       removePortFile(portFilePath)
+
+      if (hasTeardownError) throw teardownError
     },
   }
 }

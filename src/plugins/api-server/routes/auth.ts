@@ -52,6 +52,7 @@ export async function authRoutes(
       expire: body.expire,
       scopes: body.scopes,
     });
+    await tokenStore.flush();
 
     const durationMs = parseDuration(body.expire);
     const rfd = new Date(stored.refreshDeadline).getTime() / 1000;
@@ -101,6 +102,7 @@ export async function authRoutes(
       throw new NotFoundError('TOKEN_NOT_FOUND', `Token ${id} not found`);
     }
     tokenStore.revoke(id);
+    await tokenStore.flush();
     return { revoked: true, id };
   });
 
@@ -188,6 +190,7 @@ export async function authRoutes(
       expire: body.expire,
       scopes: body.scopes,
     });
+    await tokenStore.flush();
     return reply.send({ code: code.code, expiresAt: code.expiresAt });
   });
 
@@ -210,6 +213,7 @@ export async function authRoutes(
   }, async (request, reply) => {
     const { code } = RevokeCodeParamSchema.parse(request.params);
     tokenStore.revokeCode(code);
+    await tokenStore.flush();
     return reply.send({ revoked: true, code });
   });
 }

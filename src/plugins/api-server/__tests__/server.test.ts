@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { createApiServer } from '../server.js';
 import { TokenStore } from '../auth/token-store.js';
 import * as fs from 'node:fs';
@@ -38,6 +38,27 @@ describe('createApiServer', () => {
     server = await createApiServer(serverOpts());
     expect(server.app).toBeDefined();
     expect(server.app.printRoutes).toBeDefined();
+  });
+
+  it('awaits token-store shutdown when the Fastify lifecycle closes', async () => {
+    server = await createApiServer(serverOpts());
+    const closeSpy = vi.spyOn(tokenStore, 'close');
+
+    await server.app.close();
+    server = null;
+
+    expect(closeSpy).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces token-store durability failures from the Fastify close lifecycle', async () => {
+    server = await createApiServer(serverOpts());
+    const durabilityError = new Error('injected durability failure');
+    const closeSpy = vi.spyOn(tokenStore, 'close').mockRejectedValueOnce(durabilityError);
+
+    await expect(server.app.close()).rejects.toBe(durabilityError);
+    server = null;
+    closeSpy.mockRestore();
+    await tokenStore.close();
   });
 
   it('starts and listens on a port', async () => {

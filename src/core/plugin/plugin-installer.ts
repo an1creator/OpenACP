@@ -395,11 +395,38 @@ function safeOwnedPath(candidate: string, parent: string, prefix: string, transa
 
 function copySnapshotContents(snapshot: string, destination: string): void {
   fsSync.mkdirSync(destination, { recursive: true })
-  fsSync.chmodSync(destination, fsSync.statSync(snapshot).mode & 0o777)
   for (const entry of fsSync.readdirSync(snapshot, { withFileTypes: true })) {
     if (entry.name === '.snapshot-complete.json') continue
     fsSync.cpSync(path.join(snapshot, entry.name), path.join(destination, entry.name), { recursive: true, preserveTimestamps: true })
   }
+  // cpSync mode preservation differs across Node versions and is affected by
+  // process umask. Apply the verified snapshot modes explicitly after every
+  // entry exists so the prepared rollback tree is deterministic.
+  fsSync.chmodSync(destination, fsSync.lstatSync(snapshot).mode & 0o777)
+  for (const record of treeRecords(snapshot)) {
+    fsSync.chmodSync(path.join(destination, record.path), record.mode)
+  }
+}
+
+function describeTreeMismatch(expectedRoot: string, actualRoot: string): string {
+  try {
+    const expectedRootMode = fsSync.lstatSync(expectedRoot).mode & 0o777
+    const actualRootMode = fsSync.lstatSync(actualRoot).mode & 0o777
+    if (expectedRootMode !== actualRootMode) return `root mode expected ${expectedRootMode.toString(8)}, actual ${actualRootMode.toString(8)}`
+    const expected = treeRecords(expectedRoot)
+    const actual = new Map(treeRecords(actualRoot).map((record) => [record.path, record]))
+    for (const record of expected) {
+      const copy = actual.get(record.path)
+      if (!copy) return `missing relative record ${JSON.stringify(record.path)}`
+      if (copy.type !== record.type) return `relative record ${JSON.stringify(record.path)} type mismatch`
+      if (copy.mode !== record.mode) return `relative record ${JSON.stringify(record.path)} mode expected ${record.mode.toString(8)}, actual ${copy.mode.toString(8)}`
+      if (copy.sha256 !== record.sha256) return `relative record ${JSON.stringify(record.path)} content digest mismatch`
+      actual.delete(record.path)
+    }
+    const extra = actual.keys().next().value as string | undefined
+    if (extra !== undefined) return `unexpected relative record ${JSON.stringify(extra)}`
+  } catch { return 'tree comparison unavailable' }
+  return 'aggregate digest mismatch without a record-level difference'
 }
 
 function validateJournal(instanceRoot: string, journal: PluginInstallJournal): void {
@@ -580,14 +607,19 @@ function restoreJournal(instanceRoot: string, journal: PluginInstallJournal, bou
       const restoreTemp = path.join(pluginsDir, `.data-restore-${journal.transactionId}.pending`)
       fsSync.rmSync(restoreTemp, { recursive: true, force: true })
       copySnapshotContents(completeSnapshot, restoreTemp)
-      if (treeDigest(restoreTemp) !== journal.data.digest || treeModeDigest(restoreTemp) !== journal.data.modeDigest) throw new PluginInstallError('PLUGIN_RECOVERY_FAILED', 'Prepared plugin data rollback verification failed.')
+      if (treeDigest(restoreTemp) !== journal.data.digest || treeModeDigest(restoreTemp) !== journal.data.modeDigest) {
+        throw new PluginInstallError('PLUGIN_RECOVERY_FAILED', `Prepared plugin data rollback verification failed: ${describeTreeMismatch(completeSnapshot, restoreTemp)}.`)
+      }
       fsyncTree(restoreTemp); boundary?.('data:prepared')
       fsSync.rmSync(journal.data.directory, { recursive: true, force: true }); boundary?.('data:live-removed')
       fsSync.renameSync(restoreTemp, journal.data.directory)
       try { const fd = fsSync.openSync(path.dirname(journal.data.directory), 'r'); fsSync.fsyncSync(fd); fsSync.closeSync(fd) } catch {}
       boundary?.('data:restored')
     }
-    if (!fsSync.existsSync(journal.data.directory) || treeDigest(journal.data.directory) !== journal.data.digest || treeModeDigest(journal.data.directory) !== journal.data.modeDigest) throw new PluginInstallError('PLUGIN_RECOVERY_FAILED', 'Plugin data rollback verification failed.')
+    if (!fsSync.existsSync(journal.data.directory) || treeDigest(journal.data.directory) !== journal.data.digest || treeModeDigest(journal.data.directory) !== journal.data.modeDigest) {
+      const detail = completeSnapshot ? describeTreeMismatch(completeSnapshot, journal.data.directory) : 'durable snapshot unavailable'
+      throw new PluginInstallError('PLUGIN_RECOVERY_FAILED', `Plugin data rollback verification failed: ${detail}.`)
+    }
     boundary?.('data:verified')
   } else if (journal.data.existed === false && journal.data.hookStarted === true) {
     fsSync.rmSync(journal.data.directory, { recursive: true, force: true }); fsyncDirectory(path.dirname(journal.data.directory)); boundary?.('data:absent')

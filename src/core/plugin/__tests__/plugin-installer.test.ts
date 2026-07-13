@@ -706,6 +706,10 @@ describe('durable plugin install transactions', () => {
 
   it('fsyncs restored package, data, registry, and parent boundaries before cleanup', async () => {
     const { dataDir, registryPath } = await seedOldState()
+    await fs.chmod(dataDir, 0o700)
+    await fs.chmod(path.join(dataDir, 'settings.json'), 0o600)
+    await fs.chmod(path.join(dataDir, 'nested'), 0o710)
+    await fs.chmod(path.join(dataDir, 'nested', 'state'), 0o640)
     const lock = await acquirePluginInstallLock(instanceRoot)
     const controller = new PluginInstallJournalController(instanceRoot, lock)
     controller.initialize('safe-plugin', dataDir, registryPath)
@@ -713,11 +717,44 @@ describe('durable plugin install transactions', () => {
     const hooks = await controller.prepare('safe-plugin', staged, dataDir, registryPath)
     controller.snapshotData(dataDir); controller.transition('hook-running')
     await fs.writeFile(path.join(dataDir, 'settings.json'), '{"secret":"new"}\n')
+    await fs.chmod(dataDir, 0o755)
+    await fs.chmod(path.join(dataDir, 'settings.json'), 0o644)
+    await fs.chmod(path.join(dataDir, 'nested'), 0o755)
+    await fs.chmod(path.join(dataDir, 'nested', 'state'), 0o644)
     controller.transition('hook-complete'); await staged.activate(hooks)
     controller.transition('registry-committing')
     await fs.writeFile(registryPath, '{"installed":{}}\n')
     const fsync = vi.spyOn(fsSync, 'fsyncSync')
     controller.rollback(); controller.release()
     expect(fsync.mock.calls.length).toBeGreaterThan(6)
+    expect(fsSync.statSync(dataDir).mode & 0o777).toBe(0o700)
+    expect(fsSync.statSync(path.join(dataDir, 'settings.json')).mode & 0o777).toBe(0o600)
+    expect(fsSync.statSync(path.join(dataDir, 'nested')).mode & 0o777).toBe(0o700)
+    expect(fsSync.statSync(path.join(dataDir, 'nested', 'state')).mode & 0o777).toBe(0o600)
+  })
+
+  it('reports a safe relative record when prepared rollback mode verification fails', async () => {
+    const { dataDir, registryPath } = await seedOldState()
+    const lock = await acquirePluginInstallLock(instanceRoot)
+    const controller = new PluginInstallJournalController(instanceRoot, lock)
+    controller.initialize('safe-plugin', dataDir, registryPath)
+    const staged = await stageNpmPlugin('safe-plugin', pluginsDir, undefined, { runNpm: fakeNpm, transactionId: lock.transactionId })
+    await controller.prepare('safe-plugin', staged, dataDir, registryPath)
+    controller.snapshotData(dataDir); controller.transition('hook-running')
+    await fs.writeFile(path.join(dataDir, 'settings.json'), '{"secret":"new"}\n')
+
+    const chmodSync = fsSync.chmodSync.bind(fsSync)
+    const chmod = vi.spyOn(fsSync, 'chmodSync').mockImplementation((target, mode) => {
+      chmodSync(target, mode)
+      if (String(target).includes('.data-restore-') && String(target).endsWith(`${path.sep}nested`)) chmodSync(target, 0o755)
+    })
+    let failure: unknown
+    try { controller.rollback() } catch (error) { failure = error }
+    finally { chmod.mockRestore(); controller.release() }
+
+    expect(failure).toMatchObject({ code: 'PLUGIN_RECOVERY_FAILED' })
+    const message = (failure as Error).message
+    expect(message).toContain('relative record "nested" mode expected 700, actual 755')
+    expect(message).not.toContain(instanceRoot)
   })
 })

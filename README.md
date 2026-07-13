@@ -19,11 +19,6 @@ Self-hosted sessions for Codex, Cursor, Claude Code, Gemini, and other ACP agent
 
 OpenACP runs on your machine and connects messaging or API clients to local ACP agent processes. It owns session lifecycle, permissions, streaming, files, speech, and routing; the selected agent works in your configured workspace with its own provider credentials.
 
-> **N1 Creator distribution.** This repository is the maintained
-> [`an1creator/OpenACP`](https://github.com/an1creator/OpenACP) fork. Its public
-> packages are [`@n1creator/openacp-cli`](https://www.npmjs.com/package/@n1creator/openacp-cli)
-> and [`@n1creator/openacp-plugin-sdk`](https://www.npmjs.com/package/@n1creator/openacp-plugin-sdk).
-
 ```text
 Telegram / Discord / Slack / REST / SSE
                   ↓
@@ -100,12 +95,13 @@ audio attachment
   └─ otherwise → local faster-whisper or Groq STT → append transcript to prompt
 ```
 
-- `local-whisper` runs on the OpenACP host without an API key and reuses its environment and model cache.
+- `local-whisper` runs on the OpenACP host without an API key. The npm package includes the provider and executable bootstrap script; npm installation does not install system Python or `uv`, and it does not download `faster-whisper` or a speech model.
+- The first local transcription creates an isolated environment, installs `faster-whisper`, and downloads the selected model through the `services.speechDownloads` route. Later requests reuse the environment and model caches.
 - Groq provides an optional hosted STT path.
 - Failed transcription preserves the original audio instead of silently dropping it.
 - In Telegram, open **Settings → Speech-to-text** or use `/speech` to see the selected method and setup state, choose Off, Local, or Groq, and edit local settings. Discord and Slack use the same service after host configuration with `openacp plugin configure @openacp/speech`; their current adapters do not register a native `/speech` slash command. A candidate Groq key is checked before it can replace the saved hidden key; changes hot-reload without replacing TTS providers.
 
-Local Whisper requires Python 3 and either `uv` or `python3-venv`; its runtime is prepared on first use. See [Voice and Speech](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/using-openacp/voice-and-speech.md).
+Local Whisper needs either `uv` or Python 3 with working `venv` support. **Settings → Speech-to-text → Check setup** and `openacp doctor` are preliminary checks: they confirm that the bundled script is executable and that an `uv` or `python3` command exists. Python 3 without `venv` support can pass that check and then fail visibly during the first transcription; the original audio is kept. Install or configure `uv`, or make `python3 -m venv` work, ensure `services.speechDownloads` can reach dependency and model sources, then retry the check and resend the audio. See [Voice and Speech](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/using-openacp/voice-and-speech.md).
 
 ### Scoped proxy routing
 
@@ -193,18 +189,19 @@ The complete command contract is in [CLI Commands](https://github.com/an1creator
 | Build plugins and adapters | [Extending](https://github.com/an1creator/OpenACP/tree/main/docs/gitbook/extending) |
 | Diagnose failures | [Troubleshooting](https://github.com/an1creator/OpenACP/tree/main/docs/gitbook/troubleshooting) |
 
-## Updating and Migration
+## Updating
 
 ```bash
 openacp update
 ```
 
-The managed updater installs the latest `@n1creator/openacp-cli` release and requests a daemon restart after npm finishes. To migrate an older global installation:
+The updater checks npm and installs the latest `@n1creator/openacp-cli` release. Restart OpenACP explicitly to load the new package, then verify the running instance:
 
 ```bash
-npm uninstall -g @openacp/cli
-npm install -g @n1creator/openacp-cli@latest
 openacp restart
+openacp --version
+openacp status
+openacp doctor
 ```
 
 See [Updating](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/self-hosting/updating.md) before changing a production instance.

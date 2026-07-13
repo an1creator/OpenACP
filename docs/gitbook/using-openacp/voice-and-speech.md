@@ -8,10 +8,12 @@ OpenACP ships with two native STT providers:
 
 | Provider | Requirements | Notes |
 |---|---|---|
-| `local-whisper` | Python 3 plus `uv` or `python3-venv` | Runs locally with `faster-whisper`; no API key |
+| `local-whisper` | `uv`, or Python 3 with working `venv` support | Runs locally with `faster-whisper`; no API key |
 | `groq` | Groq API key | Hosted Whisper API |
 
-`local-whisper` is the recommended private/offline option. On its first transcription, OpenACP creates a virtual environment, installs `faster-whisper`, and downloads the selected model. Later requests reuse the environment and model cache. The maintained package also reuses the former wrapper cache at `~/.cache/codex/transcribe-voice`, so upgrading does not redownload an existing model.
+`local-whisper` is the recommended private/offline option. The npm package ships the OpenACP provider and its executable bootstrap script, but npm installation does not install system Python or `uv`, install `faster-whisper`, or download a model. On the first local transcription, the script creates an isolated environment, installs `faster-whisper`, and downloads the selected model through `services.speechDownloads`. Later requests reuse both caches.
+
+By default, the bootstrap environment is stored at `~/.cache/codex/transcribe-voice/venv`. Models use the standard Hugging Face cache used by `faster-whisper` (normally `~/.cache/huggingface/hub`).
 
 When STT is configured, you can send voice messages to a session topic and OpenACP transcribes them before passing the text to the agent. The transcribed text appears in the topic as a system message:
 
@@ -40,11 +42,11 @@ In Telegram, open **Settings → Speech-to-text** or run `/speech`. The settings
 }
 ```
 
-The status-first home reports **Off**, **Local selected**, or **Groq selected** separately from setup readiness. It keeps three jobs at the top level: **Transcription method**, **Settings & access**, and **Check setup**. **Settings & access** separates local configuration from Groq credentials without changing the selected method. Local language and model stay on the first local screen; lower-frequency beam, voice-activity filtering, device, compute type, and time limit live under **Performance & reliability**. **Check setup** verifies the currently selected local runtime or performs an authenticated Groq access check through `services.speech`. Changes apply immediately and preserve separately registered TTS providers.
+The status-first home reports **Off**, **Local selected**, or **Groq selected** separately from setup readiness. It keeps three jobs at the top level: **Transcription method**, **Settings & access**, and **Check setup**. **Settings & access** separates local configuration from Groq credentials without changing the selected method. Local language and model stay on the first local screen; lower-frequency beam, voice-activity filtering, device, compute type, and time limit live under **Performance & reliability**. For local transcription, **Check setup** is preliminary: it confirms that the bundled script is executable and an `uv` or `python3` command exists. It does not create the environment, install dependencies, download a model, or prove network access. For Groq, it performs an authenticated access check through `services.speech`. Changes apply immediately and preserve separately registered TTS providers.
 
 For Groq, **Add API key** or **Replace API key** captures a short-lived candidate through secure input. OpenACP binds that draft to the connector, user, and conversation, then calls Groq's authenticated models endpoint through `services.speech`; it does not upload user audio or persist the candidate during the check. A rejected or expired candidate is discarded while the saved key and active method remain unchanged. After a successful check, choose **Save and use Groq**, **Save key only**, or **Discard**. Reviews and status screens show only **Saved (hidden)** or **Not set**. **Clear API key** requires confirmation, deletes the key, and turns Groq off when active.
 
-The terminal installer/configurator follows the same secret boundary: Groq keys use hidden password input and an existing key is never prefilled or printed. A new candidate is checked before the complete settings snapshot is saved once; cancellation or a rejected candidate leaves the previous snapshot unchanged. The older behavior remains compatible: when a Groq key exists and `sttProvider` was never set, OpenACP activates Groq automatically; an explicit **Off** selection remains off.
+The terminal installer/configurator follows the same secret boundary: Groq keys use hidden password input and an existing key is never prefilled or printed. A new candidate is checked before the complete settings snapshot is saved once; cancellation or a rejected candidate leaves the current snapshot unchanged. Provider precedence is explicit: `sttProvider` wins, including **Off**. If `sttProvider` is absent and a Groq key is saved, Groq is selected.
 
 Speech settings require an administrator identity with `speech:manage`. Missing identity information and non-admin members fail closed before status or settings are read. Connectors that cannot guarantee private or delete-after-capture input must use protected host configuration instead of accepting a key in chat.
 
@@ -55,7 +57,9 @@ host. Leave it unset to use the runtime bundled in `@n1creator/openacp-cli`.
 
 ### STT error handling
 
-If transcription fails, the audio attachment is kept and passed to the agent as-is, with an error message in the topic. Run **Check setup** first. For local transcription, check that Python can create virtual environments and that the first-run dependency/model download has network access through `services.speechDownloads`. Groq requests and access checks use the independent `services.speech` route; also check the API key and rate limit.
+If transcription fails, the audio attachment is kept and passed to the agent as-is, with an error message in the topic. **Settings → Speech-to-text → Check setup** and `openacp doctor` only confirm that the bundled script is executable and that `uv` or `python3` exists; they identify a completely absent runtime but do not validate environment creation, `pip`, the model, or network access. Python 3 without `venv` support can therefore pass the preliminary check and fail visibly on the first transcription.
+
+Install or configure `uv`, or make `python3 -m venv` work, and ensure dependency and model downloads can use `services.speechDownloads`; then rerun the preliminary check and resend the audio. Groq requests and access checks use the independent `services.speech` route; check the saved key and rate limit there.
 
 ## Text-to-speech (TTS)
 

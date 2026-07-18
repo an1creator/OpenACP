@@ -7,6 +7,7 @@ import { SecurityGuard } from "../../plugins/security/security-guard.js";
 import { NotificationManager } from "../../plugins/notifications/notification.js";
 import { Session } from "../sessions/session.js";
 import { TypedEmitter } from "../utils/typed-emitter.js";
+import { BusEvent, Hook } from "../events.js";
 
 // Mock heavy dependencies
 vi.mock("../agent-catalog.js", () => {
@@ -351,6 +352,116 @@ describe("OpenACPCore", () => {
       const mockTunnel = { getStore: vi.fn() } as any;
       core.tunnelService = mockTunnel;
       expect(core.tunnelService).toBe(mockTunnel);
+    });
+  });
+
+  describe("handleMessageInSession() ingress outcome", () => {
+    function createIngressSession(id: string): { session: Session; agent: any } {
+      const agent = Object.assign(new TypedEmitter<any>(), {
+        sessionId: `agent-${id}`,
+        prompt: vi.fn().mockResolvedValue(undefined),
+        cancel: vi.fn().mockResolvedValue(undefined),
+        destroy: vi.fn().mockResolvedValue(undefined),
+        onPermissionRequest: vi.fn(),
+      }) as any;
+      const session = new Session({
+        id,
+        channelId: 'api',
+        agentName: 'claude',
+        workingDirectory: '/workspace',
+        agentInstance: agent,
+      });
+      session.name = 'Ingress test';
+      session.middlewareChain = core.lifecycleManager.middlewareChain;
+      return { session, agent };
+    }
+
+    it.each([
+      ['MESSAGE_BLOCKED', 'MESSAGE_BLOCKED'],
+      ['SESSION_LIMIT', 'SESSION_LIMIT'],
+    ] as const)('returns blocked/%s before queue admission', async (_label, code) => {
+      const { session, agent } = createIngressSession(`ingress-${code}`);
+      const queued = vi.fn();
+      core.eventBus.on(BusEvent.MESSAGE_QUEUED, queued);
+      core.lifecycleManager.middlewareChain.add(Hook.MESSAGE_INCOMING, `block-${code}`, {
+        handler: async (payload: any) => {
+          if (code === 'SESSION_LIMIT') {
+            payload.ingress = { block: { code } };
+          } else {
+            payload.ingress.block = { code };
+          }
+          return null;
+        },
+      });
+
+      const outcome = await core.handleMessageInSession(
+        session,
+        { channelId: 'api', userId: 'api-master', text: 'blocked' },
+        undefined,
+        { externalTurnId: `turn-${code}` },
+      );
+
+      expect(outcome).toMatchObject({
+        status: 'blocked',
+        code,
+        turnId: `turn-${code}`,
+      });
+      expect(queued).not.toHaveBeenCalled();
+      expect(agent.prompt).not.toHaveBeenCalled();
+      core.lifecycleManager.middlewareChain.removeAll(`block-${code}`);
+    });
+
+    it('returns MESSAGE_BLOCKED when agent:beforePrompt rejects', async () => {
+      const { session, agent } = createIngressSession('before-prompt-block');
+      const queued = vi.fn();
+      core.eventBus.on(BusEvent.MESSAGE_QUEUED, queued);
+      core.lifecycleManager.middlewareChain.add(Hook.AGENT_BEFORE_PROMPT, 'prompt-blocker', {
+        handler: async () => null,
+      });
+
+      const outcome = await core.handleMessageInSession(
+        session,
+        { channelId: 'api', userId: 'api-master', text: 'blocked later' },
+        undefined,
+        { externalTurnId: 'turn-before-prompt' },
+      );
+
+      expect(outcome).toMatchObject({
+        status: 'blocked',
+        code: 'MESSAGE_BLOCKED',
+        turnId: 'turn-before-prompt',
+      });
+      expect(queued).not.toHaveBeenCalled();
+      expect(agent.prompt).not.toHaveBeenCalled();
+      core.lifecycleManager.middlewareChain.removeAll('prompt-blocker');
+    });
+
+    it('admits once, emits one queued event, and preserves the caller turnId', async () => {
+      const { session, agent } = createIngressSession('accepted-ingress');
+      const queued = vi.fn();
+      core.eventBus.on(BusEvent.MESSAGE_QUEUED, queued);
+
+      const outcome = await core.handleMessageInSession(
+        session,
+        { channelId: 'api', userId: 'api-master', text: 'accepted' },
+        undefined,
+        { externalTurnId: 'caller-turn', responseAdapterId: 'sse' },
+      );
+
+      expect(outcome).toEqual({
+        status: 'accepted',
+        turnId: 'caller-turn',
+        queueDepth: 0,
+      });
+      expect(queued).toHaveBeenCalledOnce();
+      expect(queued).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: session.id,
+        turnId: 'caller-turn',
+        text: 'accepted',
+        sourceAdapterId: 'api',
+      }));
+      await vi.waitFor(() => expect(agent.prompt).toHaveBeenCalledOnce());
+      expect(agent.prompt).toHaveBeenCalledWith('accepted', undefined);
     });
   });
 

@@ -99,6 +99,7 @@ class Session {
   configOptions: ConfigOption[]  // agent-declared config (modes, models, etc.)
 
   enqueuePrompt(text: string, attachments?: Attachment[]): Promise<string>
+  acceptPrompt(text: string, attachments?: Attachment[]): Promise<string>
   switchAgent(agentName: string): Promise<void>
   cancel(reason?: string): Promise<void>
   destroy(): Promise<void>
@@ -109,6 +110,13 @@ Sessions emit events through the EventBus that plugins can subscribe to (e.g., `
 
 `enqueuePrompt()` rejects with error code `SESSION_TERMINATING` once the session is
 finished, cancelled, or has started teardown; terminal sessions never accept new work.
+
+`acceptPrompt()` returns after blocking middleware and synchronous queue admission,
+without waiting for the ACP turn. REST and SSE use this boundary so a 202 response
+is truthful: blocked prompts emit no queued event, while accepted prompts emit one
+queued event with the same `turnId`. After an ordinary `session_end`, connector
+delivery and durable persistence complete before the agent process, logger, bridges,
+and live session identity are released.
 
 ### Lazy session resume
 
@@ -138,6 +146,12 @@ Key sub-managers extracted from AgentInstance:
 - **TerminalManager** -- manages agent terminal/shell sessions
 - **McpManager** -- handles MCP (Model Context Protocol) server connections
 - **AuthHandler** -- handles agent authentication flows
+
+AgentManager maintains at most one initialized warm ACP process. An unclaimed
+entry has a five-minute TTL enforced by a background reaper. Shutdown invalidates
+in-flight prewarm work and joins any concurrent claim or cleanup. The manager
+retains ownership through bounded destroy retries and reports pending or failed
+cleanup instead of exposing the slot as empty while the process may still live.
 
 ---
 

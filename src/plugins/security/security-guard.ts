@@ -11,6 +11,14 @@ export interface SecurityConfig {
   maxConcurrentSessions: number;
 }
 
+export type SecurityAccessResult =
+  | { allowed: true }
+  | {
+      allowed: false;
+      code: "UNAUTHORIZED_USER" | "SESSION_LIMIT";
+      reason: string;
+    };
+
 /**
  * Enforces user allowlist and global session-count limits on every incoming message.
  *
@@ -34,24 +42,30 @@ export class SecurityGuard {
    * 2. **Session cap** — counts sessions in `active` or `initializing` state. `initializing`
    *    is included because a session holds resources before it reaches `active`.
    */
-  async checkAccess(message: { userId: string | number }):
-    Promise<{ allowed: true } | { allowed: false; reason: string }>
+  async checkAccess(
+    message: { userId: string | number },
+    options?: { skipUserAllowlist?: boolean },
+  ): Promise<SecurityAccessResult>
   {
     const config = await this.getSecurityConfig();
     const allowedIds = config.allowedUserIds ?? [];
     const maxSessions = config.maxConcurrentSessions ?? 20;
 
-    if (allowedIds.length > 0) {
+    if (!options?.skipUserAllowlist && allowedIds.length > 0) {
       // Coerce to string: platform adapters may deliver userId as a number (e.g. Telegram)
       const userId = String(message.userId);
       if (!allowedIds.includes(userId)) {
-        return { allowed: false, reason: "Unauthorized user" };
+        return { allowed: false, code: "UNAUTHORIZED_USER", reason: "Unauthorized user" };
       }
     }
     const active = this.sessionManager.listSessions()
       .filter(s => s.status === "active" || s.status === "initializing");
     if (active.length >= maxSessions) {
-      return { allowed: false, reason: `Session limit reached (${maxSessions})` };
+      return {
+        allowed: false,
+        code: "SESSION_LIMIT",
+        reason: `Session limit reached (${maxSessions})`,
+      };
     }
     return { allowed: true };
   }

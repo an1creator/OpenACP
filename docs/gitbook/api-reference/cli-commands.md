@@ -303,7 +303,14 @@ openacp api restart
 
 ### api send
 
-Sends a prompt to a session. The prompt is enqueued; responses arrive asynchronously via the channel adapter.
+Submits a prompt to a session. Success means the full ingress policy accepted it
+into the serial queue; agent processing and responses remain asynchronous. The
+human response says `Prompt accepted` and includes queue depth. `--json` returns
+the API acceptance object, including `status`, `turnId`, and `queueDepth`.
+
+Policy rejection exits non-zero. JSON errors retain the stable
+`MESSAGE_BLOCKED` or `SESSION_LIMIT` code instead of collapsing them into a
+generic API error.
 
 ```
 openacp api send <session-id> <prompt>

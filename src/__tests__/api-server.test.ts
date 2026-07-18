@@ -32,9 +32,14 @@ describe("ApiServer", () => {
       patchRecord: vi.fn(),
       cancelSession: vi.fn(),
       getSessionRecord: vi.fn(() => null),
+      getServiceResourceStatus: vi.fn(() => ({
+        assistant: { live: 0, active: 0 },
+        terminalCleanup: { pending: 0, failed: 0 },
+      })),
     },
     agentManager: {
       getAvailableAgents: vi.fn(() => []),
+      getWarmPoolResourceStatus: vi.fn(() => ({ state: 'empty', capacity: 1 })),
     },
     agentCatalog: {
       load: vi.fn(),
@@ -76,11 +81,33 @@ describe("ApiServer", () => {
     requestRestart: vi.fn(),
     tunnelService: undefined as unknown,
     eventBus: new EventBus(),
-    handleMessageInSession: vi.fn().mockResolvedValue({ turnId: 'test-turn', queueDepth: 0 }),
+    handleMessageInSession: vi.fn().mockResolvedValue({
+      status: 'accepted',
+      turnId: 'test-turn',
+      queueDepth: 0,
+    }),
   };
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockCore.sessionManager.getSession.mockReset();
+    mockCore.sessionManager.getSessionRecord.mockReset().mockReturnValue(null);
+    mockCore.sessionManager.cancelSession = vi.fn().mockResolvedValue({
+      sessionId: 'test-session',
+      cancelled: true,
+      previousStatus: 'active',
+      status: 'cancelled',
+      alreadyTerminal: false,
+      cleanupPending: false,
+    });
+    mockCore.getOrResumeSessionById.mockReset().mockImplementation((id: string) =>
+      Promise.resolve(mockCore.sessionManager.getSession(id))
+    );
+    mockCore.handleMessageInSession.mockReset().mockResolvedValue({
+      status: 'accepted',
+      turnId: 'test-turn',
+      queueDepth: 0,
+    });
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "openacp-api-test-"));
     portFilePath = path.join(tmpDir, "api.port");
     secretFilePath = path.join(tmpDir, "api-secret");
@@ -343,7 +370,9 @@ describe("ApiServer", () => {
   });
 
   it("DELETE /api/sessions/:id returns 404 for unknown session", async () => {
-    mockCore.sessionManager.getSession.mockReturnValueOnce(undefined);
+    mockCore.sessionManager.cancelSession.mockRejectedValueOnce(
+      Object.assign(new Error('not found'), { code: 'SESSION_NOT_FOUND' }),
+    );
     const port = await startServer();
 
     const res = await apiFetch(port, "/api/v1/sessions/unknown", {
@@ -678,7 +707,7 @@ describe("ApiServer", () => {
       body: JSON.stringify({ prompt: "Hello world" }),
     });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     const data = await res.json();
     expect(data.ok).toBe(true);
     expect(data.sessionId).toBe("abc123");

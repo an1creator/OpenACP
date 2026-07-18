@@ -302,10 +302,15 @@ export class SessionBridge {
 
     // Wire lifecycle: persist status changes and auto-disconnect on terminal states
     this.listen(this.session, SessionEv.STATUS_CHANGE, (from: SessionStatus, to: SessionStatus) => {
-      this.deps.sessionManager.patchRecord(this.session.id, {
+      const directFinished = to === 'finished' && !this.session.hasTerminalDelivery;
+      const persisted = this.deps.sessionManager.patchRecord(this.session.id, {
         status: to,
         lastActiveAt: new Date().toISOString(),
-      }, { expectedSession: this.session }).catch((err) => {
+      }, {
+        expectedSession: this.session,
+        ...(directFinished ? { immediate: true } : {}),
+      });
+      persisted.catch((err) => {
         log.error({ err, sessionId: this.session.id }, "Failed to persist session status");
       });
       if (!this.session.isAssistant) {
@@ -317,14 +322,16 @@ export class SessionBridge {
 
       // A direct finish() call has no agent completion event to own a delivery
       // barrier, so retain the legacy cleanup path for that special case.
-      if (to === "finished" && !this.session.hasTerminalDelivery) {
-        // Release the Core-owned bridge map after current event handlers complete.
-        // Cancellation may have already done this synchronously; connected guards
-        // keep the cleanup idempotent in that race.
-        queueMicrotask(() => {
-          this.deps.sessionManager.releaseSessionResources?.(this.session);
-          if (this.connected) this.disconnect();
-        });
+      if (directFinished) {
+        void persisted.then(
+          () => {
+            const finalize = this.deps.sessionManager.finalizeFinishedSession;
+            if (typeof finalize === 'function') return finalize.call(this.deps.sessionManager, this.session);
+            this.deps.sessionManager.releaseSessionResources?.(this.session);
+            if (this.connected) this.disconnect();
+          },
+          () => undefined,
+        );
       }
     });
 
@@ -661,7 +668,17 @@ export class SessionBridge {
         return;
       }
       if (this.session.completeTerminalDelivery(this.adapterId, generation)) {
-        this.deps.sessionManager.releaseSessionResources?.(this.session);
+        const finalize = this.deps.sessionManager.finalizeFinishedSession;
+        if (typeof finalize !== 'function') {
+          this.deps.sessionManager.releaseSessionResources?.(this.session);
+          return;
+        }
+        void finalize.call(this.deps.sessionManager, this.session).catch((cleanupError) => {
+          log.error(
+            { err: cleanupError, sessionId: this.session.id },
+            'Finished session teardown coordination failed',
+          );
+        });
       }
     }
   }

@@ -10,6 +10,10 @@ import { redactNetworkSecrets } from "../security/network-redaction.js";
 
 const log = createChildLogger({ module: 'session-manager' });
 const SESSION_CANCEL_CLEANUP_TIMEOUT_MS = 9_000;
+// Store-less managers need a short idempotency window for immediate retry, but
+// must not retain every historical ID forever or claim truth after that window.
+const NO_STORE_TERMINAL_TOMBSTONE_TTL_MS = 15 * 60 * 1000;
+const NO_STORE_TERMINAL_TOMBSTONE_CAPACITY = 1_024;
 
 function isTerminalStatus(status: SessionStatus | undefined): status is 'cancelled' | 'finished' {
   return status === 'cancelled' || status === 'finished';
@@ -62,6 +66,18 @@ type CleanupOutcome =
   | { status: 'failed'; error: unknown }
   | { status: 'timed-out' };
 
+interface SessionTeardownEntry {
+  session: Session;
+  operation: Promise<void>;
+  state: 'pending' | 'failed';
+  error?: unknown;
+}
+
+interface TerminalCancellationTombstone {
+  status: 'cancelled' | 'finished';
+  expiresAt: number;
+}
+
 async function waitForSessionCleanup(operation: Promise<void>): Promise<CleanupOutcome> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const observed = operation.then<CleanupOutcome, CleanupOutcome>(
@@ -109,6 +125,12 @@ export interface CancelSessionResult {
   warning?: string;
 }
 
+/** Additive internal-resource diagnostics exposed by authenticated health details. */
+export interface SessionServiceResourceStatus {
+  assistant: { live: number; active: number };
+  terminalCleanup: { pending: number; failed: number };
+}
+
 /**
  * Registry for live Session instances. Provides lookup by session ID, channel+thread,
  * or agent session ID. Coordinates session lifecycle: creation, cancellation, persistence,
@@ -130,6 +152,10 @@ export class SessionManager {
   private _closing = false;
   private closeOperation: Promise<void> | null = null;
   private cancellationOps = new Map<string, Promise<CancelSessionResult>>();
+  /** Bounded, expiring idempotency window used only when no durable store exists. */
+  private terminalCancellationStatuses = new Map<string, TerminalCancellationTombstone>();
+  /** Shared process teardown for completion/cancel races, keyed by durable session ID. */
+  private sessionTeardownOps = new Map<string, SessionTeardownEntry>();
   private nextRegistrationGeneration = 1;
   private pendingRegistrations = new Map<string, Set<ManagedSessionRegistrationLease>>();
   private ownedRegistrationLeases = new WeakSet<object>();
@@ -154,6 +180,41 @@ export class SessionManager {
     }
   }
 
+  private pruneTerminalCancellationStatuses(now = Date.now()): void {
+    for (const [sessionId, tombstone] of this.terminalCancellationStatuses) {
+      if (tombstone.expiresAt <= now) this.terminalCancellationStatuses.delete(sessionId);
+    }
+    while (this.terminalCancellationStatuses.size > NO_STORE_TERMINAL_TOMBSTONE_CAPACITY) {
+      const oldest = this.terminalCancellationStatuses.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.terminalCancellationStatuses.delete(oldest);
+    }
+  }
+
+  private getTerminalCancellationStatus(sessionId: string): 'cancelled' | 'finished' | undefined {
+    if (this.store) return undefined;
+    const now = Date.now();
+    this.pruneTerminalCancellationStatuses(now);
+    const tombstone = this.terminalCancellationStatuses.get(sessionId);
+    if (!tombstone || tombstone.expiresAt <= now) return undefined;
+    return tombstone.status;
+  }
+
+  private rememberTerminalCancellationStatus(
+    sessionId: string,
+    status: 'cancelled' | 'finished',
+  ): void {
+    if (this.store) return;
+    this.pruneTerminalCancellationStatuses();
+    // Refresh insertion order for deterministic oldest-first capacity eviction.
+    this.terminalCancellationStatuses.delete(sessionId);
+    this.terminalCancellationStatuses.set(sessionId, {
+      status,
+      expiresAt: Date.now() + NO_STORE_TERMINAL_TOMBSTONE_TTL_MS,
+    });
+    this.pruneTerminalCancellationStatuses();
+  }
+
   private cleanupOwnedResources(sessionId: string): void {
     try {
       this.cleanupSessionResources?.(sessionId);
@@ -166,6 +227,88 @@ export class SessionManager {
         'Session resource cleanup failed at terminal boundary',
       );
     }
+  }
+
+  /**
+   * Cross the resource terminal boundary synchronously and start one shared
+   * Session.destroy() operation. Durable state must be written by the caller
+   * before invoking this method.
+   */
+  private startSessionTeardown(session: Session, removeLiveIdentity = false): Promise<void> {
+    const existing = this.sessionTeardownOps.get(session.id);
+    if (existing?.session === session && existing.state === 'pending') {
+      if (removeLiveIdentity && this.sessions.get(session.id) === session) {
+        this.cleanupOwnedResources(session.id);
+        this.sessions.delete(session.id);
+      }
+      return existing.operation;
+    }
+    if (existing?.session === session && existing.state === 'failed') {
+      this.sessionTeardownOps.delete(session.id);
+    } else if (existing) {
+      return existing.operation;
+    }
+
+    session.beginTermination();
+    this.cleanupOwnedResources(session.id);
+    if (removeLiveIdentity && this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+
+    const entry = {} as SessionTeardownEntry;
+    const operation = session.destroy().then(
+      () => {
+        if (this.sessions.get(session.id) === session) this.sessions.delete(session.id);
+        if (this.sessionTeardownOps.get(session.id) === entry) {
+          this.sessionTeardownOps.delete(session.id);
+        }
+        if (this.middlewareChain) {
+          this.middlewareChain.execute(
+            Hook.SESSION_AFTER_DESTROY,
+            { sessionId: session.id },
+            async (payload) => payload,
+          ).catch(() => {});
+        }
+      },
+      (error: unknown) => {
+        if (this.sessionTeardownOps.get(session.id) === entry) {
+          entry.state = 'failed';
+          entry.error = error;
+        }
+        throw error;
+      },
+    );
+    entry.session = session;
+    entry.operation = operation;
+    entry.state = 'pending';
+    this.sessionTeardownOps.set(session.id, entry);
+    return operation;
+  }
+
+  /**
+   * Finalize a durable ordinary completion after its terminal delivery barrier.
+   * The wait is bounded for event-loop health; the shared destroy promise remains
+   * observed and removes the live identity immediately.
+   */
+  async finalizeFinishedSession(session: Session): Promise<CleanupOutcome> {
+    const current = this.sessions.get(session.id);
+    const existing = this.sessionTeardownOps.get(session.id);
+    if (current !== session && existing?.session !== session) {
+      return { status: 'completed' };
+    }
+    const cleanup = await waitForSessionCleanup(this.startSessionTeardown(session, true));
+    if (cleanup.status !== 'completed') {
+      log.warn(
+        {
+          sessionId: session.id,
+          error: cleanup.status === 'failed'
+            ? redactNetworkSecrets(cleanup.error instanceof Error ? cleanup.error.message : String(cleanup.error))
+            : `cleanup exceeded ${SESSION_CANCEL_CLEANUP_TIMEOUT_MS}ms`,
+        },
+        cleanup.status === 'failed'
+          ? 'Finished session agent/logger cleanup failed'
+          : 'Finished session agent/logger cleanup is still running',
+      );
+    }
+    return cleanup;
   }
 
   /** Cross the manager-wide terminal boundary before teardown performs any I/O. */
@@ -333,6 +476,9 @@ export class SessionManager {
     if (this.cancellingSessionIds.has(sessionId)) {
       throw new SessionRegistrationSupersededError(sessionId, 'cancellation is in progress');
     }
+    if (this.sessionTeardownOps.has(sessionId)) {
+      throw new SessionRegistrationSupersededError(sessionId, 'terminal process cleanup is in progress');
+    }
     if (this.sessions.has(sessionId)) {
       throw new SessionRegistrationSupersededError(sessionId, 'session is already live');
     }
@@ -411,6 +557,7 @@ export class SessionManager {
     } else if (this.cancellingSessionIds.has(session.id)) {
       this.rejectRegistration(session, 'cancellation is in progress');
     }
+    this.terminalCancellationStatuses.delete(session.id);
     this.sessions.set(session.id, session);
   }
 
@@ -559,13 +706,16 @@ export class SessionManager {
   }
 
   private async performCancelSession(sessionId: string): Promise<CancelSessionResult> {
-    const session = this.sessions.get(sessionId);
+    const liveSession = this.sessions.get(sessionId);
+    const teardownBefore = this.sessionTeardownOps.get(sessionId);
+    const session = liveSession ?? teardownBefore?.session;
     const recordBefore = this.store?.get(sessionId);
+    const terminalStatusBefore = this.getTerminalCancellationStatus(sessionId);
     // An already-durable terminal record is the winner even if an inconsistent
     // stale live object still exists. Otherwise the synchronous in-memory state wins.
     let previousStatus = isTerminalStatus(recordBefore?.status)
       ? recordBefore.status
-      : session?.status ?? recordBefore?.status;
+      : session?.status ?? recordBefore?.status ?? terminalStatusBefore;
     if (!previousStatus) {
       const error = new Error(`Session "${sessionId}" not found`) as Error & { code?: string };
       error.code = 'SESSION_NOT_FOUND';
@@ -573,6 +723,7 @@ export class SessionManager {
     }
     let alreadyTerminal = previousStatus === 'cancelled' || previousStatus === 'finished';
     let finalStatus: 'cancelled' | 'finished' = previousStatus === 'finished' ? 'finished' : 'cancelled';
+    this.rememberTerminalCancellationStatus(sessionId, finalStatus);
 
     this.invalidateSessionRegistrations(sessionId, 'session cancellation started');
     // Stop all replacement/resume commits before the first durable await. The
@@ -626,10 +777,8 @@ export class SessionManager {
       // prompt ignores both cancellation and its local AbortSignal. The manager's
       // deadline keeps external DELETE/cancel requests bounded while the teardown
       // promise remains observed and shared for a later retry.
-      const cleanup = await waitForSessionCleanup(session.destroy());
-      if (cleanup.status === 'completed') {
-        this.sessions.delete(sessionId);
-      } else {
+      const cleanup = await waitForSessionCleanup(this.startSessionTeardown(session));
+      if (cleanup.status !== 'completed') {
         cleanupPending = true
         log.warn(
           {
@@ -643,10 +792,6 @@ export class SessionManager {
             : `Session is durably ${finalStatus} but agent/logger cleanup is still running; repeat cancellation to observe cleanup`,
         )
       }
-    }
-    // Hook: session:afterDestroy — read-only, fire-and-forget
-    if (!cleanupPending && this.middlewareChain) {
-      this.middlewareChain.execute(Hook.SESSION_AFTER_DESTROY, { sessionId }, async (p) => p).catch(() => {});
     }
     return {
       sessionId,
@@ -668,6 +813,24 @@ export class SessionManager {
     const all = Array.from(this.sessions.values()).filter(s => !s.isAssistant);
     if (channelId) return all.filter((s) => s.channelId === channelId);
     return all;
+  }
+
+  /** Additive diagnostics for internal sessions hidden from user listings. */
+  getServiceResourceStatus(): SessionServiceResourceStatus {
+    const assistants = Array.from(this.sessions.values()).filter((session) => session.isAssistant);
+    const teardown = Array.from(this.sessionTeardownOps.values());
+    return {
+      assistant: {
+        live: assistants.length,
+        active: assistants.filter(
+          (session) => session.status === 'active' || session.status === 'initializing',
+        ).length,
+      },
+      terminalCleanup: {
+        pending: teardown.filter((entry) => entry.state === 'pending').length,
+        failed: teardown.filter((entry) => entry.state === 'failed').length,
+      },
+    };
   }
 
   /**
@@ -779,6 +942,7 @@ export class SessionManager {
 
   /** Remove a session's stored record and emit a SESSION_DELETED event. */
   async removeRecord(sessionId: string): Promise<void> {
+    this.terminalCancellationStatuses.delete(sessionId);
     if (!this.store) return;
     await this.withRecordMutation(sessionId, () => this.store!.remove(sessionId));
     this.eventBus?.emit(BusEvent.SESSION_DELETED, { sessionId });
@@ -822,6 +986,7 @@ export class SessionManager {
     }
     this._shutdownComplete = true;
     this.sessions.clear();
+    this.terminalCancellationStatuses.clear();
   }
 
   /**
@@ -860,6 +1025,7 @@ export class SessionManager {
     for (const session of sessions) await session.destroy();
     this._shutdownComplete = true;
     this.sessions.clear();
+    this.terminalCancellationStatuses.clear();
     // Hook: session:afterDestroy — read-only, fire-and-forget
     if (this.middlewareChain) {
       for (const sessionId of sessionIds) {

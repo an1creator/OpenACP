@@ -6,6 +6,7 @@ import type { RouteDeps } from '../routes/types.js';
 import { SessionManager } from '../../../core/sessions/session-manager.js';
 import { Session } from '../../../core/sessions/session.js';
 import { TypedEmitter } from '../../../core/utils/typed-emitter.js';
+import { apiMessagePrincipal, apiPlatformUserId } from '../routes/prompt-response.js';
 
 function createMockSession(overrides: Record<string, unknown> = {}) {
   return {
@@ -97,7 +98,11 @@ function createMockDeps(overrides: Partial<RouteDeps> = {}): RouteDeps {
         getAvailableAgents: vi.fn().mockReturnValue([]),
       },
       eventBus: { emit: vi.fn() },
-      handleMessageInSession: vi.fn().mockResolvedValue({ turnId: 'test-turn', queueDepth: 0 }),
+      handleMessageInSession: vi.fn().mockResolvedValue({
+        status: 'accepted',
+        turnId: 'test-turn',
+        queueDepth: 0,
+      }),
     } as any,
     topicManager: undefined,
     startedAt: Date.now(),
@@ -311,23 +316,62 @@ describe('session routes', () => {
   });
 
   describe('POST /api/v1/sessions/:sessionId/prompt', () => {
-    it('enqueues a prompt', async () => {
+    it('accepts a prompt and preserves the transport turn id', async () => {
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/sessions/sess-1/prompt',
         payload: { prompt: 'Hello!' },
       });
 
-      expect(response.statusCode).toBe(200);
+      expect(response.statusCode).toBe(202);
       const body = JSON.parse(response.body);
-      expect(body.ok).toBe(true);
+      expect(body).toMatchObject({
+        ok: true,
+        accepted: true,
+        status: 'accepted',
+        sessionId: 'sess-1',
+        queueDepth: 0,
+      });
       expect(body.turnId).toBe('test-turn');
       expect(deps.core.handleMessageInSession).toHaveBeenCalledWith(
         expect.objectContaining({ id: 'sess-1' }),
         expect.objectContaining({ text: 'Hello!' }),
         expect.any(Object),
-        expect.any(Object),
+        expect.objectContaining({
+          principal: { type: 'api', credential: 'secret' },
+        }),
       );
+    });
+
+    it.each([
+      {
+        code: 'MESSAGE_BLOCKED',
+        reason: 'Message was blocked by ingress policy.',
+        statusCode: 403,
+      },
+      {
+        code: 'SESSION_LIMIT',
+        reason: 'Concurrent session limit reached.',
+        statusCode: 429,
+      },
+    ])('returns a typed $statusCode response for $code', async ({ code, reason, statusCode }) => {
+      (deps.core.handleMessageInSession as any).mockResolvedValueOnce({
+        status: 'blocked',
+        turnId: 'blocked-turn',
+        code,
+        reason,
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/sessions/sess-1/prompt',
+        payload: { prompt: 'Hello!' },
+      });
+
+      expect(response.statusCode).toBe(statusCode);
+      expect(response.json()).toEqual({
+        error: { code, message: reason, statusCode },
+      });
     });
 
     it('returns 404 for unknown session', async () => {
@@ -755,5 +799,27 @@ describe('session routes', () => {
         vi.useRealTimers();
       }
     });
+  });
+});
+
+describe('API prompt principal mapping', () => {
+  it('maps the master secret without inventing a connector identity', () => {
+    const request = { auth: { type: 'secret', role: 'admin', scopes: ['*'] } } as any;
+    expect(apiMessagePrincipal(request)).toEqual({ type: 'api', credential: 'secret' });
+    expect(apiPlatformUserId(request)).toBe('api-master');
+  });
+
+  it.each([
+    [{ type: 'jwt', tokenId: 'token-1', role: 'operator', scopes: ['sessions:prompt'] }, undefined],
+    [{ type: 'jwt', tokenId: 'token-1', userId: 'user-1', role: 'operator', scopes: ['sessions:prompt'] }, 'user-1'],
+  ])('maps linked and unlinked JWT identity explicitly', (auth, linkedUserId) => {
+    const request = { auth } as any;
+    expect(apiMessagePrincipal(request)).toEqual({
+      type: 'api',
+      credential: 'jwt',
+      tokenId: 'token-1',
+      linkedUserId,
+    });
+    expect(apiPlatformUserId(request)).toBe('token-1');
   });
 });

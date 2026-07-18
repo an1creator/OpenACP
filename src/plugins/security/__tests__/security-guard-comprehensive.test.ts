@@ -55,7 +55,11 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
         makeSessionManager(),
       );
       const result = await guard.checkAccess(makeMessage({ userId: "user-1" }));
-      expect(result).toEqual({ allowed: false, reason: "Unauthorized user" });
+      expect(result).toEqual({
+        allowed: false,
+        code: "UNAUTHORIZED_USER",
+        reason: "Unauthorized user",
+      });
     });
 
     it("allows user in allowed list (exact match)", async () => {
@@ -85,6 +89,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
       );
       expect(await guard.checkAccess(makeMessage({ userId: "not-me" }))).toEqual({
         allowed: false,
+        code: "UNAUTHORIZED_USER",
         reason: "Unauthorized user",
       });
     });
@@ -107,6 +112,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
       const result = await guard.checkAccess(makeMessage());
       expect(result).toEqual({
         allowed: false,
+        code: "SESSION_LIMIT",
         reason: "Session limit reached (2)",
       });
     });
@@ -192,7 +198,11 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
         makeSessionManager(),
       );
       const result = await guard.checkAccess(makeMessage({ userId: "hacker" }));
-      expect(result).toEqual({ allowed: false, reason: "Unauthorized user" });
+      expect(result).toEqual({
+        allowed: false,
+        code: "UNAUTHORIZED_USER",
+        reason: "Unauthorized user",
+      });
     });
 
     it("authorized user still blocked by session limit", async () => {

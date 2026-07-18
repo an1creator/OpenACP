@@ -8,6 +8,8 @@ import type {
   ConfigOption,
   NotificationMessage,
   UsageRecord,
+  MessagePrincipal,
+  MessageIngressControl,
 } from '../types.js'
 import type { IChannelAdapter } from '../channel.js'
 import type { TurnMeta } from '../types.js'
@@ -554,6 +556,10 @@ export interface MiddlewarePayloadMap {
     attachments?: Attachment[]
     /** Per-turn context bag. Undefined for messages that bypass the normal handleMessage flow. */
     meta?: TurnMeta
+    /** Authenticated transport principal; absent means a normal connector message. */
+    principal?: MessagePrincipal
+    /** Middleware may attach a stable block code before returning null. */
+    ingress?: MessageIngressControl
   }
   'message:outgoing': {
     sessionId: string

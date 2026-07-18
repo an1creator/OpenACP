@@ -52,6 +52,10 @@ export async function systemRoutes(
         ).length,
         total: sessions.length,
       },
+      serviceResources: {
+        ...deps.core.sessionManager.getServiceResourceStatus(),
+        warmPool: deps.core.agentManager.getWarmPoolResourceStatus(),
+      },
       adapters: Array.from(deps.core.adapters.keys()),
       tunnel: tunnel
         ? { enabled: true, url: tunnel.getPublicUrl() }

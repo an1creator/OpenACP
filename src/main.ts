@@ -398,7 +398,7 @@ export async function startServer(opts?: StartServerOptions) {
       }
 
       // 2. Destroy any idle warm agent — don't leak the subprocess.
-      try { await core.agentManager.destroyWarm(); } catch { /* best effort */ }
+      try { await core.agentManager.shutdownWarmPool(); } catch { /* best effort */ }
 
       // 3. Persist session state (don't kill agent subprocesses — they exit with parent)
       await core.sessionManager.shutdownAll()

@@ -32,6 +32,12 @@ function makePayload(overrides: Partial<{
   threadId: string
   text: string
   meta: Record<string, unknown>
+  principal: { type: 'api'; credential: 'secret' } | {
+    type: 'api'
+    credential: 'jwt'
+    tokenId: string
+    linkedUserId?: string
+  }
 }> = {}) {
   return {
     channelId: 'telegram',
@@ -201,5 +207,48 @@ describe('createAutoRegisterHandler', () => {
     const payload = { channelId: 'telegram', threadId: 't1', userId: 'user999', text: 'hi' }
     await handler(payload, next)
     expect(next).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    { type: 'api', credential: 'secret' } as const,
+    { type: 'api', credential: 'jwt', tokenId: 'unlinked-token' } as const,
+  ])('does not create connector identities for $credential API credentials', async (principal) => {
+    const payload = makePayload({
+      channelId: 'api',
+      userId: principal.credential === 'jwt' ? principal.tokenId : 'api-master',
+      principal,
+    })
+
+    await handler(payload, next)
+
+    expect(await service.getUserCount()).toBe(0)
+    expect(await store.getIdentity(formatIdentityId('api', payload.userId))).toBeUndefined()
+    expect(next).toHaveBeenCalledOnce()
+  })
+
+  it('loads the stable API identity for a linked JWT', async () => {
+    const created = await service.createUserWithIdentity({
+      displayName: 'API User',
+      source: 'api',
+      platformId: 'linked-token',
+    })
+    const payload = makePayload({
+      channelId: 'api',
+      userId: 'linked-token',
+      principal: {
+        type: 'api',
+        credential: 'jwt',
+        tokenId: 'linked-token',
+        linkedUserId: created.user.userId,
+      },
+    })
+
+    await handler(payload, next)
+
+    expect(payload.meta.identity).toMatchObject({
+      identityId: formatIdentityId('api', 'linked-token'),
+      userId: created.user.userId,
+    })
+    expect(await service.getUserCount()).toBe(1)
   })
 })

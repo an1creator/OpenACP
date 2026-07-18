@@ -99,4 +99,19 @@ describe('createApiServer', () => {
 
     expect(response.statusCode).toBe(401);
   });
+
+  it.each([
+    ['/api/health?probe=1', '/api/v1/system/health?probe=1'],
+    ['/api/health/details', '/api/v1/system/health/details'],
+    ['/api/version', '/api/v1/system/version'],
+    ['/api/restart', '/api/v1/system/restart'],
+    ['/api/adapters', '/api/v1/system/adapters'],
+    ['/api/sessions/example', '/api/v1/sessions/example'],
+  ])('redirects legacy %s to its real canonical route', async (legacy, canonical) => {
+    server = await createApiServer(serverOpts());
+    const response = await server.app.inject({ method: 'GET', url: legacy });
+
+    expect(response.statusCode).toBe(308);
+    expect(response.headers.location).toBe(canonical);
+  });
 });

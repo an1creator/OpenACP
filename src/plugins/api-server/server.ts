@@ -115,11 +115,22 @@ export async function createApiServer(options: ApiServerOptions): Promise<ApiSer
   // Global error handler
   app.setErrorHandler(globalErrorHandler);
 
-  // Backward-compatible redirects: /api/* → /api/v1/*
+  // Backward-compatible redirects. Legacy system routes were top-level, while
+  // their canonical v1 equivalents live under /api/v1/system.
   app.addHook('onRequest', async (request, reply) => {
     const url = request.url;
     if (url.startsWith('/api/') && !url.startsWith('/api/v1/') && !url.startsWith('/api/docs')) {
-      const newUrl = url.replace('/api/', '/api/v1/');
+      const queryIndex = url.indexOf('?');
+      const pathname = queryIndex === -1 ? url : url.slice(0, queryIndex);
+      const query = queryIndex === -1 ? '' : url.slice(queryIndex);
+      const legacySystemRoutes: Record<string, string> = {
+        '/api/health': '/api/v1/system/health',
+        '/api/health/details': '/api/v1/system/health/details',
+        '/api/version': '/api/v1/system/version',
+        '/api/restart': '/api/v1/system/restart',
+        '/api/adapters': '/api/v1/system/adapters',
+      };
+      const newUrl = `${legacySystemRoutes[pathname] ?? pathname.replace('/api/', '/api/v1/')}${query}`;
       return reply.redirect(newUrl, 308);
     }
   });

@@ -485,7 +485,7 @@ describe('my-plugin', () => {
     ".": "./dist/index.js"
   },
   "peerDependencies": {
-    "@n1creator/openacp-cli": ">=2026.718.1"
+    "@n1creator/openacp-cli": ">=2026.718.2"
   },
   "engines": {
     "node": ">=22"

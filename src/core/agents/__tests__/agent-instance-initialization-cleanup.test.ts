@@ -103,4 +103,23 @@ describe('AgentInstance initialization cleanup', () => {
     expect(state.children).toHaveLength(1)
     expect(state.children[0].kill).toHaveBeenCalledOnce()
   })
+
+  it('keeps concurrent destroy joined but permits a later retry after cleanup rejects', async () => {
+    const instance = await AgentInstance.spawnSubprocess(agentDefinition, '/tmp')
+    const terminalCleanup = vi.fn()
+      .mockImplementationOnce(() => { throw new Error('terminal cleanup failed') })
+      .mockImplementationOnce(() => undefined)
+    ;(instance as any).terminalManager.destroyAll = terminalCleanup
+
+    const first = instance.destroy()
+    const concurrent = instance.destroy()
+    await expect(first).rejects.toThrow('terminal cleanup failed')
+    await expect(concurrent).rejects.toThrow('terminal cleanup failed')
+    expect(terminalCleanup).toHaveBeenCalledOnce()
+    expect(state.children[0].kill).not.toHaveBeenCalled()
+
+    await expect(instance.destroy()).resolves.toBeUndefined()
+    expect(terminalCleanup).toHaveBeenCalledTimes(2)
+    expect(state.children[0].kill).toHaveBeenCalledOnce()
+  })
 })

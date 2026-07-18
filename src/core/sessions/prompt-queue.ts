@@ -34,7 +34,7 @@ export class PromptQueue {
    * immediately. Otherwise, it's buffered and the returned promise resolves
    * only after the prompt finishes processing.
    */
-  async enqueue(text: string, userPrompt: string, attachments?: Attachment[], routing?: TurnRouting, turnId?: string, meta?: TurnMeta): Promise<void> {
+  submit(text: string, userPrompt: string, attachments?: Attachment[], routing?: TurnRouting, turnId?: string, meta?: TurnMeta): Promise<void> {
     if (this.closed) throw new Error('Prompt queue is closed')
     if (this.processing) {
       // Fire synchronously BEFORE pushing so the caller sees accurate position and promptRunning state.
@@ -46,7 +46,11 @@ export class PromptQueue {
         this.queue.push({ text, userPrompt, attachments, routing, turnId, meta, resolve })
       })
     }
-    await this.process(text, userPrompt, attachments, routing, turnId, meta)
+    return this.process(text, userPrompt, attachments, routing, turnId, meta)
+  }
+
+  async enqueue(text: string, userPrompt: string, attachments?: Attachment[], routing?: TurnRouting, turnId?: string, meta?: TurnMeta): Promise<void> {
+    await this.submit(text, userPrompt, attachments, routing, turnId, meta)
   }
 
   /** Run a single prompt through the processor, then drain the next queued item. */

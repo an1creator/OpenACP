@@ -64,7 +64,8 @@ export type {
   UsageRecord, InstallProgress,
   DisplayVerbosity, ToolCallMeta, ToolUpdateMeta, ViewerLinks,
   TelegramPlatformData,
-  TurnMeta,
+  TurnMeta, MessagePrincipal, MessageIngressBlockCode, MessageIngressControl,
+  MessageDispatchOutcome, WarmPoolResourceStatus, SessionServiceResourceStatus,
 } from '@n1creator/openacp-cli'
 
 // --- Middleware types ---

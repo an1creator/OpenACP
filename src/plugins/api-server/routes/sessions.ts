@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { RouteDeps } from './types.js';
-import { AuthError, BadRequestError, NotFoundError, ServiceUnavailableError } from '../middleware/error-handler.js';
+import { BadRequestError, NotFoundError, ServiceUnavailableError } from '../middleware/error-handler.js';
 import { requireScopes } from '../middleware/auth.js';
 import { resolveAttachments } from './attachment-utils.js';
 import {
@@ -15,6 +15,11 @@ import {
   SetConfigOptionBodySchema,
   SetClientOverridesBodySchema,
 } from '../schemas/sessions.js';
+import {
+  apiMessagePrincipal,
+  apiPlatformUserId,
+  requireAcceptedPrompt,
+} from './prompt-response.js';
 
 
 /**
@@ -252,7 +257,7 @@ export async function sessionRoutes(
       }
 
       const sourceAdapterId = body.sourceAdapterId ?? 'sse';
-      const userId = (request as any).auth?.tokenId ?? 'api';
+      const userId = apiPlatformUserId(request);
 
       // Use 'api' as channelId so auto-register creates identity with source='api',
       // matching POST /identity/setup. Response routing still uses sourceAdapterId ('sse')
@@ -266,16 +271,19 @@ export async function sessionRoutes(
           // Preserve null (suppress response) but fall back to sourceAdapterId when
           // responseAdapterId is not specified, since 'api' has no adapter to route to.
           responseAdapterId: body.responseAdapterId !== undefined ? body.responseAdapterId : sourceAdapterId,
+          principal: apiMessagePrincipal(request),
         },
       );
+      const accepted = requireAcceptedPrompt(result);
 
-      // handleMessageInSession returns undefined when a middleware (e.g. security) blocks
-      // the message. Surface this as a 403 so the caller knows it was rejected.
-      if (!result) {
-        throw new AuthError('MESSAGE_BLOCKED', 'Message was blocked by a middleware plugin.', 403);
-      }
-
-      return { ok: true, sessionId, queueDepth: result.queueDepth, turnId: result.turnId };
+      return reply.status(202).send({
+        ok: true,
+        accepted: true,
+        status: 'accepted',
+        sessionId,
+        queueDepth: accepted.queueDepth,
+        turnId: accepted.turnId,
+      });
     },
   );
 
@@ -640,11 +648,6 @@ export async function sessionRoutes(
     async (request) => {
       const { sessionId: rawId } = SessionIdParamSchema.parse(request.params);
       const sessionId = decodeURIComponent(rawId);
-      const known = deps.core.sessionManager.getSession(sessionId)
-        ?? deps.core.sessionManager.getSessionRecord(sessionId);
-      if (!known) {
-        throw new NotFoundError('SESSION_NOT_FOUND', `Session "${sessionId}" not found`);
-      }
       try {
         const result = await deps.core.sessionManager.cancelSession(sessionId);
         return { ok: true, ...result };

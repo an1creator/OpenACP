@@ -25,6 +25,8 @@ function extractApiErrorCode(data: Record<string, unknown>, fallback: ErrorCode 
   const err = data.error
   const code = typeof err === 'object' && err !== null && 'code' in err ? String((err as Record<string, unknown>).code) : ''
   if (code === ErrorCodes.SESSION_NOT_FOUND) return ErrorCodes.SESSION_NOT_FOUND
+  if (code === ErrorCodes.MESSAGE_BLOCKED) return ErrorCodes.MESSAGE_BLOCKED
+  if (code === ErrorCodes.SESSION_LIMIT) return ErrorCodes.SESSION_LIMIT
   return fallback
 }
 
@@ -488,12 +490,12 @@ Shows the version of the currently running daemon process.
       })
       const data = await res.json() as Record<string, unknown>
       if (!res.ok) {
-        if (json) jsonError(ErrorCodes.API_ERROR, extractApiError(data))
+        if (json) jsonError(extractApiErrorCode(data), extractApiError(data))
         console.error(`Error: ${extractApiError(data)}`)
         process.exit(1)
       }
       if (json) jsonSuccess(data)
-      console.log(`Prompt sent to session ${sessionId} (queue depth: ${data.queueDepth})`)
+      console.log(`Prompt accepted for session ${sessionId} (queue depth: ${data.queueDepth})`)
 
     } else if (subCmd === 'session') {
       const sessionId = args[1]

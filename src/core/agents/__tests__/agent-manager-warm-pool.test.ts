@@ -6,7 +6,7 @@
  * that is missing from node_modules in this test environment).
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { afterEach, describe, it, expect, vi, beforeEach } from 'vitest'
 
 // ── Module-level mock — must come before any import of the real module ────────
 vi.mock('../agent-instance.js', () => {
@@ -66,6 +66,10 @@ describe('AgentManager warm-pool', () => {
     vi.mocked(AgentInstance.spawn).mockImplementation(
       async () => fakeWarmInstance() as any,
     )
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   // ── 1. prewarm schedules a single warm entry; concurrent calls are deduped ──
@@ -331,6 +335,92 @@ describe('AgentManager warm-pool', () => {
       // Fell through to full spawn
       expect(AgentInstance.spawn).toHaveBeenCalledOnce()
     })
+
+    it('reaps an idle warm process in the background without requiring spawn()', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-07-18T00:00:00.000Z'))
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+      const warmInst = fakeWarmInstance()
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warmInst as any)
+
+      manager.prewarm('claude', '/workspace')
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(manager.getWarmPoolResourceStatus()).toEqual({
+        state: 'ready',
+        capacity: 1,
+        agent: 'claude',
+        createdAt: '2026-07-18T00:00:00.000Z',
+        expiresAt: '2026-07-18T00:05:00.000Z',
+      })
+
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+
+      expect(warmInst.destroy).toHaveBeenCalledOnce()
+      expect(manager.getWarmPoolResourceStatus()).toEqual({ state: 'empty', capacity: 1 })
+    })
+
+    it('clears the reaper timer when the warm process is consumed', async () => {
+      vi.useFakeTimers()
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+      const claimed = fakeWarmInstance()
+      const refill = fakeWarmInstance()
+      vi.mocked(AgentInstance.spawnSubprocess)
+        .mockResolvedValueOnce(claimed as any)
+        .mockResolvedValueOnce(refill as any)
+
+      manager.prewarm('claude', '/workspace')
+      await vi.advanceTimersByTimeAsync(0)
+      await manager.spawn('claude', '/workspace')
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+
+      expect(claimed.destroy).not.toHaveBeenCalled()
+      expect(refill.destroy).toHaveBeenCalledOnce()
+    })
+  })
+
+  describe('shutdownWarmPool()', () => {
+    it('invalidates an in-flight prewarm and prevents later repopulation', async () => {
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+      const candidate = fakeWarmInstance()
+      let resolveSpawn!: (instance: any) => void
+      vi.mocked(AgentInstance.spawnSubprocess).mockImplementationOnce(
+        () => new Promise<any>((resolve) => { resolveSpawn = resolve }),
+      )
+
+      manager.prewarm('claude', '/workspace')
+      await vi.waitFor(() => expect(AgentInstance.spawnSubprocess).toHaveBeenCalledOnce())
+      const shutdown = manager.shutdownWarmPool()
+      expect(manager.getWarmPoolResourceStatus()).toEqual({ state: 'closing', capacity: 1 })
+
+      resolveSpawn(candidate)
+      await shutdown
+
+      expect(candidate.destroy).toHaveBeenCalledOnce()
+      manager.prewarm('claude', '/workspace')
+      await Promise.resolve()
+      expect(AgentInstance.spawnSubprocess).toHaveBeenCalledOnce()
+      expect(manager.getWarmPoolResourceStatus()).toEqual({ state: 'closing', capacity: 1 })
+    })
+
+    it('destroys a ready entry and remains idempotent', async () => {
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+      const warmInst = fakeWarmInstance()
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warmInst as any)
+
+      manager.prewarm('claude', '/workspace')
+      await vi.waitFor(() => expect(AgentInstance.spawnSubprocess).toHaveBeenCalledOnce())
+      await manager.shutdownWarmPool()
+      await manager.shutdownWarmPool()
+
+      expect(warmInst.destroy).toHaveBeenCalledOnce()
+      expect(manager.getWarmPoolResourceStatus()).toEqual({ state: 'closing', capacity: 1 })
+    })
   })
 
   it('rejects a warm process created under an older proxy policy generation', async () => {
@@ -434,7 +524,7 @@ describe('AgentManager warm-pool', () => {
 
       // Second prewarm with different paths — must evict the first and warm again
       manager.prewarm('claude', '/workspace', ['/a', '/b'])
-      expect(firstInstance.destroy).toHaveBeenCalled()
+      await vi.waitFor(() => expect(firstInstance.destroy).toHaveBeenCalled())
 
       await vi.waitFor(() =>
         expect(AgentInstance.spawnSubprocess).toHaveBeenCalledTimes(1),
@@ -484,6 +574,125 @@ describe('AgentManager warm-pool', () => {
       const next = await manager.spawn('claude', '/workspace')
       expect((next as any).claimForSession).toHaveBeenCalled()
       expect(AgentInstance.spawn).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('cleanup ownership and diagnostics', () => {
+    it('retains a failed TTL cleanup resource, blocks claims, and retries to success', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-07-18T00:00:00.000Z'))
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+      const warmInst = fakeWarmInstance()
+      warmInst.destroy
+        .mockRejectedValueOnce(new Error('cleanup via http://user:secret@proxy.test failed'))
+        .mockResolvedValueOnce(undefined)
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warmInst as any)
+
+      manager.prewarm('claude', '/workspace')
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+
+      expect(manager.getWarmPoolResourceStatus()).toMatchObject({
+        state: 'failed',
+        capacity: 1,
+        agent: 'claude',
+        cleanupAttempts: 1,
+        lastError: 'cleanup via http://<redacted>@proxy.test failed',
+      })
+
+      await manager.spawn('claude', '/workspace')
+      expect(warmInst.claimForSession).not.toHaveBeenCalled()
+      expect(AgentInstance.spawn).toHaveBeenCalledOnce()
+
+      await vi.advanceTimersByTimeAsync(250)
+      expect(warmInst.destroy).toHaveBeenCalledTimes(2)
+      expect(manager.getWarmPoolResourceStatus()).toEqual({ state: 'empty', capacity: 1 })
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('stops bounded background retries in failed state without an open timer', async () => {
+      vi.useFakeTimers()
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+      const warmInst = fakeWarmInstance({
+        destroy: vi.fn().mockRejectedValue(new Error('persistent destroy failure')),
+      })
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warmInst as any)
+
+      manager.prewarm('claude', '/workspace')
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 250 + 500)
+
+      expect(warmInst.destroy).toHaveBeenCalledTimes(3)
+      expect(manager.getWarmPoolResourceStatus()).toMatchObject({
+        state: 'failed',
+        cleanupAttempts: 3,
+        lastError: 'persistent destroy failure',
+      })
+      expect(vi.getTimerCount()).toBe(0)
+
+      manager.prewarm('claude', '/other-workspace')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(AgentInstance.spawnSubprocess).toHaveBeenCalledOnce()
+    })
+
+    it('shares reaper cleanup with concurrent spawn and shutdown', async () => {
+      vi.useFakeTimers()
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+      let releaseDestroy!: () => void
+      const warmInst = fakeWarmInstance({
+        destroy: vi.fn(() => new Promise<void>((resolve) => { releaseDestroy = resolve })),
+      })
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warmInst as any)
+
+      manager.prewarm('claude', '/workspace')
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+      expect(manager.getWarmPoolResourceStatus()).toMatchObject({
+        state: 'cleanupPending',
+        cleanupAttempts: 1,
+      })
+
+      const spawn = manager.spawn('claude', '/workspace')
+      await spawn
+      expect(AgentInstance.spawn).toHaveBeenCalledOnce()
+      expect(warmInst.claimForSession).not.toHaveBeenCalled()
+
+      const firstShutdown = manager.shutdownWarmPool()
+      const secondShutdown = manager.shutdownWarmPool()
+      expect(warmInst.destroy).toHaveBeenCalledOnce()
+      releaseDestroy()
+      await Promise.all([firstShutdown, secondShutdown])
+
+      expect(warmInst.destroy).toHaveBeenCalledOnce()
+      expect(manager.getWarmPoolResourceStatus()).toEqual({ state: 'closing', capacity: 1 })
+      expect(vi.getTimerCount()).toBe(0)
+    })
+
+    it('retries shutdown cleanup within a bounded contract and preserves failure truth', async () => {
+      vi.useFakeTimers()
+      const catalog = mockCatalog({ claude: { command: 'claude-agent-acp' } })
+      const manager = new AgentManager(catalog)
+      const warmInst = fakeWarmInstance({
+        destroy: vi.fn().mockRejectedValue(new Error('cannot stop warm process')),
+      })
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warmInst as any)
+
+      manager.prewarm('claude', '/workspace')
+      await vi.advanceTimersByTimeAsync(0)
+      const shutdown = manager.shutdownWarmPool()
+      await vi.runAllTimersAsync()
+      await shutdown
+
+      expect(warmInst.destroy).toHaveBeenCalledTimes(3)
+      expect(manager.getWarmPoolResourceStatus()).toMatchObject({
+        state: 'failed',
+        cleanupAttempts: 3,
+        lastError: 'cannot stop warm process',
+      })
+      expect(vi.getTimerCount()).toBe(0)
     })
   })
 })

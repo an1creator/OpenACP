@@ -63,6 +63,19 @@ vi.mock('../../api-client.js', () => ({
         }),
       })
     }
+    if (urlPath.endsWith('/prompt') && options?.method === 'POST') {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ok: true,
+          accepted: true,
+          status: 'accepted',
+          sessionId: 'sess-1',
+          turnId: 'turn-1',
+          queueDepth: 0,
+        }),
+      })
+    }
     // Default
     return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
   }),
@@ -160,6 +173,47 @@ describe('api cancel --json', () => {
     const data = expectValidJsonSuccess(result.stdout)
     expect(data).toHaveProperty('cancelled', true)
     expect(data).toHaveProperty('sessionId', 'sess-1')
+  })
+})
+
+describe('api send admission contract', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('preserves the accepted response in JSON mode', async () => {
+    const { cmdApi } = await import('../api.js')
+    const result = await captureJsonOutput(async () => {
+      await cmdApi(['send', 'sess-1', 'hello', '--json'])
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(expectValidJsonSuccess(result.stdout)).toMatchObject({
+      accepted: true,
+      status: 'accepted',
+      turnId: 'turn-1',
+      queueDepth: 0,
+    })
+  })
+
+  it.each([
+    ['MESSAGE_BLOCKED', 403],
+    ['SESSION_LIMIT', 429],
+  ])('retains typed %s failures and exits non-zero', async (code, statusCode) => {
+    const apiClient = await import('../../api-client.js')
+    vi.mocked(apiClient.apiCall).mockResolvedValueOnce({
+      ok: false,
+      status: statusCode,
+      json: async () => ({
+        error: { code, message: `rejected: ${code}`, statusCode },
+      }),
+    } as Response)
+
+    const { cmdApi } = await import('../api.js')
+    const result = await captureJsonOutput(async () => {
+      await cmdApi(['send', 'sess-1', 'hello', '--json'])
+    })
+
+    expect(result.exitCode).toBe(1)
+    expect(expectValidJsonError(result.stdout, code).message).toBe(`rejected: ${code}`)
   })
 })
 

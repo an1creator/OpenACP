@@ -315,6 +315,9 @@ describe("SessionBridge", () => {
       expect(harness.firstAdapter.sendMessage).toHaveBeenCalledTimes(1);
       expect(harness.secondAdapter.sendMessage).toHaveBeenCalledTimes(1);
       expect(harness.notifications.notify).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(harness.agent.destroy).toHaveBeenCalledOnce());
+      expect(harness.manager.getSession(harness.session.id)).toBeUndefined();
+      expect(harness.store.get(harness.session.id)).toMatchObject({ status: 'finished' });
 
       harness.agent.emit('agent_event', { type: 'session_end', reason: 'duplicate' });
       await Promise.resolve();

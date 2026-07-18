@@ -38,6 +38,17 @@ export function createAutoRegisterHandler(service: IdentityServiceImpl, store: I
     next: () => Promise<IncomingPayload>,
   ): Promise<IncomingPayload | null> => {
     const { channelId, userId, meta } = payload
+
+    // API credentials are not connector identities. A raw master secret has no
+    // end-user identity, and an unlinked JWT must remain unclaimed until the
+    // explicit identity setup flow links it. Linked JWTs continue below using
+    // their stable `api:<tokenId>` identity created by that setup flow.
+    if (
+      payload.principal?.type === 'api' &&
+      (payload.principal.credential === 'secret' || !payload.principal.linkedUserId)
+    ) {
+      return next()
+    }
     const identityId = formatIdentityId(channelId, userId)
     const channelUser = (meta?.channelUser as ChannelUser | undefined)
 

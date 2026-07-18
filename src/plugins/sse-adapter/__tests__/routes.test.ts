@@ -46,7 +46,7 @@ function createMockCore(session: ReturnType<typeof createMockSession> | null = n
         sourceAdapterId: msg.channelId,
         ...(opts?.responseAdapterId !== undefined && { responseAdapterId: opts.responseAdapterId }),
       });
-      return { turnId: 'test-turn', queueDepth: 0 };
+      return { status: 'accepted', turnId: opts?.externalTurnId ?? 'test-turn', queueDepth: 0 };
     }),
   } as any;
 }
@@ -91,12 +91,68 @@ describe('SSE Routes', () => {
         payload: { prompt: 'Hello world' },
       });
 
-      expect(response.statusCode).toBe(200);
+      expect(response.statusCode).toBe(202);
       const body = response.json();
-      expect(body.ok).toBe(true);
+      expect(body).toMatchObject({
+        ok: true,
+        accepted: true,
+        status: 'accepted',
+        queueDepth: 0,
+        turnId: 'test-turn',
+      });
       expect(body.sessionId).toBe('sess-1');
       // sourceAdapterId='api' is the identity namespace; responseAdapterId='sse' routes back to the SSE adapter
       expect(session.enqueuePrompt).toHaveBeenCalledWith('Hello world', undefined, expect.objectContaining({ sourceAdapterId: 'api', responseAdapterId: 'sse' }));
+    });
+
+    it('preserves a caller turnId through admission and dispatches exactly once', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/sessions/sess-1/prompt',
+        payload: { prompt: 'Correlated prompt', turnId: 'caller-sse-turn' },
+      });
+
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toMatchObject({
+        accepted: true,
+        status: 'accepted',
+        turnId: 'caller-sse-turn',
+      });
+      expect(deps.core.handleMessageInSession).toHaveBeenCalledOnce();
+      expect(deps.core.handleMessageInSession).toHaveBeenCalledWith(
+        session,
+        expect.objectContaining({ text: 'Correlated prompt' }),
+        expect.any(Object),
+        expect.objectContaining({
+          externalTurnId: 'caller-sse-turn',
+          responseAdapterId: 'sse',
+        }),
+      );
+      expect(session.enqueuePrompt).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ['MESSAGE_BLOCKED', 403, 'Message was blocked by ingress policy.'],
+      ['SESSION_LIMIT', 429, 'Concurrent session limit reached.'],
+    ])('returns typed %s rejection', async (code, statusCode, reason) => {
+      deps.core.handleMessageInSession.mockResolvedValueOnce({
+        status: 'blocked',
+        turnId: 'blocked-turn',
+        code,
+        reason,
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/sessions/sess-1/prompt',
+        payload: { prompt: 'Hello world' },
+      });
+
+      expect(response.statusCode).toBe(statusCode);
+      expect(response.json()).toEqual({
+        error: { code, message: reason, statusCode },
+      });
+      expect(session.enqueuePrompt).not.toHaveBeenCalled();
     });
 
     it('returns 404 for non-existent session', async () => {

@@ -60,6 +60,8 @@ export const ErrorCodes = {
   PROXY_INVALID_ARGUMENT: 'PROXY_INVALID_ARGUMENT',
   SESSION_NOT_FOUND: 'SESSION_NOT_FOUND',
   SESSION_CANCEL_FAILED: 'SESSION_CANCEL_FAILED',
+  MESSAGE_BLOCKED: 'MESSAGE_BLOCKED',
+  SESSION_LIMIT: 'SESSION_LIMIT',
 } as const
 
 export type ErrorCode = typeof ErrorCodes[keyof typeof ErrorCodes]

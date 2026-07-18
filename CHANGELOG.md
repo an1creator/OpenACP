@@ -1,5 +1,40 @@
 ## Unreleased
 
+## 2026.718.2 - 2026-07-18
+
+### Added
+
+- Expose authenticated `serviceResources` health diagnostics for the hidden
+  Assistant session, terminal cleanup operations, and the single-slot ACP warm
+  pool without adding internal sessions to normal session listings.
+- Export the API message-principal, prompt-dispatch outcome, and service-resource
+  status types from the CLI package and plugin SDK.
+
+### Changed
+
+- Make REST and SSE prompt submission return HTTP 202 only after middleware and
+  queue admission, with a stable `accepted` response, preserved `turnId`, and
+  current `queueDepth`. The CLI now reports that the prompt was accepted rather
+  than implying that the agent already processed it.
+- Treat authenticated API secrets and JWTs as API principals rather than
+  connector users. Connector `allowedUserIds` remains scoped to connector
+  traffic; JWT scopes and the global concurrent-session limit still apply.
+
+### Fixed
+
+- Return typed `MESSAGE_BLOCKED` (403) and `SESSION_LIMIT` (429) prompt errors
+  without emitting queued events or dispatching blocked work to the agent.
+- Tear down ordinary finished-session ACP processes, loggers, bridge ownership,
+  and live registry entries after the final channel-delivery barrier while
+  retaining the durable record for lazy resume.
+- Reap idle warm ACP processes after five minutes in the background, retain
+  ownership through bounded destroy retries, expose truthful cleanup state,
+  invalidate in-flight prewarm work during shutdown, and keep shutdown idempotent.
+- Preserve idempotent cancellation responses while sharing one bounded process
+  teardown across completion, cancellation, and retry races. Store-backed
+  managers follow durable record TTL; store-less retry tombstones are bounded by
+  time and capacity.
+
 ## 2026.718.1 - 2026-07-18
 
 ### Changed

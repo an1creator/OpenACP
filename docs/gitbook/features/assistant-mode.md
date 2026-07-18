@@ -32,6 +32,11 @@ A dedicated agent session is spawned for the Assistant topic using the configure
 
 The Assistant runs `openacp api ...` commands silently and presents results as natural language. Users never see raw CLI output unless they ask for it.
 
+The Assistant is an internal service session. It is intentionally excluded from
+normal session lists and concurrent user-session counts. Administrators can
+inspect its live/active resource state in
+`GET /api/v1/system/health/details` under `serviceResources.assistant`.
+
 ---
 
 ## What you can ask the Assistant

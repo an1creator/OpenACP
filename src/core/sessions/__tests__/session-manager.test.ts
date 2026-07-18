@@ -452,6 +452,83 @@ describe('SessionManager', () => {
       expect(manager.getSession('sess-cancel-mem')).toBeUndefined()
     })
 
+    it('bounds store-less cancellation idempotency by TTL and returns 404 after expiry', async () => {
+      vi.useFakeTimers()
+      vi.setSystemTime(new Date('2026-07-18T00:00:00.000Z'))
+      try {
+        const noStoreManager = new SessionManager(null)
+        const session = createSession({ id: 'ephemeral-terminal' })
+        session.activate()
+        noStoreManager.registerSession(session)
+
+        const first = await noStoreManager.cancelSession(session.id)
+        const immediateRetry = await noStoreManager.cancelSession(session.id)
+        expect(first).toMatchObject({ cancelled: true, status: 'cancelled' })
+        expect(immediateRetry).toMatchObject({
+          cancelled: false,
+          alreadyTerminal: true,
+          status: 'cancelled',
+        })
+
+        await vi.advanceTimersByTimeAsync(15 * 60 * 1000 + 1)
+        await expect(noStoreManager.cancelSession(session.id)).rejects.toMatchObject({
+          code: 'SESSION_NOT_FOUND',
+        })
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('caps high-cardinality store-less tombstones and evicts the oldest truthfully', async () => {
+      const noStoreManager = new SessionManager(null)
+      const internal = noStoreManager as any
+      for (let index = 0; index < 1_100; index++) {
+        internal.rememberTerminalCancellationStatus(`terminal-${index}`, 'cancelled')
+      }
+
+      expect(internal.terminalCancellationStatuses.size).toBe(1_024)
+      await expect(noStoreManager.cancelSession('terminal-0')).rejects.toMatchObject({
+        code: 'SESSION_NOT_FOUND',
+      })
+      await expect(noStoreManager.cancelSession('terminal-1099')).resolves.toMatchObject({
+        alreadyTerminal: true,
+        status: 'cancelled',
+      })
+    })
+
+    it('uses store-backed terminal truth and returns 404 after record TTL cleanup', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-terminal-ttl-'))
+      const filePath = path.join(tmpDir, 'sessions.json')
+      const realStore = new JsonFileSessionStore(filePath, 1)
+      const realManager = new SessionManager(realStore)
+      const session = createSession({ id: 'durable-expiring-terminal' })
+      session.activate()
+      realManager.registerSession(session)
+      await realStore.save({
+        sessionId: session.id,
+        agentSessionId: 'agent-expiring',
+        agentName: 'claude',
+        workingDir: '/ws',
+        channelId: 'api',
+        status: 'active',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        lastActiveAt: '2026-01-01T00:00:00.000Z',
+        clientOverrides: {},
+        platform: {},
+      })
+
+      await realManager.cancelSession(session.id)
+      expect(realStore.get(session.id)?.status).toBe('cancelled')
+      ;(realStore as any).cleanup()
+      expect(realStore.get(session.id)).toBeUndefined()
+      await expect(realManager.cancelSession(session.id)).rejects.toMatchObject({
+        code: 'SESSION_NOT_FOUND',
+      })
+
+      realStore.destroy()
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    })
+
     it('completes cleanup even if abortPrompt throws', async () => {
       const session = createSession({ id: 'sess-dead-agent' })
       session.activate()

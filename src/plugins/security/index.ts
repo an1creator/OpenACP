@@ -121,7 +121,11 @@ function createSecurityPlugin(): OpenACPPlugin {
       // Register middleware for message:incoming — block unauthorized users
       ctx.registerMiddleware(Hook.MESSAGE_INCOMING, {
         handler: async (payload: MiddlewarePayloadMap['message:incoming'], next) => {
-          const access = await guard.checkAccess(payload as unknown as IncomingMessage)
+          const isAuthenticatedApi = payload.principal?.type === 'api'
+          const access = await guard.checkAccess(
+            payload as unknown as IncomingMessage,
+            { skipUserAllowlist: isAuthenticatedApi },
+          )
           if (!access.allowed) {
             ctx.log.info(`Access denied for user=${payload.userId} channel=${payload.channelId}: ${access.reason}`)
             // Notify the user via their adapter if possible (Telegram, Slack, etc.).
@@ -134,6 +138,10 @@ function createSecurityPlugin(): OpenACPPlugin {
               }).catch((err: unknown) => {
                 ctx.log.warn(`Failed to send access-denied message to adapter: ${err}`)
               })
+            }
+            payload.ingress ??= {}
+            payload.ingress.block = {
+              code: access.code === 'SESSION_LIMIT' ? 'SESSION_LIMIT' : 'MESSAGE_BLOCKED',
             }
             return null  // block
           }

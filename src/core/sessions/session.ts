@@ -143,6 +143,16 @@ export class SessionTerminatingError extends Error {
   }
 }
 
+/** Raised when agent:beforePrompt middleware rejects a prompt before queue admission. */
+export class PromptBlockedError extends Error {
+  readonly code = 'MESSAGE_BLOCKED';
+
+  constructor() {
+    super('Message was blocked by ingress policy');
+    this.name = 'PromptBlockedError';
+  }
+}
+
 // Session state machine — valid transitions: from → Set<to>
 //
 //   initializing → active (first prompt received)
@@ -618,8 +628,16 @@ export class Session extends TypedEmitter<SessionEvents> {
    * then adds it to the PromptQueue. Returns a turnId that callers can use to correlate
    * queued/processing events before the prompt actually runs.
    */
-  async enqueuePrompt(text: string, attachments?: Attachment[], routing?: TurnRouting, externalTurnId?: string, meta?: TurnMeta): Promise<string> {
-    if (this.isTerminating || this._status === "finished" || this._status === "cancelled") {
+  private async submitPrompt(
+    text: string,
+    attachments?: Attachment[],
+    routing?: TurnRouting,
+    externalTurnId?: string,
+    meta?: TurnMeta,
+    onAccepting?: (turnId: string) => void,
+  ): Promise<{ turnId: string; completion: Promise<void> }> {
+    const currentStatus = this._status as SessionStatus;
+    if (this.isTerminating || currentStatus === "finished" || currentStatus === "cancelled") {
       throw new SessionTerminatingError(this.id);
     }
     // Use pre-generated turnId if provided (so callers can emit events before awaiting the queue)
@@ -631,12 +649,50 @@ export class Session extends TypedEmitter<SessionEvents> {
     if (this.middlewareChain) {
       const payload = { text, attachments, sessionId: this.id, sourceAdapterId: routing?.sourceAdapterId, meta: turnMeta };
       const result = await this.middlewareChain.execute(Hook.AGENT_BEFORE_PROMPT, payload, async (p) => p);
-      if (!result) throw new Error('PROMPT_BLOCKED'); // blocked by middleware — caller must emit message:failed
+      if (!result) throw new PromptBlockedError();
       text = result.text;
       attachments = result.attachments;
     }
-    await this.queue.enqueue(text, userPrompt, attachments, routing, turnId, turnMeta);
-    return turnId;
+    // Middleware awaited above, so re-check the monotonic lifecycle boundary
+    // immediately before the synchronous queue admission.
+    if (this.isTerminating || this._status === "finished" || this._status === "cancelled") {
+      throw new SessionTerminatingError(this.id);
+    }
+    onAccepting?.(turnId);
+    const completion = this.queue.submit(text, userPrompt, attachments, routing, turnId, turnMeta);
+    return { turnId, completion };
+  }
+
+  async enqueuePrompt(text: string, attachments?: Attachment[], routing?: TurnRouting, externalTurnId?: string, meta?: TurnMeta): Promise<string> {
+    const accepted = await this.submitPrompt(text, attachments, routing, externalTurnId, meta);
+    await accepted.completion;
+    return accepted.turnId;
+  }
+
+  /**
+   * Admit a prompt and return after middleware and queue acceptance, without
+   * waiting for the agent turn to finish. Used by REST/SSE request handlers.
+   */
+  async acceptPrompt(
+    text: string,
+    attachments?: Attachment[],
+    routing?: TurnRouting,
+    externalTurnId?: string,
+    meta?: TurnMeta,
+    onAccepting?: (turnId: string) => void,
+  ): Promise<string> {
+    const accepted = await this.submitPrompt(
+      text,
+      attachments,
+      routing,
+      externalTurnId,
+      meta,
+      onAccepting,
+    );
+    // PromptQueue observes processor failures internally. Keep this explicit so
+    // future queue implementations cannot create an unhandled completion.
+    void accepted.completion.catch(() => {});
+    return accepted.turnId;
   }
 
   private async processPrompt(text: string, userPrompt: string, attachments?: Attachment[], routing?: TurnRouting, turnId?: string, meta?: TurnMeta, signal?: AbortSignal): Promise<void> {

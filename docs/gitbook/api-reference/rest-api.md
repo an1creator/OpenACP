@@ -2,7 +2,7 @@
 
 The OpenACP daemon exposes a local HTTP API used by the CLI and the web dashboard.
 
-**Base URL:** `http://127.0.0.1:21420` (configurable via `api.host` and `api.port`)
+**Base URL:** `http://127.0.0.1:21420/api/v1` (configurable via `api.host` and `api.port`)
 
 **Auth:** Two-tier authentication:
 
@@ -12,15 +12,19 @@ The OpenACP daemon exposes a local HTTP API used by the CLI and the web dashboar
 ```bash
 # Using secret token
 TOKEN=$(cat ~/openacp-workspace/.openacp/api-secret)
-curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/sessions
+curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/v1/sessions
 
 # Using JWT token
-curl -H "Authorization: Bearer $JWT" http://localhost:21420/api/sessions
+curl -H "Authorization: Bearer $JWT" http://localhost:21420/api/v1/sessions
 ```
 
 The secret file is created automatically with mode `0600` on first start. Protect it like an SSH private key.
 
-**Exempt from auth:** `GET /api/health`, `GET /api/version`.
+The master secret has full API access. JWT requests are limited by their token
+scopes. Connector user allowlists do not apply to either authenticated API
+credential; the global concurrent-session limit still applies.
+
+**Exempt from auth:** `GET /api/v1/system/health`.
 
 **Body size limit:** 1 MB.
 
@@ -30,54 +34,95 @@ The secret file is created automatically with mode `0600` on first start. Protec
 
 ## Health & System
 
-### GET /api/health
+### GET /api/v1/system/health
 
-Returns daemon health. No auth required.
+Returns public liveness data. No auth required. Session, adapter, process, and
+memory details are deliberately omitted.
+
+**Response**
+```json
+{
+  "status": "ok",
+  "instanceId": "default",
+  "uptime": 123456,
+  "version": "2026.718.2"
+}
+```
+
+`uptime` is milliseconds since daemon start. `instanceId` lets callers verify
+that the responding daemon is the intended OpenACP instance.
+
+```bash
+curl http://localhost:21420/api/v1/system/health
+```
+
+---
+
+### GET /api/v1/system/health/details
+
+Returns authenticated operational diagnostics. Requires `system:health`.
 
 **Response**
 ```json
 {
   "status": "ok",
   "uptime": 123456,
-  "version": "0.6.7",
+  "version": "2026.718.2",
   "memory": {
     "rss": 52428800,
     "heapUsed": 30000000,
     "heapTotal": 45000000
   },
-  "sessions": {
-    "active": 2,
-    "total": 5
+  "sessions": { "active": 2, "total": 5 },
+  "serviceResources": {
+    "assistant": { "live": 1, "active": 1 },
+    "terminalCleanup": { "pending": 0, "failed": 0 },
+    "warmPool": {
+      "state": "ready",
+      "capacity": 1,
+      "agent": "codex",
+      "createdAt": "2026-07-18T10:00:00.000Z",
+      "expiresAt": "2026-07-18T10:05:00.000Z"
+    }
   },
   "adapters": ["telegram"],
   "tunnel": { "enabled": true, "url": "https://abc.trycloudflare.com" }
 }
 ```
 
-`uptime` is milliseconds since daemon start. `sessions.active` counts merged live and persisted sessions with status `active` or `initializing`; `sessions.total` counts the same merged population, so it is never smaller than `sessions.active`.
+`sessions` contains only user sessions. The hidden Assistant session is
+reported under `serviceResources.assistant`. `terminalCleanup` reports bounded
+ACP/logger teardown still pending or needing a retry. `warmPool.state` is one of
+`empty`, `warming`, `ready`, `claiming`, `cleanupPending`, `failed`, or
+`closing`. A ready entry enters owned cleanup in the background at `expiresAt`
+if no session claims it. Failed cleanup retains the slot and reports bounded
+retry attempts plus a redacted `lastError`; it is never reported as empty until
+process destruction succeeds.
 
 ```bash
-curl http://localhost:21420/api/health
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:21420/api/v1/system/health/details
 ```
 
 ---
 
-### GET /api/version
+### GET /api/v1/system/version
 
-Returns daemon version string. No auth required.
+Returns the daemon version string. Requires `system:health`.
 
 **Response**
 ```json
-{ "version": "0.6.7" }
+{ "version": "2026.718.2" }
 ```
 
 ```bash
-curl http://localhost:21420/api/version
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:21420/api/v1/system/version
 ```
 
 ---
 
-### POST /api/restart
+### POST /api/v1/system/restart
 
 Sends a restart signal to the daemon. The daemon exits cleanly and the process manager (or `openacp start`) restarts it.
 
@@ -89,12 +134,12 @@ Sends a restart signal to the daemon. The daemon exits cleanly and the process m
 Returns `501` if restart is not available in the current run mode.
 
 ```bash
-curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/restart
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/v1/system/restart
 ```
 
 ---
 
-### GET /api/adapters
+### GET /api/v1/system/adapters
 
 Lists registered channel adapters.
 
@@ -108,14 +153,14 @@ Lists registered channel adapters.
 ```
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/adapters
+curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/v1/system/adapters
 ```
 
 ---
 
 ## Sessions
 
-### GET /api/sessions
+### GET /api/v1/sessions
 
 Lists all sessions (active, finished, cancelled, error). Persisted records and live in-memory sessions are merged by session ID; a live session remains visible even before its first store record is available.
 
@@ -142,12 +187,12 @@ Lists all sessions (active, finished, cancelled, error). Persisted records and l
 Session `status` values: `initializing`, `active`, `finished`, `cancelled`, `error`.
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/sessions
+curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/v1/sessions
 ```
 
 ---
 
-### DELETE /api/sessions/:id
+### DELETE /api/v1/sessions/:id
 
 Cancels fresh, idle, or running sessions. Cancellation is serialized per session,
 so concurrent requests abort and destroy the agent at most once. Repeating the
@@ -175,7 +220,7 @@ The cancelled record is never resumed after restart. Unknown IDs return HTTP
 
 ---
 
-### GET /api/sessions/:id
+### GET /api/v1/sessions/:id
 
 Returns details for a single session.
 
@@ -202,12 +247,12 @@ Returns details for a single session.
 Returns `404` if not found.
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/sessions/sess_abc123
+curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/v1/sessions/sess_abc123
 ```
 
 ---
 
-### POST /api/sessions
+### POST /api/v1/sessions
 
 Creates a new session.
 
@@ -240,38 +285,55 @@ curl -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"agent":"claude","workspace":"/path/to/project"}' \
-  http://localhost:21420/api/sessions
+  http://localhost:21420/api/v1/sessions
 ```
 
 ---
 
-### POST /api/sessions/:id/prompt
+### POST /api/v1/sessions/:id/prompt
 
-Enqueues a prompt for a session. The session processes prompts serially; `queueDepth` indicates how many are waiting.
+Admits a prompt to a session after the complete `message:incoming` and
+`agent:beforePrompt` middleware chain. HTTP 202 means the prompt was accepted
+into the serial queue; agent processing and connector delivery remain
+asynchronous.
 
 **Request body**
 ```json
-{ "prompt": "Refactor the authentication module" }
+{
+  "prompt": "Refactor the authentication module",
+  "turnId": "client-turn-42"
+}
 ```
 
 **Response**
 ```json
-{ "ok": true, "sessionId": "sess_abc123", "queueDepth": 1 }
+{
+  "ok": true,
+  "accepted": true,
+  "status": "accepted",
+  "sessionId": "sess_abc123",
+  "queueDepth": 1,
+  "turnId": "client-turn-42"
+}
 ```
 
-Returns `400` if the session is `cancelled`, `finished`, or `error`. Returns `404` if not found.
+The response preserves a supplied `turnId`; otherwise OpenACP creates one.
+Blocked work is never queued or dispatched. Policy rejection returns a standard
+error envelope with `MESSAGE_BLOCKED` and HTTP 403. The global concurrent-session
+limit returns `SESSION_LIMIT` and HTTP 429. A `cancelled`, `finished`, or `error`
+session returns 400; an unknown session returns 404.
 
 ```bash
 curl -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"prompt":"Fix the login bug"}' \
-  http://localhost:21420/api/sessions/sess_abc123/prompt
+  http://localhost:21420/api/v1/sessions/sess_abc123/prompt
 ```
 
 ---
 
-### PATCH /api/sessions/:id/bypass
+### PATCH /api/v1/sessions/:id/dangerous
 
 Enables or disables bypass permissions for a session.
 
@@ -290,12 +352,12 @@ curl -X PATCH \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"enabled":true}' \
-  http://localhost:21420/api/sessions/sess_abc123/bypass
+  http://localhost:21420/api/v1/sessions/sess_abc123/dangerous
 ```
 
 ---
 
-### POST /api/sessions/:id/permission
+### POST /api/v1/sessions/:id/permission
 
 Resolves a pending permission request for a session.
 
@@ -313,18 +375,7 @@ Returns `400` if there is no matching pending request.
 
 ---
 
-### POST /api/sessions/:id/summary
-
-Requests the agent to generate a summary name for the session.
-
-**Response**
-```json
-{ "ok": true, "name": "Refactor auth module" }
-```
-
----
-
-### POST /api/sessions/:id/archive
+### POST /api/v1/sessions/:id/archive
 
 Archives a session.
 
@@ -335,7 +386,7 @@ Archives a session.
 
 ---
 
-### POST /api/sessions/adopt
+### POST /api/v1/sessions/adopt
 
 Adopts an existing external agent session and surfaces it as a messaging thread.
 
@@ -362,7 +413,7 @@ Adopts an existing external agent session and surfaces it as a messaging thread.
 
 ## Agents
 
-### GET /api/agents
+### GET /api/v1/agents
 
 Lists agents configured in the daemon.
 
@@ -382,17 +433,17 @@ Lists agents configured in the daemon.
 }
 ```
 
-Agent environment variable names remain visible for diagnostics, but every value is redacted to `"***"`. The same rule applies to `GET /api/agents/:name` and `POST /api/agents/reload`.
+Agent environment variable names remain visible for diagnostics, but every value is redacted to `"***"`. The same rule applies to `GET /api/v1/agents/:name` and `POST /api/v1/agents/reload`.
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/agents
+curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/v1/agents
 ```
 
 ---
 
 ## Configuration
 
-### GET /api/config
+### GET /api/v1/config
 
 Returns the full runtime config. Sensitive fields (`botToken`, `token`, `apiKey`, `secret`, `password`, `webhookSecret`) are redacted to `"***"`.
 
@@ -402,12 +453,12 @@ Returns the full runtime config. Sensitive fields (`botToken`, `token`, `apiKey`
 ```
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/config
+curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/v1/config
 ```
 
 ---
 
-### PATCH /api/config
+### PATCH /api/v1/config
 
 Updates a single config value by dot-notation path. Only fields marked as `safe` in the config registry can be modified via the API.
 
@@ -434,12 +485,12 @@ curl -X PATCH \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"path":"security.maxConcurrentSessions","value":10}' \
-  http://localhost:21420/api/config
+  http://localhost:21420/api/v1/config
 ```
 
 ---
 
-### GET /api/config/editable
+### GET /api/v1/config/editable
 
 Returns metadata about editable config fields (used by the web dashboard). Includes `path`, `displayName`, `group`, `type`, `options`, `value`, and `hotReload`.
 
@@ -449,7 +500,7 @@ Returns metadata about editable config fields (used by the web dashboard). Inclu
 
 Topics represent channel adapter threads (Telegram forum topics, Discord threads, etc.).
 
-### GET /api/topics
+### GET /api/v1/topics
 
 Lists all topics. Optionally filter by status.
 
@@ -479,12 +530,12 @@ Returns `501` if topic management is not available (no adapter with topic suppor
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:21420/api/topics?status=active,finished"
+  "http://localhost:21420/api/v1/topics?status=active,finished"
 ```
 
 ---
 
-### DELETE /api/topics/:sessionId
+### DELETE /api/v1/topics/:sessionId
 
 Deletes the topic for a session. Returns `409` if the session is active and `--force` is not set. Returns `403` for system topics.
 
@@ -501,12 +552,12 @@ Deletes the topic for a session. Returns `409` if the session is active and `--f
 
 ```bash
 curl -X DELETE -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:21420/api/topics/sess_abc123?force=true"
+  "http://localhost:21420/api/v1/topics/sess_abc123?force=true"
 ```
 
 ---
 
-### POST /api/topics/cleanup
+### POST /api/v1/topics/cleanup
 
 Deletes all topics matching the given statuses. Returns counts of deleted and failed topics.
 
@@ -524,7 +575,7 @@ Deletes all topics matching the given statuses. Returns counts of deleted and fa
 
 ## Tunnel
 
-### GET /api/tunnel
+### GET /api/v1/tunnel
 
 Returns tunnel status for the primary tunnel service.
 
@@ -539,12 +590,12 @@ Returns tunnel status for the primary tunnel service.
 ```
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/tunnel
+curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/v1/tunnel
 ```
 
 ---
 
-### GET /api/tunnel/list
+### GET /api/v1/tunnel/list
 
 Lists all active user tunnels.
 
@@ -557,7 +608,7 @@ Lists all active user tunnels.
 
 ---
 
-### POST /api/tunnel
+### POST /api/v1/tunnel
 
 Creates a new tunnel to a local port.
 
@@ -580,12 +631,12 @@ curl -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"port":3000,"label":"dev server"}' \
-  http://localhost:21420/api/tunnel
+  http://localhost:21420/api/v1/tunnel
 ```
 
 ---
 
-### DELETE /api/tunnel/:port
+### DELETE /api/v1/tunnel/:port
 
 Stops the tunnel for a specific local port.
 
@@ -596,12 +647,12 @@ Stops the tunnel for a specific local port.
 
 ```bash
 curl -X DELETE -H "Authorization: Bearer $TOKEN" \
-  http://localhost:21420/api/tunnel/3000
+  http://localhost:21420/api/v1/tunnel/3000
 ```
 
 ---
 
-### DELETE /api/tunnel
+### DELETE /api/v1/tunnel
 
 Stops all user tunnels.
 
@@ -614,7 +665,7 @@ Stops all user tunnels.
 
 ## Notifications
 
-### POST /api/notify
+### POST /api/v1/notify
 
 Sends a notification message to all registered channel adapters (e.g. to the Notifications topic in Telegram).
 
@@ -633,14 +684,14 @@ curl -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message":"Deployment complete"}' \
-  http://localhost:21420/api/notify
+  http://localhost:21420/api/v1/notify
 ```
 
 ---
 
 ## Session Config
 
-### GET /api/sessions/:id/config
+### GET /api/v1/sessions/:id/config
 
 Returns the agent-declared config options for a session (modes, models, toggles).
 
@@ -665,7 +716,7 @@ Returns the agent-declared config options for a session (modes, models, toggles)
 
 ---
 
-### PUT /api/sessions/:id/config/:configId
+### PUT /api/v1/sessions/:id/config/:configId
 
 Updates a config option value for a session.
 
@@ -906,12 +957,12 @@ link-local, CGNAT, reserved, or metadata space.
 
 ## Server-Sent Events
 
-### GET /api/events
+### GET /api/v1/events
 
 SSE stream of real-time daemon events. Auth via query parameter (EventSource cannot set headers).
 
 ```
-GET /api/events?token=<api-secret>
+GET /api/v1/events?token=<api-secret>
 ```
 
 Returns a persistent SSE connection. Events include session lifecycle changes, agent output, and health pings (every 30 seconds).

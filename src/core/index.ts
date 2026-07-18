@@ -25,14 +25,19 @@ export {
   type LoggingConfig,
 } from "./config/config.js";
 export { AgentInstance } from "./agents/agent-instance.js";
-export { AgentManager } from "./agents/agent-manager.js";
+export { AgentManager, type WarmPoolResourceStatus } from "./agents/agent-manager.js";
 export { Session, type SessionEvents } from "./sessions/session.js";
 export { TypedEmitter } from "./utils/typed-emitter.js";
 export { PromptQueue } from "./sessions/prompt-queue.js";
 export { PermissionGate } from "./sessions/permission-gate.js";
 export { MessageTransformer } from "./message-transformer.js";
 export type { FileServiceInterface } from "./plugin/types.js";
-export { SessionManager, type SessionSummary } from "./sessions/session-manager.js";
+export {
+  SessionManager,
+  type SessionSummary,
+  type CancelSessionResult,
+  type SessionServiceResourceStatus,
+} from "./sessions/session-manager.js";
 export { SessionBridge, type BridgeDeps } from "./sessions/session-bridge.js";
 export type { TurnContext, TurnRouting } from "./sessions/turn-context.js";
 export { createTurnContext, getEffectiveTarget, isSystemEvent } from "./sessions/turn-context.js";
@@ -41,7 +46,7 @@ export {
   type SessionCreateParams,
   type SideEffectDeps,
 } from "./sessions/session-factory.js";
-export { OpenACPCore } from "./core.js";
+export { OpenACPCore, type MessageDispatchOutcome } from "./core.js";
 export { EventBus, type EventBusEvents } from "./event-bus.js";
 export { MenuRegistry, type MenuItem } from './menu-registry.js';
 export { AssistantRegistry, AssistantManager, type AssistantSection, type AssistantCommand } from './assistant/index.js';

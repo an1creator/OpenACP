@@ -7,13 +7,22 @@ import { SessionManager } from "./sessions/session-manager.js";
 import { SessionBridge } from "./sessions/session-bridge.js";
 import type { NotificationManager } from "../plugins/notifications/notification.js";
 import type { IChannelAdapter } from "./channel.js";
-import { Session } from "./sessions/session.js";
+import { PromptBlockedError, Session } from "./sessions/session.js";
 import { MessageTransformer } from "./message-transformer.js";
 import type { FileServiceInterface } from "./plugin/types.js";
 import { JsonFileSessionStore, type SessionStore } from "./sessions/session-store.js";
 import type { SecurityGuard } from "../plugins/security/security-guard.js";
 import { SessionFactory } from "./sessions/session-factory.js";
-import type { IncomingMessage, AgentEvent, SessionStatus, TurnMeta, Attachment } from "./types.js";
+import type {
+  IncomingMessage,
+  AgentEvent,
+  SessionStatus,
+  TurnMeta,
+  Attachment,
+  MessagePrincipal,
+  MessageIngressBlockCode,
+  MessageIngressControl,
+} from "./types.js";
 import type { TunnelService } from "../plugins/tunnel/tunnel-service.js";
 import { getAgentCapabilities } from "./agents/agent-registry.js";
 import { AgentSwitchHandler } from "./agent-switch-handler.js";
@@ -38,6 +47,33 @@ import { extractSender, type TurnContext, type TurnRouting } from "./sessions/tu
 import { ProxyService } from './network/proxy-service.js';
 const log = createChildLogger({ module: "core" });
 const FAILED_THREAD_CLEANUP_TIMEOUT_MS = 5_000;
+
+export type MessageDispatchOutcome =
+  | {
+      status: 'accepted';
+      turnId: string;
+      queueDepth: number;
+    }
+  | {
+      status: 'blocked';
+      turnId: string;
+      code: MessageIngressBlockCode;
+      reason: string;
+    };
+
+function blockedDispatchOutcome(
+  turnId: string,
+  code: MessageIngressBlockCode = 'MESSAGE_BLOCKED',
+): MessageDispatchOutcome {
+  return {
+    status: 'blocked',
+    turnId,
+    code,
+    reason: code === 'SESSION_LIMIT'
+      ? 'Concurrent session limit reached.'
+      : 'Message was blocked by ingress policy.',
+  };
+}
 
 /**
  * Top-level orchestrator that wires all OpenACP modules together.
@@ -418,7 +454,16 @@ export class OpenACPCore {
     if (this.lifecycleManager?.middlewareChain) {
       const result = await this.lifecycleManager.middlewareChain.execute(
         Hook.MESSAGE_INCOMING,
-        { ...message, meta },
+        {
+          ...message,
+          meta,
+          principal: {
+            type: 'connector',
+            channelId: message.channelId,
+            userId: message.userId,
+          } satisfies MessagePrincipal,
+          ingress: {} satisfies MessageIngressControl,
+        },
         async (msg) => msg,
       );
       if (!result) return; // blocked by middleware
@@ -492,36 +537,40 @@ export class OpenACPCore {
     routing: TurnRouting,
     turnId: string,
     meta: TurnMeta,
-  ): Promise<void> {
-    // Update activity timestamp for all sources
-    this.sessionManager.patchRecord(session.id, {
-      lastActiveAt: new Date().toISOString(),
-    }, { expectedSession: session });
-
-    // Emit MESSAGE_QUEUED — always, for all sources, no adapter-specific conditions
-    this.eventBus.emit(BusEvent.MESSAGE_QUEUED, {
-      sessionId: session.id,
-      turnId,
-      text,
-      sourceAdapterId: routing.sourceAdapterId,
-      attachments,
-      timestamp: new Date().toISOString(),
-      queueDepth: session.queueDepth + 1,
-      sender: extractSender(meta),
-    });
-
-    // Fire-and-forget: return immediately after enqueueing so callers (API route, adapters)
-    // get a fast response without waiting for the agent to finish processing.
-    // Errors (e.g. blocked by middleware) surface via MESSAGE_FAILED on the event bus.
-    session.enqueuePrompt(text, attachments, routing, turnId, meta).catch(err => {
-      const reason = err instanceof Error ? err.message : String(err);
-      log.warn({ err, sessionId: session.id, turnId, reason }, 'enqueuePrompt failed — emitting message:failed');
-      this.eventBus.emit(BusEvent.MESSAGE_FAILED, {
-        sessionId: session.id,
+  ): Promise<MessageDispatchOutcome> {
+    try {
+      await session.acceptPrompt(
+        text,
+        attachments,
+        routing,
         turnId,
-        reason,
-      });
-    });
+        meta,
+        () => {
+          // Admission callback runs after all blocking middleware but before the
+          // queue can start the turn, preserving queued → processing ordering.
+          void this.sessionManager.patchRecord(session.id, {
+            lastActiveAt: new Date().toISOString(),
+          }, { expectedSession: session });
+          this.eventBus.emit(BusEvent.MESSAGE_QUEUED, {
+            sessionId: session.id,
+            turnId,
+            text,
+            sourceAdapterId: routing.sourceAdapterId,
+            attachments,
+            timestamp: new Date().toISOString(),
+            queueDepth: session.queueDepth + 1,
+            sender: extractSender(meta),
+          });
+        },
+      );
+    } catch (error) {
+      if (error instanceof PromptBlockedError) {
+        return blockedDispatchOutcome(turnId);
+      }
+      throw error;
+    }
+
+    return { status: 'accepted', turnId, queueDepth: session.queueDepth };
   }
 
   /**
@@ -541,8 +590,12 @@ export class OpenACPCore {
     session: Session,
     message: { channelId: string; userId: string; text: string; attachments?: Attachment[] },
     initialMeta?: Record<string, unknown>,
-    options?: { externalTurnId?: string; responseAdapterId?: string | null },
-  ): Promise<{ turnId: string; queueDepth: number }> {
+    options?: {
+      externalTurnId?: string;
+      responseAdapterId?: string | null;
+      principal?: MessagePrincipal;
+    },
+  ): Promise<MessageDispatchOutcome> {
     const turnId = options?.externalTurnId ?? nanoid(8);
     const meta: TurnMeta = { turnId, ...initialMeta };
 
@@ -551,6 +604,7 @@ export class OpenACPCore {
     let { attachments } = message;
     let enrichedMeta: TurnMeta = meta;
     if (this.lifecycleManager?.middlewareChain) {
+      const ingress: MessageIngressControl = {};
       const payload = {
         channelId: message.channelId,
         threadId: session.id,
@@ -558,13 +612,20 @@ export class OpenACPCore {
         text,
         attachments,
         meta,
+        principal: options?.principal,
+        ingress,
       };
       const result = await this.lifecycleManager.middlewareChain.execute(
         Hook.MESSAGE_INCOMING,
         payload,
         async (p) => p,
       );
-      if (!result) return { turnId, queueDepth: session.queueDepth };
+      if (!result) {
+        // Middleware is expected to mutate ingress, but reading it back from the
+        // payload also preserves typed denials from plugins that replace the
+        // optional control object instead.
+        return blockedDispatchOutcome(turnId, payload.ingress?.block?.code ?? ingress.block?.code);
+      }
       text = result.text;
       attachments = result.attachments;
       enrichedMeta = (result as any).meta as TurnMeta ?? meta;
@@ -574,9 +635,7 @@ export class OpenACPCore {
       sourceAdapterId: message.channelId,
       responseAdapterId: options?.responseAdapterId,
     };
-    await this._dispatchToSession(session, text, attachments, routing, turnId, enrichedMeta);
-
-    return { turnId, queueDepth: session.queueDepth };
+    return this._dispatchToSession(session, text, attachments, routing, turnId, enrichedMeta);
   }
 
   // --- Unified Session Creation Pipeline ---
@@ -824,6 +883,14 @@ export class OpenACPCore {
         }
         if (!isCurrentGeneration(processedEvent.type === 'session_end')) return;
         this.eventBus.emit(BusEvent.AGENT_EVENT, { sessionId: session.id, turnId: session.activeTurnContext?.turnId ?? '', event: processedEvent });
+        if (processedEvent.type === 'session_end') {
+          void this.sessionManager.finalizeFinishedSession(session).catch((cleanupError) => {
+            log.error(
+              { err: cleanupError, sessionId: session.id },
+              'Headless finished session teardown coordination failed',
+            );
+          });
+        }
         };
         void task().catch((err) => {
           log.error({ err, sessionId: session.id }, "Headless agent event handling failed");

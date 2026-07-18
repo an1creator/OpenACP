@@ -26,7 +26,22 @@ describe('system health routes', () => {
     ])
     const deps = {
       core: {
-        sessionManager: { listAllSessions },
+        sessionManager: {
+          listAllSessions,
+          getServiceResourceStatus: vi.fn().mockReturnValue({
+            assistant: { live: 1, active: 1 },
+            terminalCleanup: { pending: 2, failed: 0 },
+          }),
+        },
+        agentManager: {
+          getWarmPoolResourceStatus: vi.fn().mockReturnValue({
+            state: 'ready',
+            capacity: 1,
+            agent: 'codex',
+            createdAt: '2026-07-18T00:00:00.000Z',
+            expiresAt: '2026-07-18T00:05:00.000Z',
+          }),
+        },
         adapters: new Map([['telegram', {}]]),
         tunnelService: undefined,
       },
@@ -43,6 +58,17 @@ describe('system health routes', () => {
     const response = await app.inject({ method: 'GET', url: '/api/v1/system/health/details' })
     expect(response.statusCode).toBe(200)
     expect(response.json().sessions).toEqual({ active: 2, total: 3 })
+    expect(response.json().serviceResources).toEqual({
+      assistant: { live: 1, active: 1 },
+      terminalCleanup: { pending: 2, failed: 0 },
+      warmPool: {
+        state: 'ready',
+        capacity: 1,
+        agent: 'codex',
+        createdAt: '2026-07-18T00:00:00.000Z',
+        expiresAt: '2026-07-18T00:05:00.000Z',
+      },
+    })
     expect(listAllSessions).toHaveBeenCalledOnce()
   })
 })

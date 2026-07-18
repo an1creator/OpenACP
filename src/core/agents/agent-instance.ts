@@ -1141,7 +1141,12 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
   async destroy(): Promise<void> {
     if (this._destroyOperation) return this._destroyOperation;
     this._destroying = true;
-    const operation = this.performDestroy();
+    const operation = this.performDestroy().catch((error) => {
+      // Keep concurrent callers joined, but allow an owner that retained this
+      // instance after failed cleanup to make a later bounded retry.
+      if (this._destroyOperation === operation) this._destroyOperation = null;
+      throw error;
+    });
     this._destroyOperation = operation;
     return operation;
   }

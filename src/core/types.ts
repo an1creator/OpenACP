@@ -50,6 +50,38 @@ export interface IncomingMessage {
 }
 
 /**
+ * Authenticated origin of an incoming message. Connector identities and API
+ * credentials intentionally occupy different namespaces: connector allowlists
+ * must never be evaluated against an API token ID or the literal `api` string.
+ */
+export type MessagePrincipal =
+  | {
+      type: "connector";
+      channelId: string;
+      userId: string;
+    }
+  | {
+      type: "api";
+      credential: "secret";
+    }
+  | {
+      type: "api";
+      credential: "jwt";
+      tokenId: string;
+      /** Canonical identity user, when the JWT has completed identity setup. */
+      linkedUserId?: string;
+    };
+
+/** Stable policy codes that an ingress middleware may attach before blocking. */
+export type MessageIngressBlockCode = "MESSAGE_BLOCKED" | "SESSION_LIMIT";
+
+export interface MessageIngressControl {
+  block?: {
+    code: MessageIngressBlockCode;
+  };
+}
+
+/**
  * A message flowing from the agent back to channel adapters for display.
  *
  * The `type` field determines how the adapter renders the message:

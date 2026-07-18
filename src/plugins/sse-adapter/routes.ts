@@ -13,6 +13,11 @@ import {
 } from '../api-server/schemas/sessions.js';
 import { ExecuteCommandBodySchema } from '../api-server/schemas/commands.js';
 import { serializeConnected, serializeError } from './event-serializer.js';
+import {
+  apiMessagePrincipal,
+  apiPlatformUserId,
+  requireAcceptedPrompt,
+} from '../api-server/routes/prompt-response.js';
 
 function decodeParam(value: string): string {
   try {
@@ -134,17 +139,29 @@ export async function sseRoutes(app: FastifyInstance, deps: SSERouteDeps): Promi
         attachments = await resolveAttachments(fileService, sessionId, body.attachments);
       }
 
-      const userId = (request as any).auth?.tokenId ?? 'api';
-      const { turnId, queueDepth } = await deps.core.handleMessageInSession(
+      const userId = apiPlatformUserId(request);
+      const outcome = await deps.core.handleMessageInSession(
         session,
         { channelId: 'api', userId, text: body.prompt, attachments },
         { channelUser: { channelId: 'api', userId } },
         // Route response back to the SSE adapter; 'api' is the identity namespace,
         // not an adapter name, so responseAdapterId must be explicit.
-        { responseAdapterId: 'sse' },
+        {
+          externalTurnId: body.turnId,
+          responseAdapterId: 'sse',
+          principal: apiMessagePrincipal(request),
+        },
       );
+      const accepted = requireAcceptedPrompt(outcome);
 
-      return { ok: true, sessionId, queueDepth, turnId };
+      return reply.status(202).send({
+        ok: true,
+        accepted: true,
+        status: 'accepted',
+        sessionId,
+        queueDepth: accepted.queueDepth,
+        turnId: accepted.turnId,
+      });
     },
   );
 

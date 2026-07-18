@@ -60,6 +60,17 @@ export class AuthError extends Error {
   }
 }
 
+/** Thrown when a configured resource policy rejects an otherwise valid request. */
+export class RateLimitError extends Error {
+  constructor(
+    public code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'RateLimitError';
+  }
+}
+
 /**
  * Fastify global error handler that normalizes all thrown errors into the `ApiErrorResponse`
  * envelope. Maps known error classes to their corresponding HTTP status codes and falls back
@@ -135,6 +146,17 @@ export function globalErrorHandler(
         code: error.code,
         message: error.message,
         statusCode: error.statusCode,
+      },
+    });
+    return;
+  }
+
+  if (error instanceof RateLimitError) {
+    reply.status(429).send({
+      error: {
+        code: error.code,
+        message: error.message,
+        statusCode: 429,
       },
     });
     return;

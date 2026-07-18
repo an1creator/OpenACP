@@ -128,8 +128,11 @@ See [Scoped Proxy Routing](https://github.com/an1creator/OpenACP/blob/main/docs/
 ### Operations and extension
 
 - Managed foreground or daemon lifecycle on Linux and macOS.
-- REST API, SSE event stream, and JSON-capable CLI for automation.
-- Health checks, structured logging, usage tracking, tunnels, and `openacp doctor` diagnostics.
+- REST API, SSE event stream, and JSON-capable CLI with typed prompt admission
+  errors and caller-preserved turn IDs for automation.
+- Public liveness plus authenticated resource health for user sessions, the
+  hidden Assistant, terminal cleanup, and the single-slot ACP warm pool.
+- Structured logging, usage tracking, tunnels, and `openacp doctor` diagnostics.
 - Plugin SDK and lifecycle for custom adapters, services, commands, and middleware.
 
 ## Agents

@@ -16,6 +16,13 @@ By default, any user who can send messages to your bot can create sessions. To r
 
 Values are platform user IDs as strings. For Telegram, this is the numeric user ID. For Discord, it is the user snowflake.
 
+This allowlist applies only to connector principals. Requests authenticated with
+the master API secret or a JWT are API principals and are not compared with
+Telegram, Discord, or Slack user IDs. The master secret remains full admin;
+JWT role scopes are enforced on every route. Both credential types remain
+subject to the global concurrent-session limit. An unlinked JWT does not create
+an identity record merely by sending a prompt; identity setup is explicit.
+
 When the list is non-empty, `SecurityGuard.checkAccess()` rejects any incoming message whose `userId` is not in the list. The user receives no response (the message is silently dropped). An empty list means all users are allowed — this is the default and is appropriate when your bot is in a private group that only you can access.
 
 To find your user ID:

@@ -16,6 +16,8 @@ declare module 'fastify' {
       type: 'secret' | 'jwt';
       /** Present for JWT auth; used to look up the token record for revocation checks. */
       tokenId?: string;
+      /** Canonical identity user linked to this JWT, when setup has completed. */
+      userId?: string;
       role: string;
       scopes: string[];
     };
@@ -90,6 +92,7 @@ export function createAuthPreHandler(
     request.auth = {
       type: 'jwt',
       tokenId: payload.sub,
+      userId: tokenStore.getUserId(payload.sub),
       role: payload.role,
       scopes,
     };

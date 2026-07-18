@@ -19,7 +19,9 @@ A session goes through several stages during its life:
 
 1. **Starting up** — The session is being created and the AI agent is warming up. This usually takes a few seconds.
 2. **Active** — The session is ready. You can send messages and the agent will respond. This is where you spend most of your time.
-3. **Done** — The agent finished its work. The session topic stays open for reference.
+3. **Done** — The agent finished its work. OpenACP delivers the final connector
+   message, releases the ACP process and live bridge resources, and keeps the
+   durable session record. The topic stays open for reference and lazy resume.
 
 Sometimes things go differently:
 
@@ -46,7 +48,7 @@ Sessions have an inactivity timeout (default: 60 minutes). If no prompt is sent 
 
 ## Resuming sessions
 
-Sessions that are `finished` or have been idle since a restart can often be resumed by simply sending a message in the existing topic or thread. OpenACP will reconnect to the agent process if possible.
+Sessions that are `finished` or have been idle since a restart can often be resumed by simply sending a message in the existing topic or thread. Finished sessions do not keep an idle ACP process running; OpenACP uses the durable record to reconnect or recreate the agent session when the next message arrives.
 
 Sessions that went offline (e.g., after a server restart) are automatically resumed when you send a message to their topic. This happens transparently — you do not need to manually restart the session.
 

@@ -31,9 +31,11 @@ describe('npm trusted publishing workflow contract', () => {
 
     const publishCommands = workflow.match(/^\s*npm publish .*$/gm)?.map((command) => command.trim())
     expect(publishCommands).toEqual([
-      'npm publish "release-artifacts/n1creator-openacp-cli-${VERSION}.tgz" --access=public --tag latest',
-      'npm publish "release-artifacts/n1creator-openacp-plugin-sdk-${VERSION}.tgz" --access=public --tag latest',
+      'npm publish "./release-artifacts/n1creator-openacp-cli-${VERSION}.tgz" --access=public --tag latest',
+      'npm publish "./release-artifacts/n1creator-openacp-plugin-sdk-${VERSION}.tgz" --access=public --tag latest',
     ])
+    expect(workflow).not.toMatch(/^\s*npm publish\s+["']?release-artifacts\//gm)
+    expect(workflow).not.toMatch(/^\s*npm publish\s+(?:github:|git\+ssh:|git@github\.com:)/gm)
     expect(workflow).toContain('if npm view "@n1creator/openacp-cli@${VERSION}" version')
     expect(workflow).toContain('if npm view "@n1creator/openacp-plugin-sdk@${VERSION}" version')
   })

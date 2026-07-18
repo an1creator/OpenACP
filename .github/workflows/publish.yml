@@ -80,7 +80,7 @@ jobs:
               exit 1
             fi
           else
-            npm publish "release-artifacts/n1creator-openacp-cli-${VERSION}.tgz" --access=public --tag latest
+            npm publish "./release-artifacts/n1creator-openacp-cli-${VERSION}.tgz" --access=public --tag latest
           fi
 
       - name: Publish @n1creator/openacp-plugin-sdk to latest
@@ -95,5 +95,5 @@ jobs:
               exit 1
             fi
           else
-            npm publish "release-artifacts/n1creator-openacp-plugin-sdk-${VERSION}.tgz" --access=public --tag latest
+            npm publish "./release-artifacts/n1creator-openacp-plugin-sdk-${VERSION}.tgz" --access=public --tag latest
           fi

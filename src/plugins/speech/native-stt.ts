@@ -2,6 +2,7 @@ import type { STTProvider, SpeechServiceConfig, SpeechProviderConfig } from './s
 import { GroqSTT } from './providers/groq.js'
 import {
   LOCAL_WHISPER_DEFAULTS,
+  LOCAL_WHISPER_MAX_TIMEOUT_MS,
   LOCAL_WHISPER_PROVIDER,
   LocalWhisperSTT,
   resolveLocalWhisperScriptPath,
@@ -29,7 +30,7 @@ export function readLocalWhisperSettings(raw: Record<string, unknown>): LocalWhi
     vadFilter: readBoolean(raw.localWhisperVadFilter, LOCAL_WHISPER_DEFAULTS.vadFilter),
     device: readString(raw.localWhisperDevice, LOCAL_WHISPER_DEFAULTS.device),
     computeType: readString(raw.localWhisperComputeType, LOCAL_WHISPER_DEFAULTS.computeType),
-    timeoutMs: readNumber(raw.localWhisperTimeoutMs, LOCAL_WHISPER_DEFAULTS.timeoutMs),
+    timeoutMs: readTimeout(raw.localWhisperTimeoutMs, LOCAL_WHISPER_DEFAULTS.timeoutMs),
   }
 }
 
@@ -105,6 +106,13 @@ function readNumber(value: unknown, fallback: number): number {
 
 function readOptionalNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function readTimeout(value: unknown, fallback: number): number {
+  const timeout = readOptionalNumber(value)
+  return timeout !== undefined && Number.isSafeInteger(timeout) && timeout >= 0 && timeout <= LOCAL_WHISPER_MAX_TIMEOUT_MS
+    ? timeout
+    : fallback
 }
 
 function readBoolean(value: unknown, fallback: boolean): boolean {

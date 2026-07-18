@@ -2,7 +2,7 @@
 
 ### What operating systems does OpenACP support?
 
-OpenACP runs on macOS, Linux, and Windows (via WSL). It requires Node.js 20 or later. Native Windows (PowerShell/CMD) is not officially tested — WSL 2 is recommended on Windows.
+OpenACP runs on macOS, Linux, and Windows (via WSL). It requires Node.js 22 or later; Node.js 24 LTS is recommended. Native Windows (PowerShell/CMD) is not officially tested — WSL 2 is recommended on Windows.
 
 ---
 

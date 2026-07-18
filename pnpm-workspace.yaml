@@ -1,2 +1,7 @@
 packages:
   - 'packages/*'
+
+overrides:
+  'bundle-require>esbuild': 0.28.1
+  'tsup>esbuild': 0.28.1
+  'vite>esbuild': 0.28.1

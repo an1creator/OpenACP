@@ -156,21 +156,17 @@ describe("SessionFactory", () => {
       );
     });
 
-    it("emits session:created event on EventBus", async () => {
+    it("does not emit session:created before Core's durable initial commit", async () => {
       const handler = vi.fn();
       deps.eventBus.on("session:created", handler);
 
-      const session = await factory.create({
+      await factory.create({
         channelId: "telegram",
         agentName: "claude",
         workingDirectory: "/tmp/test",
       });
 
-      expect(handler).toHaveBeenCalledWith({
-        sessionId: session.id,
-        agent: "claude",
-        status: "initializing",
-      });
+      expect(handler).not.toHaveBeenCalled();
     });
 
     it("throws when spawn fails", async () => {

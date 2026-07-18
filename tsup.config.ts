@@ -7,7 +7,7 @@ export default defineConfig({
     testing: 'src/testing.ts',
   },
   format: ['esm'],
-  target: 'node20',
+  target: 'node22',
   platform: 'node',
   splitting: false,
   sourcemap: true,

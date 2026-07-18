@@ -3,6 +3,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { sessionRoutes } from '../routes/sessions.js';
 import { globalErrorHandler } from '../middleware/error-handler.js';
 import type { RouteDeps } from '../routes/types.js';
+import { SessionManager } from '../../../core/sessions/session-manager.js';
+import { Session } from '../../../core/sessions/session.js';
+import { TypedEmitter } from '../../../core/utils/typed-emitter.js';
 
 function createMockSession(overrides: Record<string, unknown> = {}) {
   return {
@@ -686,6 +689,71 @@ describe('session routes', () => {
       });
 
       expect(response.statusCode).toBe(404);
+    });
+
+    it('returns bounded cleanupPending and reuses the same ACP teardown on retry', async () => {
+      vi.useFakeTimers();
+      try {
+        let finishDestroy!: () => void;
+        const agent = Object.assign(new TypedEmitter(), {
+          sessionId: 'agent-bounded',
+          prompt: vi.fn(() => new Promise<void>(() => {})),
+          cancel: vi.fn(() => new Promise<void>(() => {})),
+          destroy: vi.fn(() => new Promise<void>((resolve) => { finishDestroy = resolve; })),
+          onPermissionRequest: vi.fn(),
+        }) as any;
+        const session = new Session({
+          id: 'bounded-http',
+          channelId: 'api',
+          agentName: 'claude',
+          workingDirectory: '/tmp/test',
+          agentInstance: agent,
+        });
+        session.name = 'skip-autoname';
+        const manager = new SessionManager(null);
+        manager.registerSession(session);
+        deps.core.sessionManager = manager as any;
+
+        const prompt = session.enqueuePrompt('never settles');
+        await vi.waitFor(() => expect(agent.prompt).toHaveBeenCalledOnce());
+        const firstResponse = app.inject({
+          method: 'DELETE',
+          url: '/api/v1/sessions/bounded-http',
+        });
+
+        await vi.advanceTimersByTimeAsync(9_000);
+        const first = await firstResponse;
+        expect(first.statusCode).toBe(200);
+        expect(first.json()).toMatchObject({
+          ok: true,
+          sessionId: 'bounded-http',
+          cancelled: true,
+          cleanupPending: true,
+        });
+        expect(agent.cancel).toHaveBeenCalledOnce();
+        expect(agent.destroy).toHaveBeenCalledOnce();
+
+        finishDestroy();
+        const retryResponse = app.inject({
+          method: 'DELETE',
+          url: '/api/v1/sessions/bounded-http',
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        const retry = await retryResponse;
+        expect(retry.statusCode).toBe(200);
+        expect(retry.json()).toMatchObject({
+          cancelled: false,
+          alreadyTerminal: true,
+          cleanupPending: false,
+        });
+        expect(agent.cancel).toHaveBeenCalledOnce();
+        expect(agent.destroy).toHaveBeenCalledOnce();
+        expect(manager.getSession(session.id)).toBeUndefined();
+
+        await prompt;
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

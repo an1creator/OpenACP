@@ -5,6 +5,8 @@ import type { IncomingMessage } from "../types.js";
 import type { InstanceContext } from "../instance/instance-context.js";
 import { SecurityGuard } from "../../plugins/security/security-guard.js";
 import { NotificationManager } from "../../plugins/notifications/notification.js";
+import { Session } from "../sessions/session.js";
+import { TypedEmitter } from "../utils/typed-emitter.js";
 
 // Mock heavy dependencies
 vi.mock("../agent-catalog.js", () => {
@@ -141,6 +143,7 @@ function mockAdapter(): IChannelAdapter {
     createSessionThread: vi.fn().mockResolvedValue("thread-1"),
     renameSessionThread: vi.fn(),
     deleteSessionThread: vi.fn(),
+    deleteSessionThreadById: vi.fn().mockResolvedValue(undefined),
     sendSkillCommands: vi.fn(),
     cleanupSkillCommands: vi.fn(),
   } as unknown as IChannelAdapter;
@@ -354,10 +357,86 @@ describe("OpenACPCore", () => {
   describe("createBridge()", () => {
     it("returns a SessionBridge instance", () => {
       const mockSession = { id: "test", on: vi.fn(), off: vi.fn() } as any;
+      core.sessionManager.registerSession(mockSession);
       const bridge = core.createBridge(mockSession, adapter);
       expect(bridge).toBeDefined();
     });
+
+    it("removes and disconnects the Core-owned bridge exactly once on cancel", async () => {
+      const agent = Object.assign(new TypedEmitter<any>(), {
+        sessionId: 'bridge-cancel-agent',
+        prompt: vi.fn().mockResolvedValue(undefined),
+        cancel: vi.fn().mockResolvedValue(undefined),
+        destroy: vi.fn().mockResolvedValue(undefined),
+        onPermissionRequest: vi.fn(),
+      }) as any;
+      const session = new Session({
+        id: 'bridge-cancel-session',
+        channelId: 'telegram',
+        agentName: 'claude',
+        workingDirectory: '/workspace',
+        agentInstance: agent,
+      });
+      core.sessionManager.registerSession(session);
+      const bridge = core.createBridge(session, adapter);
+      const disconnect = vi.spyOn(bridge, 'disconnect');
+      bridge.connect();
+      expect((core as any).bridges.size).toBe(1);
+
+      await core.sessionManager.cancelSession(session.id);
+
+      expect((core as any).bridges.size).toBe(0);
+      expect(disconnect).toHaveBeenCalledOnce();
+      expect(agent.destroy).toHaveBeenCalledOnce();
+    });
   });
+
+  describe("createSession() durable publication", () => {
+    it("cleans the candidate and connector thread without publishing success when initial persistence fails", async () => {
+      const agent = Object.assign(new TypedEmitter<any>(), {
+        sessionId: 'agent-persist-failure',
+        prompt: vi.fn().mockResolvedValue(undefined),
+        cancel: vi.fn().mockResolvedValue(undefined),
+        destroy: vi.fn().mockResolvedValue(undefined),
+        onPermissionRequest: vi.fn(),
+        initialSessionResponse: undefined,
+        agentCapabilities: undefined,
+      }) as any
+      const candidate = new Session({
+        id: 'persist-failure',
+        channelId: 'telegram',
+        agentName: 'claude',
+        workingDirectory: '/workspace',
+        agentInstance: agent,
+      })
+      candidate.agentSessionId = agent.sessionId
+      vi.spyOn(core.sessionFactory, 'create').mockImplementation(async () => {
+        core.sessionManager.registerSession(candidate)
+        return candidate
+      })
+      vi.spyOn(core.sessionManager, 'patchRecord').mockRejectedValueOnce(new Error('disk full'))
+      const created = vi.fn()
+      const threadReady = vi.fn()
+      core.eventBus.on('session:created', created)
+      core.eventBus.on('session:threadReady', threadReady)
+
+      await expect(core.createSession({
+        channelId: 'telegram',
+        agentName: 'claude',
+        workingDirectory: '/workspace',
+        createThread: true,
+      })).rejects.toThrow('disk full')
+
+      expect(adapter.createSessionThread).toHaveBeenCalledWith('', expect.any(String))
+      expect(adapter.deleteSessionThreadById).toHaveBeenCalledWith('thread-1')
+      expect(adapter.deleteSessionThread).not.toHaveBeenCalled()
+      expect(agent.destroy).toHaveBeenCalledOnce()
+      expect(core.sessionManager.getSession(candidate.id)).toBeUndefined()
+      expect(created).not.toHaveBeenCalled()
+      expect(threadReady).not.toHaveBeenCalled()
+      expect((core as any).bridges.size).toBe(0)
+    })
+  })
 
   describe("lazy service getters", () => {
     it("throws descriptive error when service not registered", () => {

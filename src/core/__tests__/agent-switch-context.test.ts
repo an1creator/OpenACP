@@ -57,9 +57,8 @@ function makeDeps(sessionOverride?: Session) {
     configManager: { get: vi.fn().mockReturnValue({ agentSwitch: { labelHistory: true } }) },
     eventBus: { emit: vi.fn() },
     adapters: new Map(),
-    bridges: new Map(),
     createBridge: vi.fn().mockReturnValue({ connect: vi.fn(), disconnect: vi.fn() }),
-    getSessionBridgeKeys: vi.fn().mockReturnValue([]),
+    disconnectSessionBridges: vi.fn().mockReturnValue(0),
     getMiddlewareChain: vi.fn().mockReturnValue(undefined),
     getService: vi.fn().mockImplementation((name: string) => name === 'context' ? contextService : undefined),
   };

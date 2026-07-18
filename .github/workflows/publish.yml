@@ -10,9 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [20, 24]
+        node-version: [22, 24]
     steps:
-      # Stable action majors with a Node 24 action runtime. The matrix remains
+      # Stable action majors with a Node 24 action runtime. The Node 22/24 matrix remains
       # authoritative for the project runtime under test.
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
@@ -22,6 +22,9 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm build
+      - if: matrix.node-version == 24
+        name: Use the release npm version
+        run: npm install --global npm@^11.16.0
       - if: matrix.node-version == 24
         run: pnpm verify:publish-artifacts
       - name: Verify tag provenance and release metadata
@@ -61,17 +64,12 @@ jobs:
       - name: Build CLI types (needed by SDK)
         run: pnpm build
 
-      - run: pnpm build:publish
-
-      - name: Pack and verify both artifacts before registry mutation
-        run: |
-          npm pack --dry-run ./dist-publish
-          npm pack --dry-run ./dist-publish-sdk
+      - name: Build and verify exact release tarballs
+        run: pnpm verify:publish-artifacts
 
       # The SDK declares the CLI as a peer dependency; the CLI has no runtime
       # dependency on the SDK. Publish CLI first so SDK latest is always usable.
       - name: Publish @n1creator/openacp-cli to latest
-        working-directory: dist-publish
         run: |
           if npm view "@n1creator/openacp-cli@${VERSION}" version >/dev/null 2>&1; then
             LATEST="$(npm view "@n1creator/openacp-cli" dist-tags.latest)"
@@ -82,12 +80,11 @@ jobs:
               exit 1
             fi
           else
-            npm publish --access=public --tag latest
+            npm publish "release-artifacts/n1creator-openacp-cli-${VERSION}.tgz" --access=public --tag latest
           fi
 
       - name: Publish @n1creator/openacp-plugin-sdk to latest
-        if: hashFiles('dist-publish-sdk/package.json') != ''
-        working-directory: dist-publish-sdk
+        if: hashFiles('release-artifacts/n1creator-openacp-plugin-sdk-*.tgz') != ''
         run: |
           if npm view "@n1creator/openacp-plugin-sdk@${VERSION}" version >/dev/null 2>&1; then
             LATEST="$(npm view "@n1creator/openacp-plugin-sdk" dist-tags.latest)"
@@ -98,5 +95,5 @@ jobs:
               exit 1
             fi
           else
-            npm publish --access=public --tag latest
+            npm publish "release-artifacts/n1creator-openacp-plugin-sdk-${VERSION}.tgz" --access=public --tag latest
           fi

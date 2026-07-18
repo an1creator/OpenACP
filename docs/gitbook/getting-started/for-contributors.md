@@ -4,7 +4,7 @@ Welcome, and thank you for wanting to contribute! This guide gets your local dev
 
 ## Prerequisites
 
-- **Node.js 20 or later** — check with `node --version`
+- **Node.js 22 or later** — check with `node --version`; CI verifies Node.js 22 and 24
 - **pnpm** — OpenACP uses pnpm for package management. Install it with `npm install -g pnpm`
 - **Git**
 

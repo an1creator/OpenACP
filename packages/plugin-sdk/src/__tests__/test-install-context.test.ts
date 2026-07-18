@@ -163,10 +163,14 @@ describe('mockServices', () => {
 
   it('speech has callable methods', async () => {
     const svc = mockServices.speech()
-    const buf = await svc.textToSpeech('hello')
-    expect(buf).toBeInstanceOf(Buffer)
-    const text = await svc.speechToText(Buffer.alloc(0))
-    expect(text).toBe('')
+    const audio = await svc.synthesize('hello')
+    expect(audio.audioBuffer).toBeInstanceOf(Buffer)
+    const transcript = await svc.transcribe(Buffer.alloc(0), 'audio/ogg')
+    expect(transcript.text).toBe('')
+    expect(svc.isTTSAvailable()).toBe(false)
+    expect(svc.isSTTAvailable()).toBe(false)
+    await expect(svc.textToSpeech('legacy')).resolves.toBeInstanceOf(Buffer)
+    await expect(svc.speechToText(Buffer.alloc(0))).resolves.toBe('')
   })
 
   it('tunnel returns localhost URLs', () => {

@@ -38,11 +38,13 @@ In Telegram, open **Settings → Speech-to-text** or run `/speech`. The settings
   "localWhisperVadFilter": false,
   "localWhisperDevice": "cpu",
   "localWhisperComputeType": "int8",
-  "localWhisperTimeoutMs": 120000
+  "localWhisperTimeoutMs": 600000
 }
 ```
 
 The status-first home reports **Off**, **Local selected**, or **Groq selected** separately from setup readiness. It keeps three jobs at the top level: **Transcription method**, **Settings & access**, and **Check setup**. **Settings & access** separates local configuration from Groq credentials without changing the selected method. Local language and model stay on the first local screen; lower-frequency beam, voice-activity filtering, device, compute type, and time limit live under **Performance & reliability**. For local transcription, **Check setup** is preliminary: it confirms that the bundled script is executable and an `uv` or `python3` command exists. It does not create the environment, install dependencies, download a model, or prove network access. For Groq, it performs an authenticated access check through `services.speech`. Changes apply immediately and preserve separately registered TTS providers.
+
+The local time limit defaults to 600,000 ms (10 minutes). This includes first-run environment creation, dependency and model downloads, and CPU transcription. Existing 1.0.0 speech plugin settings equal to the former 120,000 ms default are migrated to 600,000 ms; absent settings and values other than 120,000 ms are preserved. Because the old format did not record value provenance, an explicitly chosen 120,000 ms value is indistinguishable from the former default and is migrated too. The connector UI accepts 1,000–600,000 ms. Protected host configuration can use a larger Node-compatible integer, or `0` to disable the provider time limit; unlimited execution should be used only when the host has its own process supervision.
 
 For Groq, **Add API key** or **Replace API key** captures a short-lived candidate through secure input. OpenACP binds that draft to the connector, user, and conversation, then calls Groq's authenticated models endpoint through `services.speech`; it does not upload user audio or persist the candidate during the check. A rejected or expired candidate is discarded while the saved key and active method remain unchanged. After a successful check, choose **Save and use Groq**, **Save key only**, or **Discard**. Reviews and status screens show only **Saved (hidden)** or **Not set**. **Clear API key** requires confirmation, deletes the key, and turns Groq off when active.
 
@@ -57,7 +59,11 @@ host. Leave it unset to use the runtime bundled in `@n1creator/openacp-cli`.
 
 ### STT error handling
 
-If transcription fails, the audio attachment is kept and passed to the agent as-is, with an error message in the topic. **Settings → Speech-to-text → Check setup** and `openacp doctor` only confirm that the bundled script is executable and that `uv` or `python3` exists; they identify a completely absent runtime but do not validate environment creation, `pip`, the model, or network access. Python 3 without `venv` support can therefore pass the preliminary check and fail visibly on the first transcription.
+If transcription fails, a visible nonfatal warning is sent and the audio attachment is kept and passed to the agent as-is. The session remains active. Diagnostic text is bounded and network credentials are redacted before connector delivery. A timeout message states the configured limit and distinguishes timeout, signal termination, missing executable, output-limit, and nonzero-exit failures where possible.
+
+Cancelling a prompt during local transcription aborts the provider, terminates the helper process group (including Python descendants), removes its temporary audio file, and waits for cleanup before the next queued prompt starts. Groq requests receive the same cancellation signal.
+
+**Settings → Speech-to-text → Check setup** and `openacp doctor` only confirm that the bundled script is executable and that `uv` or `python3` exists; they identify a completely absent runtime but do not validate environment creation, `pip`, the model, or network access. Python 3 without `venv` support can therefore pass the preliminary check and fail visibly on the first transcription.
 
 Install or configure `uv`, or make `python3 -m venv` work, and ensure dependency and model downloads can use `services.speechDownloads`; then rerun the preliminary check and resend the audio. Groq requests and access checks use the independent `services.speech` route; check the saved key and rate limit there.
 

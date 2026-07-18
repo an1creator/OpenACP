@@ -3,4 +3,5 @@ export type { TestPluginContext, TestContextOpts } from './testing/test-context.
 export { createTestInstallContext } from './testing/test-install-context.js'
 export type { TestInstallContextOpts } from './testing/test-install-context.js'
 export { mockServices } from './testing/mock-services.js'
+export type { LegacySpeechMockAliases, SpeechServiceMock } from './testing/mock-services.js'
 export { runAdapterConformanceTests } from '@n1creator/openacp-cli/testing'

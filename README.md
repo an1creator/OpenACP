@@ -7,7 +7,7 @@
 Self-hosted sessions for Codex, Cursor, Claude Code, Gemini, and other ACP agents — with native speech-to-text, scoped proxy routing, and real-time control from Telegram, Discord, Slack, REST, or SSE.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node.js >= 20](https://img.shields.io/badge/Node.js-%3E%3D%2020-green.svg)](https://nodejs.org/)
+[![Node.js >= 22](https://img.shields.io/badge/Node.js-%3E%3D%2022-green.svg)](https://nodejs.org/)
 [![ACP Protocol](https://img.shields.io/badge/Protocol-ACP-purple.svg)](https://agentclientprotocol.org/)
 [![npm](https://img.shields.io/npm/v/@n1creator/openacp-cli.svg)](https://www.npmjs.com/package/@n1creator/openacp-cli)
 
@@ -47,7 +47,7 @@ Telegram / Discord / Slack / REST / SSE
 
 ## Quick Start
 
-**Requirement:** Node.js 20 or newer.
+**Requirement:** Node.js 22 or newer. Node.js 20 is unsupported because the bundled ACP agent runtime requires Node.js 22; Node.js 24 LTS is recommended.
 
 ```bash
 npm install -g @n1creator/openacp-cli
@@ -97,8 +97,9 @@ audio attachment
 
 - `local-whisper` runs on the OpenACP host without an API key. The npm package includes the provider and executable bootstrap script; npm installation does not install system Python or `uv`, and it does not download `faster-whisper` or a speech model.
 - The first local transcription creates an isolated environment, installs `faster-whisper`, and downloads the selected model through the `services.speechDownloads` route. Later requests reuse the environment and model caches.
+- Local transcription has a 10-minute default time limit so first-run setup and CPU inference can complete. Cancelling the prompt also stops the local helper and its descendants before the next queued prompt starts.
 - Groq provides an optional hosted STT path.
-- Failed transcription preserves the original audio instead of silently dropping it.
+- Failed transcription shows a bounded, credential-redacted warning, keeps the session active, and preserves the original audio for the agent instead of silently dropping it.
 - In Telegram, open **Settings → Speech-to-text** or use `/speech` to see the selected method and setup state, choose Off, Local, or Groq, and edit local settings. Discord and Slack use the same service after host configuration with `openacp plugin configure @openacp/speech`; their current adapters do not register a native `/speech` slash command. A candidate Groq key is checked before it can replace the saved hidden key; changes hot-reload without replacing TTS providers.
 
 Local Whisper needs either `uv` or Python 3 with working `venv` support. **Settings → Speech-to-text → Check setup** and `openacp doctor` are preliminary checks: they confirm that the bundled script is executable and that an `uv` or `python3` command exists. Python 3 without `venv` support can pass that check and then fail visibly during the first transcription; the original audio is kept. Install or configure `uv`, or make `python3 -m venv` work, ensure `services.speechDownloads` can reach dependency and model sources, then retry the check and resend the audio. See [Voice and Speech](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/using-openacp/voice-and-speech.md).

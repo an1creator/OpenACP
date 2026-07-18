@@ -11,11 +11,29 @@ import * as fs from "node:fs";
 import type { TurnRouting } from "./turn-context.js";
 import { createTurnContext, type TurnContext } from "./turn-context.js";
 import { Hook, SessionEv } from "../events.js";
+import { redactNetworkSecrets } from "../security/network-redaction.js";
 const moduleLog = createChildLogger({ module: "session" });
+
+// Telegram expands escaped HTML entities, so this keeps the rendered warning below its 4,096-character limit.
+const MAX_TRANSCRIPTION_ERROR_LENGTH = 700;
 
 function formatPromptError(err: unknown): string {
   const message = extractErrorMessage(err);
   return message ?? "Unknown error";
+}
+
+function formatTranscriptionWarning(err: unknown): string {
+  return `⚠️ Voice transcription failed; the original audio was kept and will be passed to the agent. ${formatTranscriptionDiagnostic(err)}`;
+}
+
+function formatTranscriptionDiagnostic(err: unknown): string {
+  const safe = redactNetworkSecrets(formatPromptError(err));
+  if (safe.length <= MAX_TRANSCRIPTION_ERROR_LENGTH) return safe;
+
+  const marker = "\n[middle output truncated]\n";
+  const available = MAX_TRANSCRIPTION_ERROR_LENGTH - marker.length;
+  const headLength = Math.ceil(available * 0.6);
+  return `${safe.slice(0, headLength)}${marker}${safe.slice(-(available - headLength))}`;
 }
 
 function extractErrorMessage(value: unknown, seen = new WeakSet<object>()): string | null {
@@ -83,6 +101,48 @@ export const TTS_BLOCK_REGEX = /\[TTS\]([\s\S]*?)\[\/TTS\]/;
 export const TTS_MAX_LENGTH = 5000;
 export const TTS_TIMEOUT_MS = 30_000;
 
+const AGENT_CANCEL_TIMEOUT_MS = 5_000;
+const QUEUE_TEARDOWN_TIMEOUT_MS = 1_000;
+const OPERATION_TIMEOUT = Symbol('operation-timeout');
+
+type ObservedOperation =
+  | { ok: true }
+  | { ok: false; error: unknown };
+
+async function waitForObservedOperation(
+  operation: Promise<ObservedOperation>,
+  timeoutMs: number,
+): Promise<ObservedOperation | typeof OPERATION_TIMEOUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<typeof OPERATION_TIMEOUT>((resolve) => {
+        timer = setTimeout(() => resolve(OPERATION_TIMEOUT), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function observeOperation(operation: Promise<unknown>): Promise<ObservedOperation> {
+  return operation.then(
+    () => ({ ok: true } as const),
+    (error: unknown) => ({ ok: false, error } as const),
+  );
+}
+
+/** Raised when an async agent replacement crosses the terminal session boundary. */
+export class SessionTerminatingError extends Error {
+  readonly code = 'SESSION_TERMINATING';
+
+  constructor(sessionId: string) {
+    super(`Session ${sessionId} is terminating`);
+    this.name = 'SessionTerminatingError';
+  }
+}
+
 // Session state machine — valid transitions: from → Set<to>
 //
 //   initializing → active (first prompt received)
@@ -92,13 +152,13 @@ export const TTS_TIMEOUT_MS = 30_000;
 //                → cancelled (user cancelled the session)
 //   error        → active    (retry: user sends a new prompt)
 //                → cancelled (user gives up)
-//   cancelled    → active    (resume: user sends a new prompt)
+//   cancelled    → (terminal — no further transitions)
 //   finished     → (terminal — no further transitions)
 const VALID_TRANSITIONS: Record<SessionStatus, Set<SessionStatus>> = {
   initializing: new Set(["active", "error", "cancelled"]),
   active: new Set(["error", "finished", "cancelled"]),
   error: new Set(["active", "cancelled"]),
-  cancelled: new Set(["active"]),
+  cancelled: new Set(),
   finished: new Set(),
 };
 
@@ -143,10 +203,14 @@ export class Session extends TypedEmitter<SessionEvents> {
   workingDirectory: string;
   private _agentInstance!: AgentInstance;
   get agentInstance(): AgentInstance { return this._agentInstance; }
+  private _agentGeneration = 0;
+  /** Monotonic identity for async continuations crossing an agent replacement. */
+  get agentGeneration(): number { return this._agentGeneration; }
   /** Setting agentInstance wires the agent→session event relay and commands buffer.
    *  This happens both at construction and on agent switch (switchAgent). */
   set agentInstance(agent: AgentInstance) {
     this._agentInstance = agent;
+    this._agentGeneration += 1;
     this.wireAgentRelay();
     this.wireCommandsBuffer();
   }
@@ -180,16 +244,60 @@ export class Session extends TypedEmitter<SessionEvents> {
   private pendingContext: string | null = null;
   /** Per-turn abort tracking — avoids race when next turn resets before current turn reads */
   private _abortedTurnIds = new Set<string>();
+  private _activePromptPhase: 'preprocessing' | 'agent' | null = null;
   /** Last completed turnId — used by abortPrompt() to retroactively mark a just-finished turn as interrupted */
   private _lastCompletedTurnId: string | null = null;
   /** Idempotent teardown checkpoints allow cleanup retry after a partial failure. */
-  private _destroyedAgent = false;
   private _closedLogger = false;
+  private _destroyOperation: Promise<void> | null = null;
+  private _lifecycleState: 'live' | 'terminating' | 'destroyed' = 'live';
+  private _notifyTermination!: () => void;
+  private readonly _terminationRequested = new Promise<void>((resolve) => {
+    this._notifyTermination = resolve;
+  });
+  private readonly _agentDestroyOps = new WeakMap<AgentInstance, Promise<void>>();
+  private readonly _agentCancellationOps = new WeakMap<AgentInstance, {
+    generation: number;
+    operation: Promise<ObservedOperation>;
+  }>();
+  private _queueCloseOperation: Promise<ObservedOperation> | null = null;
+  /** Bridges connected before a terminal event are the final-delivery recipients. */
+  private readonly _connectedBridgeIds = new Set<string>();
+  private _nextTerminalDeliveryGeneration = 1;
+  private _terminalDelivery: {
+    generation: number;
+    recipients: Set<string>;
+    claimed: Set<string>;
+    completed: Set<string>;
+    eventPublished: boolean;
+    notificationSent: boolean;
+    aborted: boolean;
+    durability: Promise<void> | null;
+    deadlineAt: number;
+    failure: string | null;
+    completion: Promise<void>;
+    resolveCompletion: () => void;
+  } | null = null;
 
   private _autoApprovedCommands: string[] = []
 
   get autoApprovedCommands(): string[] {
     return this._autoApprovedCommands
+  }
+
+  /** True from the synchronous start of destroy(); replacement work must stop. */
+  get isTerminating(): boolean {
+    return this._lifecycleState !== 'live';
+  }
+
+  /**
+   * Cross the monotonic terminal boundary synchronously, before cancellation does
+   * any durable I/O. This does not itself cancel prompts or destroy resources.
+   */
+  beginTermination(): void {
+    if (this._lifecycleState !== 'live') return;
+    this._lifecycleState = 'terminating';
+    this._notifyTermination();
   }
 
   constructor(opts: {
@@ -217,7 +325,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     this.log.info({ agentName: this.agentName }, "Session created");
 
     this.queue = new PromptQueue(
-      (text, userPrompt, attachments, routing, turnId, meta) => this.processPrompt(text, userPrompt, attachments, routing, turnId, meta),
+      (text, userPrompt, attachments, routing, turnId, meta, signal) => this.processPrompt(text, userPrompt, attachments, routing, turnId, meta, signal),
       (err) => {
         this.log.error({ err }, "Prompt execution failed");
         const message = formatPromptError(err);
@@ -270,21 +378,187 @@ export class Session extends TypedEmitter<SessionEvents> {
 
 
   /** Transition to active — from initializing, error, or cancelled */
-  activate(): void {
+  activate(): boolean {
+    if (this.isTerminating || this._status === "cancelled") return false;
     this.transition("active");
+    return true;
   }
 
   /** Transition to error — from initializing or active. Idempotent if already in error. */
-  fail(reason: string): void {
-    if (this._status === "error") return;
+  fail(reason: string): boolean {
+    if (this.isTerminating || this._status === "error") return false;
     this.transition("error");
     this.emit(SessionEv.ERROR, new Error(reason));
+    return true;
   }
 
   /** Transition to finished — from active only. Emits session_end for backward compat. */
-  finish(reason?: string): void {
+  finish(reason?: string): boolean {
+    // Cancellation/destroy owns the lifecycle once beginTermination() fires.
+    // Delayed middleware or agent events must not race it to another terminal state.
+    if (this.isTerminating) return false;
     this.transition("finished");
     this.emit(SessionEv.SESSION_END, reason ?? "completed");
+    return true;
+  }
+
+  /** Track bridge membership so a terminal event can snapshot exact recipients. */
+  registerBridge(adapterId: string): void {
+    if (this._status === "finished" || this.isTerminating) return;
+    this._connectedBridgeIds.add(adapterId);
+  }
+
+  unregisterBridge(adapterId: string): void {
+    this._connectedBridgeIds.delete(adapterId);
+    const delivery = this._terminalDelivery;
+    if (!delivery?.recipients.has(adapterId)) return;
+    this.completeTerminalDelivery(adapterId, delivery.generation);
+  }
+
+  /**
+   * Establish a single terminal winner and snapshot all bridges that must receive
+   * the completion event. Later bridge handlers join the same generation.
+   */
+  beginTerminalDelivery(reason?: string): number | null {
+    if (this._terminalDelivery) return this._terminalDelivery.generation;
+    if (this.isTerminating || this._status !== "active") return null;
+
+    let resolveCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => { resolveCompletion = resolve; });
+    const delivery = {
+      generation: this._nextTerminalDeliveryGeneration++,
+      recipients: new Set(this._connectedBridgeIds),
+      claimed: new Set<string>(),
+      completed: new Set<string>(),
+      eventPublished: false,
+      notificationSent: false,
+      aborted: false,
+      durability: null,
+      deadlineAt: Date.now() + 5_000,
+      failure: null,
+      completion,
+      resolveCompletion,
+    };
+    this._terminalDelivery = delivery;
+    try {
+      if (!this.finish(reason)) {
+        this._terminalDelivery = null;
+        resolveCompletion();
+        return null;
+      }
+    } catch (error) {
+      this._terminalDelivery = null;
+      resolveCompletion();
+      throw error;
+    }
+    if (delivery.recipients.size === 0) resolveCompletion();
+    return delivery.generation;
+  }
+
+  claimTerminalDelivery(adapterId: string, generation: number): boolean {
+    const delivery = this._terminalDelivery;
+    if (
+      !delivery ||
+      delivery.aborted ||
+      delivery.generation !== generation ||
+      !delivery.recipients.has(adapterId) ||
+      delivery.claimed.has(adapterId)
+    ) return false;
+    delivery.claimed.add(adapterId);
+    return true;
+  }
+
+  /** Allow an explicit retry when terminal durability failed before delivery. */
+  releaseTerminalDeliveryClaim(adapterId: string, generation: number): void {
+    const delivery = this._terminalDelivery;
+    if (!delivery || delivery.generation !== generation || delivery.completed.has(adapterId)) return;
+    delivery.claimed.delete(adapterId);
+  }
+
+  /** Every bridge awaits the same terminal persistence transaction. */
+  ensureTerminalDurability(
+    generation: number,
+    persist: () => Promise<void>,
+  ): Promise<void> {
+    const delivery = this._terminalDelivery;
+    if (!delivery || delivery.generation !== generation || delivery.aborted) {
+      return Promise.reject(new SessionTerminatingError(this.id));
+    }
+    delivery.durability ??= Promise.resolve().then(persist);
+    return delivery.durability;
+  }
+
+  terminalDeliveryDeadline(generation: number): number | null {
+    const delivery = this._terminalDelivery;
+    return delivery && delivery.generation === generation && !delivery.aborted
+      ? delivery.deadlineAt
+      : null;
+  }
+
+  /** Abort an undeliverable generation and release every waiter exactly once. */
+  abortTerminalDelivery(generation: number): boolean {
+    const delivery = this._terminalDelivery;
+    if (!delivery || delivery.generation !== generation || delivery.aborted) return false;
+    delivery.aborted = true;
+    delivery.claimed.clear();
+    delivery.completed = new Set(delivery.recipients);
+    delivery.resolveCompletion();
+    return true;
+  }
+
+  markTerminalDeliveryFailed(generation: number, reason: string): void {
+    const delivery = this._terminalDelivery;
+    if (!delivery || delivery.generation !== generation || delivery.failure) return;
+    delivery.failure = reason;
+  }
+
+  get terminalDeliveryFailure(): string | null {
+    return this._terminalDelivery?.failure ?? null;
+  }
+
+  isTerminalDeliveryRecipient(adapterId: string, generation?: number): boolean {
+    const delivery = this._terminalDelivery;
+    return Boolean(
+      delivery &&
+      !delivery.aborted &&
+      (generation === undefined || delivery.generation === generation) &&
+      delivery.recipients.has(adapterId) &&
+      !delivery.completed.has(adapterId),
+    );
+  }
+
+  claimTerminalEventPublication(generation: number): boolean {
+    const delivery = this._terminalDelivery;
+    if (!delivery || delivery.aborted || delivery.generation !== generation || delivery.eventPublished) return false;
+    delivery.eventPublished = true;
+    return true;
+  }
+
+  claimTerminalNotification(generation: number): boolean {
+    const delivery = this._terminalDelivery;
+    if (!delivery || delivery.aborted || delivery.generation !== generation || delivery.notificationSent) return false;
+    delivery.notificationSent = true;
+    return true;
+  }
+
+  /** Return true only for the bridge that completes the delivery barrier. */
+  completeTerminalDelivery(adapterId: string, generation: number): boolean {
+    const delivery = this._terminalDelivery;
+    if (!delivery || delivery.aborted || delivery.generation !== generation || !delivery.recipients.has(adapterId)) {
+      return false;
+    }
+    delivery.completed.add(adapterId);
+    if (delivery.completed.size !== delivery.recipients.size) return false;
+    delivery.resolveCompletion();
+    return true;
+  }
+
+  get hasTerminalDelivery(): boolean {
+    return this._terminalDelivery !== null;
+  }
+
+  waitForTerminalDelivery(): Promise<void> | null {
+    return this._terminalDelivery?.completion ?? null;
   }
 
   /** Transition to cancelled — from initializing, active, or error. */
@@ -345,6 +619,9 @@ export class Session extends TypedEmitter<SessionEvents> {
    * queued/processing events before the prompt actually runs.
    */
   async enqueuePrompt(text: string, attachments?: Attachment[], routing?: TurnRouting, externalTurnId?: string, meta?: TurnMeta): Promise<string> {
+    if (this.isTerminating || this._status === "finished" || this._status === "cancelled") {
+      throw new SessionTerminatingError(this.id);
+    }
     // Use pre-generated turnId if provided (so callers can emit events before awaiting the queue)
     const turnId = externalTurnId ?? nanoid(8);
     const turnMeta: TurnMeta = meta ?? { turnId };
@@ -362,9 +639,9 @@ export class Session extends TypedEmitter<SessionEvents> {
     return turnId;
   }
 
-  private async processPrompt(text: string, userPrompt: string, attachments?: Attachment[], routing?: TurnRouting, turnId?: string, meta?: TurnMeta): Promise<void> {
-    // Don't process prompts for finished sessions (queue may still drain)
-    if (this._status === "finished") return;
+  private async processPrompt(text: string, userPrompt: string, attachments?: Attachment[], routing?: TurnRouting, turnId?: string, meta?: TurnMeta, signal?: AbortSignal): Promise<void> {
+    // Terminal sessions may still have queued callbacks, but cannot start work.
+    if (this.isTerminating || this._status === "finished" || this._status === "cancelled") return;
 
     // Seal turn context — bridges use this to decide routing for every emitted event
     // Pass the pre-generated turnId so message:queued and message:processing share the same ID
@@ -384,7 +661,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     this.promptCount++;
     this.emit(SessionEv.PROMPT_COUNT_CHANGED, this.promptCount);
 
-    if (this._status === "initializing" || this._status === "cancelled" || this._status === "error") {
+    if (this._status === "initializing" || this._status === "error") {
       this.activate();
     }
     const promptStart = Date.now();
@@ -397,8 +674,51 @@ export class Session extends TypedEmitter<SessionEvents> {
       this.log.debug("Context injected into prompt");
     }
 
+    // Hook: turn:start covers local preprocessing as part of the turn lifecycle.
+    if (this.middlewareChain) {
+      this.middlewareChain.execute(Hook.TURN_START, {
+        sessionId: this.id,
+        promptText: text,
+        promptNumber: this.promptCount,
+        turnId: this.activeTurnContext?.turnId ?? turnId ?? '',
+        meta,
+        userPrompt: this.activeTurnContext?.userPrompt,
+        sourceAdapterId: this.activeTurnContext?.sourceAdapterId,
+        responseAdapterId: this.activeTurnContext?.responseAdapterId,
+      }, async (payload) => payload).catch((error) => {
+        this.log.warn({ err: error, hook: Hook.TURN_START }, "Session hook failed");
+      });
+    }
+
     // STT: transcribe audio attachments if agent doesn't support audio
-    const processed = await this.maybeTranscribeAudio(text, attachments);
+    this._activePromptPhase = 'preprocessing';
+    let processed: { text: string; attachments?: Attachment[] };
+    try {
+      processed = await this.maybeTranscribeAudio(text, attachments, signal);
+      signal?.throwIfAborted();
+    } catch (error) {
+      if (signal?.aborted) {
+        const interruptedTurnId = this.activeTurnContext?.turnId ?? turnId ?? '';
+        this._abortedTurnIds.delete(interruptedTurnId);
+        if (this.middlewareChain) {
+          this.middlewareChain.execute(Hook.TURN_END, {
+            sessionId: this.id, stopReason: 'interrupted', durationMs: Date.now() - promptStart,
+            turnId: interruptedTurnId, meta,
+          }, async (payload) => payload).catch((hookError) => {
+            this.log.warn({ err: hookError, hook: Hook.TURN_END }, "Session hook failed");
+          });
+          this.middlewareChain.execute(Hook.AGENT_AFTER_TURN, {
+            sessionId: this.id, turnId: interruptedTurnId, fullText: '', stopReason: 'interrupted', meta,
+          }, async (payload) => payload).catch((hookError) => {
+            this.log.warn({ err: hookError, hook: Hook.AGENT_AFTER_TURN }, "Session hook failed");
+          });
+        }
+        this._lastCompletedTurnId = interruptedTurnId || null;
+        this.activeTurnContext = null;
+      }
+      this._activePromptPhase = null;
+      throw error;
+    }
 
     // TTS: determine if TTS is active for this prompt
     const ttsActive =
@@ -440,32 +760,24 @@ export class Session extends TypedEmitter<SessionEvents> {
     const mw = this.middlewareChain;
     const afterEventListener = mw
       ? (event: AgentEvent) => {
-          mw.execute(Hook.AGENT_AFTER_EVENT, { sessionId: this.id, event, outgoingMessage: { type: 'text' as const, text: '' } }, async (e) => e).catch(() => {});
+          mw.execute(Hook.AGENT_AFTER_EVENT, { sessionId: this.id, event, outgoingMessage: { type: 'text' as const, text: '' } }, async (e) => e).catch((hookError) => {
+            this.log.warn({ err: hookError, hook: Hook.AGENT_AFTER_EVENT }, "Session hook failed");
+          });
         }
       : null;
 
+    const turnAgent = this.agentInstance;
     if (afterEventListener) {
-      this.agentInstance.on(SessionEv.AGENT_EVENT, afterEventListener);
-    }
-
-    // Hook: turn:start — read-only, fire-and-forget
-    if (this.middlewareChain) {
-      this.middlewareChain.execute(Hook.TURN_START, {
-        sessionId: this.id,
-        promptText: processed.text,
-        promptNumber: this.promptCount,
-        turnId: this.activeTurnContext?.turnId ?? turnId ?? '',
-        meta,
-        userPrompt: this.activeTurnContext?.userPrompt,
-        sourceAdapterId: this.activeTurnContext?.sourceAdapterId,
-        responseAdapterId: this.activeTurnContext?.responseAdapterId,
-      }, async (p) => p).catch(() => {});
+      turnAgent.on(SessionEv.AGENT_EVENT, afterEventListener);
     }
 
     let stopReason: string = 'end_turn';
     let promptError: unknown;
+    this._activePromptPhase = 'agent';
     try {
-      const response = await this.agentInstance.prompt(processed.text, processed.attachments);
+      signal?.throwIfAborted();
+      const response = await turnAgent.prompt(processed.text, processed.attachments);
+      signal?.throwIfAborted();
       if (response && typeof response === 'object' && 'stopReason' in response) {
         stopReason = (response as { stopReason?: string }).stopReason ?? 'end_turn';
       }
@@ -485,18 +797,21 @@ export class Session extends TypedEmitter<SessionEvents> {
         this.off(SessionEv.AGENT_EVENT, accumulatorListener);
       }
       if (afterEventListener) {
-        this.agentInstance.off(SessionEv.AGENT_EVENT, afterEventListener);
+        turnAgent.off(SessionEv.AGENT_EVENT, afterEventListener);
       }
       this.off(SessionEv.AGENT_EVENT, turnTextListener);
 
       const finalTurnId = this.activeTurnContext?.turnId ?? turnId ?? '';
-      const wasAborted = this._abortedTurnIds.has(finalTurnId);
-      if (wasAborted) this._abortedTurnIds.delete(finalTurnId);
+      const wasExplicitlyAborted = this._abortedTurnIds.has(finalTurnId);
+      if (wasExplicitlyAborted) this._abortedTurnIds.delete(finalTurnId);
+      const wasAborted = wasExplicitlyAborted || signal?.aborted === true;
       const finalStopReason = wasAborted ? 'interrupted' : stopReason;
 
       // Hook: turn:end — always fires, even on error
       if (this.middlewareChain) {
-        this.middlewareChain.execute(Hook.TURN_END, { sessionId: this.id, stopReason: finalStopReason as import('../types.js').StopReason, durationMs: Date.now() - promptStart, turnId: finalTurnId, meta }, async (p) => p).catch(() => {});
+        this.middlewareChain.execute(Hook.TURN_END, { sessionId: this.id, stopReason: finalStopReason as import('../types.js').StopReason, durationMs: Date.now() - promptStart, turnId: finalTurnId, meta }, async (p) => p).catch((hookError) => {
+          this.log.warn({ err: hookError, hook: Hook.TURN_END }, "Session hook failed");
+        });
       }
 
       // Hook: agent:afterTurn — full assembled text, read-only, fire-and-forget
@@ -507,13 +822,16 @@ export class Session extends TypedEmitter<SessionEvents> {
           fullText: turnTextBuffer.join(''),
           stopReason: finalStopReason as import('../types.js').StopReason,
           meta,
-        }, async (p) => p).catch(() => {});
+        }, async (p) => p).catch((hookError) => {
+          this.log.warn({ err: hookError, hook: Hook.AGENT_AFTER_TURN }, "Session hook failed");
+        });
       }
 
       // Track the completed turnId so late abortPrompt() calls can retroactively mark it
       this._lastCompletedTurnId = finalTurnId || null;
       // Always clear turn context so routing state is never stale after a failed turn
       this.activeTurnContext = null;
+      this._activePromptPhase = null;
     }
 
     // Re-throw so PromptQueue error handler can call this.fail()
@@ -535,7 +853,12 @@ export class Session extends TypedEmitter<SessionEvents> {
 
     // Also trigger auto-naming when name is still the adopted session placeholder.
     if (!this.name || this.name === "Adopted session") {
-      await this.autoName();
+      this._activePromptPhase = 'agent';
+      try {
+        await this.autoName(turnAgent);
+      } finally {
+        this._activePromptPhase = null;
+      }
     }
   }
 
@@ -546,6 +869,7 @@ export class Session extends TypedEmitter<SessionEvents> {
   private async maybeTranscribeAudio(
     text: string,
     attachments?: Attachment[],
+    signal?: AbortSignal,
   ): Promise<{ text: string; attachments?: Attachment[] }> {
     if (!attachments?.length || !this.speechService) {
       return { text, attachments };
@@ -564,6 +888,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     const remainingAttachments: Attachment[] = [];
 
     for (const att of attachments) {
+      signal?.throwIfAborted();
       if (att.type !== "audio") {
         remainingAttachments.push(att);
         continue;
@@ -573,7 +898,8 @@ export class Session extends TypedEmitter<SessionEvents> {
         const audioPath = att.originalFilePath || att.filePath;
         const audioMime = att.originalFilePath ? "audio/ogg" : att.mimeType;
         const audioBuffer = await fs.promises.readFile(audioPath);
-        const result = await this.speechService.transcribe(audioBuffer, audioMime);
+        const result = await this.speechService.transcribe(audioBuffer, audioMime, { signal });
+        signal?.throwIfAborted();
         this.log.info({ provider: "stt", duration: result.duration }, "Voice transcribed");
         // Notify user of transcription result
         this.emit(SessionEv.AGENT_EVENT, {
@@ -586,10 +912,16 @@ export class Session extends TypedEmitter<SessionEvents> {
           ? `${transcribedText}\n${result.text}`
           : result.text;
       } catch (err) {
-        this.log.warn({ err }, "STT transcription failed, keeping audio attachment");
+        if (signal?.aborted) {
+          if (err instanceof Error && err.name === 'AbortError' && err.cause) {
+            this.log.warn({ err }, "STT cancellation cleanup failed");
+          }
+          throw signal.reason;
+        }
+        this.log.warn({ err: formatTranscriptionDiagnostic(err) }, "STT transcription failed, keeping audio attachment");
         this.emit(SessionEv.AGENT_EVENT, {
-          type: "error",
-          message: `Voice transcription failed: ${(err as Error).message}`,
+          type: "system_message",
+          message: formatTranscriptionWarning(err),
         });
         remainingAttachments.push(att);
       }
@@ -645,7 +977,7 @@ export class Session extends TypedEmitter<SessionEvents> {
   // Sends a special prompt to the agent to generate a short session title.
   // The session emitter is paused (excluding non-agent_event emissions) so the naming
   // prompt's output is intercepted by a capture handler instead of being forwarded to adapters.
-  private async autoName(): Promise<void> {
+  private async autoName(agentInstance: AgentInstance): Promise<void> {
     let title = "";
 
     // Temporarily remove all agent_event listeners so auto-name output
@@ -659,10 +991,10 @@ export class Session extends TypedEmitter<SessionEvents> {
     // don't reach the adapter during auto-name. The AgentInstance emitter
     // stays active — we just intercept with our capture handler.
     this.pause((event) => event !== SessionEv.AGENT_EVENT);
-    this.agentInstance.on(SessionEv.AGENT_EVENT, captureHandler);
+    agentInstance.on(SessionEv.AGENT_EVENT, captureHandler);
 
     try {
-      await this.agentInstance.prompt(
+      await agentInstance.prompt(
         "Summarize this conversation in max 5 words for a topic title. Reply ONLY with the title, nothing else.",
       );
       this.name = title.trim().slice(0, 50) || `Session ${this.id.slice(0, 6)}`;
@@ -673,7 +1005,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     } catch {
       this.name = `Session ${this.id.slice(0, 6)}`;
     } finally {
-      this.agentInstance.off(SessionEv.AGENT_EVENT, captureHandler);
+      agentInstance.off(SessionEv.AGENT_EVENT, captureHandler);
       // Discard buffered auto-name agent_events, then resume normal delivery
       this.clearBuffer();
       this.resume();
@@ -759,12 +1091,16 @@ export class Session extends TypedEmitter<SessionEvents> {
     }
   }
 
-  async updateConfigOptions(options: ConfigOption[]): Promise<void> {
+  async updateConfigOptions(options: ConfigOption[], expectedAgentGeneration?: number): Promise<void> {
     // Hook: config:beforeChange — await-able, can block
     if (this.middlewareChain) {
       const result = await this.middlewareChain.execute(Hook.CONFIG_BEFORE_CHANGE, { sessionId: this.id, configId: 'options', oldValue: this.configOptions, newValue: options }, async (p) => p);
       if (!result) return; // blocked by middleware
     }
+    if (
+      expectedAgentGeneration !== undefined &&
+      (this.agentGeneration !== expectedAgentGeneration || this.isTerminating)
+    ) return;
     this.configOptions = options;
   }
 
@@ -782,6 +1118,123 @@ export class Session extends TypedEmitter<SessionEvents> {
     return this.agentCapabilities?.sessionCapabilities?.[cap] === true;
   }
 
+  private getAgentCancellationOperation(
+    agentInstance: AgentInstance,
+    generation: number,
+  ): Promise<ObservedOperation> {
+    const existing = this._agentCancellationOps.get(agentInstance);
+    if (existing?.generation === generation) return existing.operation;
+
+    let record!: { generation: number; operation: Promise<ObservedOperation> };
+    const operation = observeOperation(Promise.resolve().then(() => agentInstance.cancel())).then((result) => {
+      // Keep a settled request shared for the rest of its generation: the prompt
+      // may ignore cancellation while repeated cancel or terminal destroy arrives.
+      // A late settlement may clean up only its own inactive record; otherwise it
+      // could delete a newer generation's operation and poison cancellation again.
+      if (
+        this.queue.currentGeneration !== generation
+        && this._agentCancellationOps.get(agentInstance) === record
+      ) {
+        this._agentCancellationOps.delete(agentInstance);
+      }
+      return result;
+    });
+    record = { generation, operation };
+    this._agentCancellationOps.set(agentInstance, record);
+    return operation;
+  }
+
+  private async requestAgentCancellation(
+    agentInstance: AgentInstance = this.agentInstance,
+    generation: number | null = this.queue.currentGeneration,
+  ): Promise<void> {
+    if (generation === null) return;
+    const result = await waitForObservedOperation(
+      this.getAgentCancellationOperation(agentInstance, generation),
+      AGENT_CANCEL_TIMEOUT_MS,
+    );
+    if (result === OPERATION_TIMEOUT) {
+      this.log.warn("Agent cancellation did not settle within 5 seconds");
+    } else if (!result.ok) {
+      this.log.warn({ err: result.error }, "Agent cancellation failed");
+    }
+  }
+
+  private async quiesceQueueForAgentSwitch(agentInstance: AgentInstance): Promise<void> {
+    const cancellation = this.queue.isProcessing && this._activePromptPhase === 'agent'
+      ? this.requestAgentCancellation(agentInstance)
+      : Promise.resolve();
+    const queueCleanup = this.queue.clear(cancellation);
+    await cancellation;
+    await this.destroyAgent(agentInstance);
+    await queueCleanup;
+  }
+
+  private assertReplacementAllowed(): void {
+    if (this.isTerminating) throw new SessionTerminatingError(this.id);
+  }
+
+  /** Share one successful/in-flight process teardown per concrete AgentInstance. */
+  private destroyAgent(agentInstance: AgentInstance): Promise<void> {
+    const existing = this._agentDestroyOps.get(agentInstance);
+    if (existing) return existing;
+
+    let shared!: Promise<void>;
+    shared = Promise.resolve()
+      .then(() => agentInstance.destroy())
+      .catch((error) => {
+        // A real teardown failure remains retryable, while concurrent callers still
+        // observe the same attempt. Successful teardown stays memoized in the WeakMap.
+        if (this._agentDestroyOps.get(agentInstance) === shared) {
+          this._agentDestroyOps.delete(agentInstance);
+        }
+        throw error;
+      });
+    this._agentDestroyOps.set(agentInstance, shared);
+    return shared;
+  }
+
+  private observeReplacementCleanup(agentInstance: AgentInstance): void {
+    this.destroyAgent(agentInstance).catch((error) => {
+      this.log.warn(
+        { err: redactNetworkSecrets(error instanceof Error ? error.message : String(error)) },
+        "Late replacement agent cleanup failed",
+      );
+    });
+  }
+
+  /**
+   * Own a replacement from factory start until guarded assignment. If destroy()
+   * wins the race, return promptly and observe/destroy any agent produced later.
+   */
+  private async createReplacementAgent(createAgent: () => Promise<AgentInstance>): Promise<AgentInstance> {
+    this.assertReplacementAllowed();
+    const creation = Promise.resolve().then(createAgent);
+    const outcome = creation.then(
+      (agent) => ({ status: 'created' as const, agent }),
+      (error: unknown) => ({ status: 'failed' as const, error }),
+    );
+    const result = await Promise.race([
+      outcome,
+      this._terminationRequested.then(() => ({ status: 'terminated' as const })),
+    ]);
+
+    if (result.status === 'terminated') {
+      // The factory may be uncooperative and settle much later. Its rejection and
+      // any eventual agent teardown remain observed without holding switch open.
+      void outcome.then((lateResult) => {
+        if (lateResult.status === 'created') this.observeReplacementCleanup(lateResult.agent);
+      });
+      throw new SessionTerminatingError(this.id);
+    }
+    if (result.status === 'failed') throw result.error;
+    if (this.isTerminating) {
+      this.observeReplacementCleanup(result.agent);
+      throw new SessionTerminatingError(this.id);
+    }
+    return result.agent;
+  }
+
   /** Cancel the current prompt. Queued prompts continue processing. Stays in active state. */
   async abortPrompt(): Promise<void> {
     // Hook: agent:beforeCancel — modifiable, can block
@@ -795,15 +1248,11 @@ export class Session extends TypedEmitter<SessionEvents> {
       // Turn is still in-flight — mark for interrupted stopReason in the finally block
       this._abortedTurnIds.add(turnId);
 
-      // Cancel agent FIRST so the orphaned processPrompt resolves before
-      // drainNext starts the next item. Timeout prevents hanging if agent
-      // is unresponsive — queue abort proceeds regardless after 5 seconds.
-      await Promise.race([
-        this.agentInstance.cancel().catch(() => {}),
-        new Promise<void>((r) => setTimeout(r, 5000)),
-      ]);
-
-      this.queue.abortCurrent();
+      const cancelRequest = this.requestAgentCancellation();
+      // Signal local preprocessing immediately, but keep queue serialization
+      // until both provider cleanup and the agent cancellation request settle.
+      const queueCleanup = this.queue.abortCurrent(cancelRequest);
+      await Promise.all([cancelRequest, queueCleanup]);
     } else if (this._lastCompletedTurnId && !this.queue.isProcessing) {
       // Turn already completed before cancel arrived — retroactively update
       // the history record so the client sees stopReason: "interrupted" on reload.
@@ -815,7 +1264,9 @@ export class Session extends TypedEmitter<SessionEvents> {
           stopReason: 'interrupted' as import('../types.js').StopReason,
           durationMs: 0,
           turnId: retroTurnId,
-        }, async (p) => p).catch(() => {});
+        }, async (p) => p).catch((hookError) => {
+          this.log.warn({ err: hookError, hook: Hook.TURN_END }, "Session hook failed");
+        });
       }
     }
 
@@ -842,13 +1293,9 @@ export class Session extends TypedEmitter<SessionEvents> {
     const turnId = this.activeTurnContext?.turnId;
     if (turnId) this._abortedTurnIds.add(turnId);
 
-    // Cancel agent first, then clear everything
-    await Promise.race([
-      this.agentInstance.cancel().catch(() => {}),
-      new Promise<void>((r) => setTimeout(r, 5000)),
-    ]);
-
-    this.queue.clear();
+    const cancelRequest = this.requestAgentCancellation();
+    const queueCleanup = this.queue.clear(cancelRequest);
+    await Promise.all([cancelRequest, queueCleanup]);
     this.log.info("Session flushed (prompt cancelled, queue cleared)");
   }
 
@@ -868,15 +1315,12 @@ export class Session extends TypedEmitter<SessionEvents> {
 
     // Cancel agent so the current processPrompt resolves and drainNext
     // picks up the promoted item. Timeout fallback if agent is unresponsive.
-    await Promise.race([
-      this.agentInstance.cancel().catch(() => {}),
-      new Promise<void>((r) => setTimeout(r, 5000)),
-    ]);
+    const cancelRequest = this.requestAgentCancellation();
 
-    // If the process didn't settle naturally (timeout), force abort
-    if (this.queue.isProcessing) {
-      this.queue.abortCurrent();
-    }
+    const queueCleanup = this.queue.isProcessing
+      ? this.queue.abortCurrent(cancelRequest)
+      : Promise.resolve();
+    await Promise.all([cancelRequest, queueCleanup]);
 
     this.log.info({ turnId }, "Prompt prioritized");
     return true;
@@ -894,6 +1338,7 @@ export class Session extends TypedEmitter<SessionEvents> {
 
   /** Switch the agent instance in-place, preserving session identity */
   async switchAgent(agentName: string, createAgent: () => Promise<AgentInstance>): Promise<void> {
+    this.assertReplacementAllowed();
     if (agentName === this.agentName) {
       throw new Error(`Already using ${agentName}`);
     }
@@ -906,49 +1351,132 @@ export class Session extends TypedEmitter<SessionEvents> {
       promptCount: this.promptCount,
     });
 
-    // Clear queued prompts and abort in-flight prompt before destroying old agent
-    this.queue.clear();
-
     // Reject any pending permission request before destroying old agent
     if (this.permissionGate.isPending) {
       this.permissionGate.reject("Agent switched");
     }
 
-    // Destroy old agent
-    await this.agentInstance.destroy();
+    const oldAgent = this.agentInstance;
+    await this.quiesceQueueForAgentSwitch(oldAgent);
+    this.assertReplacementAllowed();
 
-    // Create and wire new agent
-    const newAgent = await createAgent();
-    this.agentInstance = newAgent;
-    this.agentName = agentName;
-    this.agentSessionId = newAgent.sessionId;
-    this.promptCount = 0;
+    // Create and wire new agent. Session owns the candidate until the final
+    // synchronous lifecycle check and destroys it if terminal teardown wins.
+    const newAgent = await this.createReplacementAgent(createAgent);
+    let installed = false;
+    try {
+      this.assertReplacementAllowed();
+      this.agentInstance = newAgent;
+      this.agentName = agentName;
+      this.agentSessionId = newAgent.sessionId;
+      this.promptCount = 0;
 
-    // Hydrate ACP state from the new agent's spawn response
-    this.agentCapabilities = undefined;
-    this.configOptions = [];
-    this.latestCommands = null;
-    this.applySpawnResponse(newAgent.initialSessionResponse, newAgent.agentCapabilities);
+      // Hydrate ACP state from the new agent's spawn response
+      this.agentCapabilities = undefined;
+      this.configOptions = [];
+      this.latestCommands = null;
+      this.applySpawnResponse(newAgent.initialSessionResponse, newAgent.agentCapabilities);
+      installed = true;
+    } finally {
+      if (!installed) this.observeReplacementCleanup(newAgent);
+    }
 
     this.log.info({ from: this.agentSwitchHistory.at(-1)!.agentName, to: agentName }, "Agent switched");
   }
 
+  /** Install a rollback process without bypassing the terminal replacement guard. */
+  async restoreAgentAfterFailedSwitch(
+    agentName: string,
+    createAgent: () => Promise<AgentInstance>,
+  ): Promise<void> {
+    const rollbackAgent = await this.createReplacementAgent(createAgent);
+    let installed = false;
+    try {
+      this.assertReplacementAllowed();
+      const previous = this.agentSwitchHistory.at(-1);
+      if (!previous || previous.agentName !== agentName) {
+        throw new Error(`Cannot roll back agent switch to ${agentName}`);
+      }
+      this.agentSwitchHistory.pop();
+      this.agentInstance = rollbackAgent;
+      this.agentName = agentName;
+      this.agentSessionId = rollbackAgent.sessionId;
+      this.promptCount = previous.promptCount;
+      installed = true;
+    } finally {
+      if (!installed) this.observeReplacementCleanup(rollbackAgent);
+    }
+  }
+
   /** Tear down the session: reject pending permissions, clear queue, destroy agent subprocess. */
-  async destroy(): Promise<void> {
+  destroy(): Promise<void> {
+    this.beginTermination();
+    if (this._destroyOperation) return this._destroyOperation;
+
+    const operation = this.performDestroy();
+    const shared = operation.catch((error) => {
+      // Retry is allowed only after the shared teardown has actually failed.
+      // A manager/API deadline does not clear this promise, so repeated cancellation
+      // keeps observing the same in-flight process teardown instead of invoking it twice.
+      if (this._destroyOperation === shared) this._destroyOperation = null;
+      throw error;
+    });
+    this._destroyOperation = shared;
+    return shared;
+  }
+
+  private async performDestroy(): Promise<void> {
     this.log.info("Session destroyed");
     // Reject any pending permission promise so callers don't hang
     if (this.permissionGate.isPending) {
       this.permissionGate.reject("Session destroyed");
     }
-    // Clear queued prompts
-    this.queue.clear();
-    if (!this._destroyedAgent) {
-      await this.agentInstance.destroy();
-      this._destroyedAgent = true;
+    const agentInstance = this.agentInstance;
+    const activePromptPhase = this._activePromptPhase;
+    const cancellation = this.queue.isProcessing && activePromptPhase === 'agent'
+      ? this.requestAgentCancellation(agentInstance)
+      : Promise.resolve();
+
+    // close() is terminal: pending callers resolve immediately and drainNext() can
+    // never start another prompt. Its eventual settlement is explicitly observed,
+    // but an uncooperative processor cannot hold process teardown open forever.
+    if (!this._queueCloseOperation) {
+      this._queueCloseOperation = observeOperation(this.queue.close(cancellation));
+    }
+    if (activePromptPhase === 'preprocessing') {
+      // Local STT providers use AbortSignal for their own process/file cleanup.
+      // Preserve that ordering when cleanup cooperates, but force agent teardown
+      // after the same five-second grace if preprocessing never settles.
+      const preprocessing = await waitForObservedOperation(
+        this._queueCloseOperation,
+        AGENT_CANCEL_TIMEOUT_MS,
+      );
+      if (preprocessing === OPERATION_TIMEOUT) {
+        this.log.warn("Prompt preprocessing cleanup did not settle within 5 seconds");
+      } else if (!preprocessing.ok) {
+        throw preprocessing.error;
+      }
+    } else {
+      await cancellation;
+    }
+    await this.destroyAgent(agentInstance);
+    // Once the subprocess is gone, an ACP prompt promise may still never settle
+    // (for example, a broken adapter that ignores process exit). Release terminal
+    // queue callers while keeping all late settlements rejection-observed.
+    this.queue.releaseAfterTerminalTeardown();
+    const queueResult = await waitForObservedOperation(
+      this._queueCloseOperation,
+      QUEUE_TEARDOWN_TIMEOUT_MS,
+    );
+    if (queueResult === OPERATION_TIMEOUT) {
+      this.log.warn("Terminal prompt queue did not settle within 1 second after process teardown");
+    } else if (!queueResult.ok) {
+      throw queueResult.error;
     }
     if (!this._closedLogger) {
       await closeSessionLogger(this.log);
       this._closedLogger = true;
     }
+    this._lifecycleState = 'destroyed';
   }
 }

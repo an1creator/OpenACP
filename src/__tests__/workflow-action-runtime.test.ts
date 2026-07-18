@@ -19,7 +19,10 @@ describe('GitHub action runtime contract', () => {
     expect(new Set(setupNode)).toEqual(new Set(['v6']))
     expect(new Set(setupPnpm)).toEqual(new Set(['v6']))
     expect(fs.readFileSync('.github/workflows/ci.yml', 'utf8')).toMatch(
-      /node-version:\s*\n\s*- 20\s*\n\s*- 24/,
+      /node-version:\s*\n\s*- 22\s*\n\s*- 24/,
+    )
+    expect(fs.readFileSync('.github/workflows/publish.yml', 'utf8')).toMatch(
+      /node-version:\s*\[22, 24\]/,
     )
   })
 })

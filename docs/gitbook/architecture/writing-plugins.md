@@ -8,6 +8,9 @@ This is the **complete API reference** for building OpenACP plugins. It covers e
 >
 > **Dev Mode**: For hot-reload development workflow, see the [Dev Mode guide](../extending/dev-mode.md).
 
+Plugins target Node.js 22 or newer. Node.js 24 LTS is recommended and OpenACP's
+release gates verify Node.js 22 and 24.
+
 ---
 
 ## Plugin Structure
@@ -77,6 +80,45 @@ export default {
   },
 } satisfies OpenACPPlugin
 ```
+
+### Speech service contract
+
+Import speech types from either `@n1creator/openacp-cli` or
+`@n1creator/openacp-plugin-sdk`; both packages publish the same contract:
+
+```typescript
+import type {
+  SpeechServiceInterface,
+  STTProvider,
+  TTSProvider,
+} from '@n1creator/openacp-plugin-sdk'
+
+async function registerProviders(speech: SpeechServiceInterface) {
+  const stt: STTProvider = {
+    name: 'example-stt',
+    async transcribe(audioBuffer, mimeType, options) {
+      options?.signal?.throwIfAborted()
+      return { text: await transcribeAudio(audioBuffer, mimeType, options?.signal) }
+    },
+  }
+  speech.registerSTTProvider(stt.name, stt)
+
+  const tts: TTSProvider = {
+    name: 'example-tts',
+    async synthesize(text) {
+      return { audioBuffer: await synthesizeAudio(text), mimeType: 'audio/mpeg' }
+    },
+  }
+  speech.registerTTSProvider(tts.name, tts)
+}
+```
+
+`transcribe()` returns `STTResult`; `synthesize()` returns `TTSResult`.
+`STTOptions.signal` must abort provider requests and descendant processes, and
+the provider promise must settle only after request-owned cleanup finishes.
+The runtime supports `unregisterTTSProvider()` for external TTS teardown. It
+does not expose `textToSpeech()`, `speechToText()`, or
+`unregisterSTTProvider()`.
 
 ### Overriding a built-in
 
@@ -443,7 +485,10 @@ describe('my-plugin', () => {
     ".": "./dist/index.js"
   },
   "peerDependencies": {
-    "@n1creator/openacp-cli": ">=2026.0326.0"
+    "@n1creator/openacp-cli": ">=2026.718.1"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "keywords": ["openacp", "openacp-plugin"]
 }

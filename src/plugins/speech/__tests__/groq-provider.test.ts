@@ -65,6 +65,14 @@ describe("GroqSTT", () => {
     expect(body.get("language")).toBe("vi");
   });
 
+  it('passes prompt cancellation to the scoped fetch', async () => {
+    const scoped = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ text: 'done' }) })
+    const controller = new AbortController()
+    const provider = new GroqSTT('gsk_test', undefined, scoped as typeof fetch)
+    await provider.transcribe(Buffer.from('audio'), 'audio/ogg', { signal: controller.signal })
+    expect(scoped).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ signal: controller.signal }))
+  })
+
   it("throws on 401 with helpful message", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,

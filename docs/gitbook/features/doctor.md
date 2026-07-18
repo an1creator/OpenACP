@@ -24,6 +24,7 @@ Each check produces one or more results with a status of `pass`, `warn`, or `fai
 
 | Check | What it verifies |
 |-------|-----------------|
+| **Runtime** | The active Node.js runtime is version 22 or newer; the failure message recommends Node.js 24 LTS |
 | **Config** | Config file exists, is valid JSON, passes schema validation, and has no pending migrations |
 | **Agents** | Each configured agent's binary exists on PATH; flags a missing default agent as a failure |
 | **Telegram** | Bot token is set, the bot can reach the Telegram API, and the configured chat ID resolves to a supergroup with forum topics enabled |

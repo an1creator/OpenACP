@@ -79,12 +79,42 @@ describe('SessionManager', () => {
       expect(manager.getSession('test-1')).toBe(session)
     })
 
-    it('overwrites existing session with same id', () => {
+    it('rejects and cleans a duplicate id without overwriting the live owner', async () => {
       const s1 = createSession({ id: 'test-1' })
       const s2 = createSession({ id: 'test-1' })
       manager.registerSession(s1)
-      manager.registerSession(s2)
-      expect(manager.getSession('test-1')).toBe(s2)
+      expect(() => manager.registerSession(s2)).toThrow(
+        expect.objectContaining({ code: 'SESSION_REGISTRATION_SUPERSEDED' }),
+      )
+      expect(manager.getSession('test-1')).toBe(s1)
+      await vi.waitFor(() => expect(s2.agentInstance.destroy).toHaveBeenCalledOnce())
+      expect(s1.agentInstance.destroy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('global closing fence', () => {
+    it.each(['shutdownAll', 'destroyAll'] as const)(
+      'invalidates pending registrations synchronously on %s and rejects late candidates',
+      async (method) => {
+        const lease = manager.beginSessionRegistration('late-session')
+        const closing = manager[method]()
+        expect(lease.invalidated).toBe(true)
+
+        const late = createSession({ id: 'late-session' })
+        expect(() => manager.registerSession(late, lease)).toThrow(
+          expect.objectContaining({ code: 'SESSION_REGISTRATION_SUPERSEDED' }),
+        )
+        expect(() => manager.beginSessionRegistration('new-session')).toThrow(
+          expect.objectContaining({ code: 'SESSION_REGISTRATION_SUPERSEDED' }),
+        )
+        await closing
+        await vi.waitFor(() => expect(late.agentInstance.destroy).toHaveBeenCalledOnce())
+      },
+    )
+
+    it('shares repeated shutdown calls without flushing twice', async () => {
+      await Promise.all([manager.shutdownAll(), manager.shutdownAll()])
+      expect(store.flush).toHaveBeenCalledOnce()
     })
   })
 
@@ -240,13 +270,121 @@ describe('SessionManager', () => {
       expect(store.save).toHaveBeenCalledWith(expect.objectContaining({
         sessionId: 'sess-cancel-2',
         status: 'cancelled',
-      }))
+      }), { immediate: true })
     })
 
     it('returns a typed failure for an unknown session', async () => {
       await expect(manager.cancelSession('nonexistent')).rejects.toMatchObject({
         code: 'SESSION_NOT_FOUND',
       })
+    })
+
+    it('does not destroy on a failed terminal flush and retries from durable active state', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-cancel-flush-'))
+      const filePath = path.join(tmpDir, 'sessions.json')
+      const realStore = new JsonFileSessionStore(filePath, 30)
+      const realManager = new SessionManager(realStore)
+      const session = createSession({ id: 'flush-retry' })
+      realManager.registerSession(session)
+      await realStore.save({
+        sessionId: session.id, agentSessionId: 'agent-flush', agentName: 'claude',
+        workingDir: '/ws', channelId: 'telegram', status: 'active',
+        createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+        clientOverrides: {}, platform: {},
+      })
+      realStore.flush()
+
+      const write = vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw new Error('ENOSPC terminal flush')
+      })
+      await expect(realManager.cancelSession(session.id)).rejects.toThrow('ENOSPC terminal flush')
+      write.mockRestore()
+      expect(realStore.get(session.id)?.status).toBe('active')
+      expect(session.agentInstance.destroy).not.toHaveBeenCalled()
+      expect(JSON.parse(fs.readFileSync(filePath, 'utf8')).sessions[session.id].status).toBe('active')
+
+      const result = await realManager.cancelSession(session.id)
+      expect(result).toMatchObject({ status: 'cancelled', cleanupPending: false })
+      expect(session.agentInstance.destroy).toHaveBeenCalledOnce()
+      expect(realStore.get(session.id)?.status).toBe('cancelled')
+      realStore.destroy()
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    })
+
+    it.each(['finished', 'cancelled'] as const)(
+      'flushes an accepted debounced %s state before agent teardown',
+      async (terminalStatus) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `openacp-${terminalStatus}-flush-`))
+        const filePath = path.join(tmpDir, 'sessions.json')
+        const realStore = new JsonFileSessionStore(filePath, 30)
+        const realManager = new SessionManager(realStore)
+        const session = createSession({ id: `pending-${terminalStatus}` })
+        session.activate()
+        realManager.registerSession(session)
+        const record: SessionRecord = {
+          sessionId: session.id, agentSessionId: 'agent-pending', agentName: 'claude',
+          workingDir: '/ws', channelId: 'telegram', status: 'active',
+          createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+          clientOverrides: {}, platform: {},
+        }
+        await realStore.save(record)
+        realStore.flush()
+
+        if (terminalStatus === 'finished') session.finish('done')
+        else session.markCancelled()
+        await realStore.save({ ...record, status: terminalStatus })
+        let statusObservedDuringDestroy: string | undefined
+        vi.mocked(session.agentInstance.destroy).mockImplementation(async () => {
+          statusObservedDuringDestroy = JSON.parse(fs.readFileSync(filePath, 'utf8')).sessions[session.id].status
+        })
+
+        const result = await realManager.cancelSession(session.id)
+        expect(result).toMatchObject({ status: terminalStatus, alreadyTerminal: true })
+        expect(statusObservedDuringDestroy).toBe(terminalStatus)
+        expect(JSON.parse(fs.readFileSync(filePath, 'utf8')).sessions[session.id].status).toBe(terminalStatus)
+
+        realStore.destroy()
+        const reloaded = new JsonFileSessionStore(filePath, 30)
+        expect(reloaded.get(session.id)?.status).toBe(terminalStatus)
+        reloaded.destroy()
+        fs.rmSync(tmpDir, { recursive: true, force: true })
+      },
+    )
+
+    it('keeps a debounced terminal winner retryable when its forced flush hits ENOSPC', async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-pending-terminal-retry-'))
+      const filePath = path.join(tmpDir, 'sessions.json')
+      const realStore = new JsonFileSessionStore(filePath, 30)
+      const realManager = new SessionManager(realStore)
+      const session = createSession({ id: 'pending-terminal-retry' })
+      session.activate()
+      realManager.registerSession(session)
+      const record: SessionRecord = {
+        sessionId: session.id, agentSessionId: 'agent-pending', agentName: 'claude',
+        workingDir: '/ws', channelId: 'telegram', status: 'active',
+        createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+        clientOverrides: {}, platform: {},
+      }
+      await realStore.save(record)
+      realStore.flush()
+      session.finish('done')
+      await realStore.save({ ...record, status: 'finished' })
+
+      const write = vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw new Error('ENOSPC pending terminal')
+      })
+      await expect(realManager.cancelSession(session.id)).rejects.toThrow('ENOSPC pending terminal')
+      write.mockRestore()
+      expect(realStore.get(session.id)?.status).toBe('finished')
+      expect(JSON.parse(fs.readFileSync(filePath, 'utf8')).sessions[session.id].status).toBe('active')
+      expect(session.agentInstance.destroy).not.toHaveBeenCalled()
+
+      const retry = await realManager.cancelSession(session.id)
+      expect(retry).toMatchObject({ status: 'finished', alreadyTerminal: true })
+      expect(session.agentInstance.destroy).toHaveBeenCalledOnce()
+      expect(JSON.parse(fs.readFileSync(filePath, 'utf8')).sessions[session.id].status).toBe('finished')
+      realStore.destroy()
+      fs.rmSync(tmpDir, { recursive: true, force: true })
     })
 
     it('cancels a freshly-created initializing session', async () => {
@@ -351,7 +489,6 @@ describe('SessionManager', () => {
     it('persists cancellation before failed destroy and retries cleanup idempotently', async () => {
       const session = createSession({ id: 'durable-cancel' })
       session.activate()
-      const abortPrompt = vi.spyOn(session, 'abortPrompt').mockResolvedValue()
       session.agentInstance.destroy = vi.fn()
         .mockRejectedValueOnce(new Error('cleanup via http://user:secret@proxy.test failed'))
         .mockResolvedValueOnce(undefined)
@@ -370,7 +507,10 @@ describe('SessionManager', () => {
       const first = await manager.cancelSession(session.id)
       expect(first).toMatchObject({ cancelled: true, status: 'cancelled', cleanupPending: true })
       expect(store.get(session.id)?.status).toBe('cancelled')
-      expect(store.flush).toHaveBeenCalled()
+      expect(store.save).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: session.id, status: 'cancelled' }),
+        { immediate: true },
+      )
       expect(manager.getSession(session.id)).toBe(session)
       expect(store.get('unrelated')?.status).toBe('active')
 
@@ -383,10 +523,67 @@ describe('SessionManager', () => {
 
       const second = await manager.cancelSession(session.id)
       expect(second).toMatchObject({ cancelled: false, alreadyTerminal: true, status: 'cancelled', cleanupPending: false })
-      expect(abortPrompt).toHaveBeenCalledOnce()
       expect(session.agentInstance.destroy).toHaveBeenCalledTimes(2)
       expect(manager.getSession(session.id)).toBeUndefined()
       expect(store.get('unrelated')?.status).toBe('active')
+    })
+
+    it('bounds cancellation while sharing never-settling ACP teardown across callers and retries', async () => {
+      vi.useFakeTimers()
+      try {
+        let finishDestroy!: () => void
+        const session = createSession({ id: 'bounded-cancel' })
+        session.name = 'skip-autoname'
+        session.agentInstance.prompt = vi.fn(() => new Promise<void>(() => {}))
+        session.agentInstance.cancel = vi.fn(() => new Promise<void>(() => {}))
+        session.agentInstance.destroy = vi.fn(() => new Promise<void>((resolve) => { finishDestroy = resolve }))
+        manager.registerSession(session)
+        await store.save({
+          sessionId: session.id, agentSessionId: 'bounded-agent', agentName: 'claude',
+          workingDir: '/ws', channelId: 'api', status: 'active', createdAt: new Date().toISOString(),
+          lastActiveAt: new Date().toISOString(), clientOverrides: {}, platform: {},
+        })
+
+        const prompt = session.enqueuePrompt('never settles')
+        await vi.waitFor(() => expect(session.agentInstance.prompt).toHaveBeenCalledOnce())
+        const first = manager.cancelSession(session.id)
+        const concurrent = manager.cancelSession(session.id)
+
+        await vi.advanceTimersByTimeAsync(5_000)
+        expect(session.agentInstance.cancel).toHaveBeenCalledOnce()
+        expect(session.agentInstance.destroy).toHaveBeenCalledOnce()
+
+        await vi.advanceTimersByTimeAsync(4_000)
+        const [firstResult, concurrentResult] = await Promise.all([first, concurrent])
+        expect(firstResult).toEqual(concurrentResult)
+        expect(firstResult).toMatchObject({
+          cancelled: true,
+          status: 'cancelled',
+          cleanupPending: true,
+        })
+        expect(manager.getSession(session.id)).toBe(session)
+
+        // A retry observes the same Session.destroy promise. It must not issue a
+        // second cancel or process destroy while the first teardown is unresolved.
+        const retry = manager.cancelSession(session.id)
+        finishDestroy()
+        await vi.advanceTimersByTimeAsync(1_000)
+        const retryResult = await retry
+        expect(retryResult).toMatchObject({
+          cancelled: false,
+          alreadyTerminal: true,
+          cleanupPending: false,
+        })
+        expect(session.agentInstance.cancel).toHaveBeenCalledOnce()
+        expect(session.agentInstance.destroy).toHaveBeenCalledOnce()
+        expect(manager.getSession(session.id)).toBeUndefined()
+
+        // Once forced process teardown completes, terminal queue callers settle;
+        // the late ACP promise remains observed and cannot drain or reopen.
+        await prompt
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 
@@ -705,6 +902,35 @@ describe('SessionManager', () => {
     expect(summaries[0].id).toBe('live-sess')
     // lastActiveAt comes from store record
     expect(summaries[0].lastActiveAt).toBe('2026-04-03T10:00:00Z')
+  })
+
+  it('reports a durable terminal winner as non-live while stale cleanup remains in memory', async () => {
+    const store = mockStore()
+    const manager = new SessionManager(store)
+    const session = createSession({ id: 'terminal-winner', channelId: 'telegram' })
+    session.activate()
+    manager.registerSession(session)
+    await store.save({
+      sessionId: session.id,
+      agentSessionId: 'agent-terminal',
+      agentName: 'claude',
+      workingDir: '/workspace',
+      channelId: 'telegram',
+      status: 'finished',
+      createdAt: session.createdAt.toISOString(),
+      lastActiveAt: '2026-07-18T00:00:00Z',
+      platform: {},
+    })
+
+    expect(manager.listAllSessions()).toEqual([
+      expect.objectContaining({
+        id: session.id,
+        status: 'finished',
+        isLive: false,
+        queueDepth: 0,
+        promptRunning: false,
+      }),
+    ])
   })
 
   it('returns both live and historical when mixed', async () => {

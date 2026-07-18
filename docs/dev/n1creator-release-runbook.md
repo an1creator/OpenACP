@@ -8,21 +8,49 @@ The maintained fork publishes two public packages from
 
 ## Pre-release verification
 
-Run from the repository root:
+Run from the repository root on Node.js 22 or 24:
 
 ```bash
+node -e "const major=Number(process.versions.node.split('.')[0]); if (major < 22) throw new Error('Node.js 22 or newer is required')"
 pnpm install --frozen-lockfile
 pnpm test
 pnpm build
-pnpm build:publish
-npm pack --dry-run ./dist-publish
-npm pack --dry-run ./dist-publish-sdk
+pnpm verify:publish-artifacts
 ```
+
+The verifier rebuilds both packages twice and writes the byte-for-byte checked
+tarballs plus their hashes to `release-artifacts/`. Publish those tarballs; do
+not package `dist-publish*` again after verification.
+
+CI is the authoritative release gate and runs tests and the build on Node.js 22
+and 24. To reproduce both clean runtimes locally without changing the host
+installation, run the same matrix in Docker:
+
+```bash
+for NODE_MAJOR in 22 24; do
+  docker run --rm -e CI=1 -e NODE_MAJOR="$NODE_MAJOR" -v "$PWD:/src:ro" "node:${NODE_MAJOR}-bookworm" bash -lc '
+    mkdir /work
+    (cd /src && tar --exclude=node_modules --exclude=dist --exclude=dist-publish --exclude=dist-publish-sdk --exclude=release-artifacts -cf - .) | tar -xf - -C /work
+    cd /work
+    corepack enable
+    corepack pnpm install --frozen-lockfile
+    corepack pnpm test
+    corepack pnpm build
+    if [ "$NODE_MAJOR" = 24 ]; then
+      npm install --global npm@^11.16.0
+      corepack pnpm verify:publish-artifacts
+    fi
+  '
+done
+```
+
+Node.js 20 is intentionally absent: Claude Agent ACP 0.59.0 requires Node.js
+22, so Node.js 20 is outside the supported product and release matrix.
 
 The root and SDK versions must match the release tag. Version format is
 `YYYY.MMDD.patch`, with the patch counter restarting at `1` on each new calendar
 day. `CHANGELOG.md` must contain a heading beginning with the exact version (for
-example, `## 2026.713.2 - 2026-07-13`). The tag commit must be reachable from
+example, `## <version> - YYYY-MM-DD`). The tag commit must be reachable from
 `origin/main`.
 
 ## First publication
@@ -31,8 +59,10 @@ A brand-new scoped package must be published once by the npm account owner with
 2FA, or with a granular token that is explicitly allowed to bypass 2FA:
 
 ```bash
-npm publish ./dist-publish --access public
-npm publish ./dist-publish-sdk --access public
+pnpm verify:publish-artifacts
+VERSION="$(node -p "require('./package.json').version")"
+npm publish "./release-artifacts/n1creator-openacp-cli-${VERSION}.tgz" --access public
+npm publish "./release-artifacts/n1creator-openacp-plugin-sdk-${VERSION}.tgz" --access public
 ```
 
 Never store an npm password, OTP, or long-lived write token in the repository.
@@ -56,7 +86,9 @@ provenance for the release.
 Push the verified commit to `main`, then create and push the matching tag:
 
 ```bash
-VERSION=2026.713.2
+VERSION="$(node -p "require('./package.json').version")"
+test "$(node -p "require('./packages/plugin-sdk/package.json').version")" = "$VERSION"
+grep -Fq "## ${VERSION} - " CHANGELOG.md
 git tag "v${VERSION}"
 git push origin main
 git push origin "v${VERSION}"
@@ -92,7 +124,11 @@ rerun the same tag. Never add a write token to Actions as a workaround.
 
 ## Host rollout
 
+Confirm the host reports Node.js 22 or newer before installing the package;
+Node.js 24 LTS is recommended:
+
 ```bash
+node --version
 npm uninstall -g @openacp/cli
 npm install -g @n1creator/openacp-cli@latest
 openacp --dir ~/openacp-workspace restart

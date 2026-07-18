@@ -2,6 +2,28 @@ import { describe, it, expect } from "vitest";
 import { formatUsage, renderToolCard, splitToolCardText } from "../formatting.js";
 import type { ToolCardSnapshot } from "../../../core/adapter-primitives/primitives/tool-card-state.js";
 import type { ToolDisplaySpec } from "../../../core/adapter-primitives/display-spec-builder.js";
+import { TelegramRenderer } from '../renderer.js';
+
+describe('TelegramRenderer system warnings', () => {
+  it('escapes nonfatal transcription diagnostics for HTML delivery', () => {
+    const rendered = new TelegramRenderer().renderSystemMessage({
+      type: 'system_message', text: '⚠️ Voice transcription failed: runtime <unavailable> & retry',
+    });
+    expect(rendered).toEqual({
+      body: '⚠️ Voice transcription failed: runtime &lt;unavailable&gt; &amp; retry',
+      format: 'html',
+    });
+  });
+
+  it('keeps the bounded worst-case transcription warning within Telegram limits', () => {
+    const rendered = new TelegramRenderer().renderSystemMessage({
+      type: 'system_message',
+      text: `⚠️ Voice transcription failed; the original audio was kept and will be passed to the agent. ${'&'.repeat(700)}`,
+    });
+
+    expect(rendered.body.length).toBeLessThanOrEqual(4_096);
+  });
+});
 
 function makeSpec(overrides: Partial<ToolDisplaySpec> = {}): ToolDisplaySpec {
   return {

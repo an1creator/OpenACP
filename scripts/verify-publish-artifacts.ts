@@ -1,15 +1,32 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pathToFileURL } from 'node:url'
+import { gunzipSync } from 'node:zlib'
+import { runProjectPnpm } from './project-pnpm.js'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const publishDirs = ['dist-publish', 'dist-publish-sdk'] as const
+const releaseArtifactsDir = path.join(root, 'release-artifacts')
 
 interface FileRecord { path: string; mode: number; size: number; sha256: string }
 interface PackRecord { path: string; mode: number; size: number }
+interface PackedArtifact {
+  name: string
+  version: string
+  filename: string
+  size: number
+  unpackedSize: number
+  shasum: string
+  integrity: string
+  entryCount: number
+  files: PackRecord[]
+  sha256: string
+  tarball: string
+}
 
 function filesBelow(directory: string, relative = ''): string[] {
   return fs.readdirSync(path.join(directory, relative), { withFileTypes: true })
@@ -38,8 +55,120 @@ function packManifest(directory: string): PackRecord[] {
     cwd: root,
     encoding: 'utf8',
   })
-  const pack = JSON.parse(output) as Array<{ files: PackRecord[] }>
-  return pack[0].files.map(({ path: file, mode, size }) => ({ path: file, mode, size }))
+  const parsed = JSON.parse(output) as Array<{ files: PackRecord[] }> | Record<string, { files: PackRecord[] }>
+  const pack = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0]
+  if (!pack?.files) throw new Error(`npm pack returned no file manifest for ${directory}`)
+  return pack.files
+    .map(({ path: file, mode, size }) => ({ path: file, mode, size }))
+    .sort((a, b) => a.path.localeCompare(b.path))
+}
+
+function tarString(header: Buffer, offset: number, length: number): string {
+  const field = header.subarray(offset, offset + length)
+  const terminator = field.indexOf(0)
+  return field.subarray(0, terminator === -1 ? field.length : terminator).toString('utf8')
+}
+
+function tarOctal(header: Buffer, offset: number, length: number): number {
+  const raw = tarString(header, offset, length).trim()
+  if (!/^[0-7]+$/.test(raw)) throw new Error(`Invalid tar octal field: ${JSON.stringify(raw)}`)
+  return Number.parseInt(raw, 8)
+}
+
+function tarManifest(content: Buffer): PackRecord[] {
+  const archive = gunzipSync(content)
+  const files: PackRecord[] = []
+  for (let offset = 0; offset + 512 <= archive.length;) {
+    const header = archive.subarray(offset, offset + 512)
+    if (header.every((byte) => byte === 0)) break
+    const name = tarString(header, 0, 100)
+    const prefix = tarString(header, 345, 155)
+    const archivedPath = prefix ? `${prefix}/${name}` : name
+    const size = tarOctal(header, 124, 12)
+    const type = String.fromCharCode(header[156] || 48)
+    if (type === '0') {
+      if (!archivedPath.startsWith('package/')) {
+        throw new Error(`npm tarball contains a file outside package/: ${archivedPath}`)
+      }
+      files.push({
+        path: archivedPath.slice('package/'.length),
+        mode: tarOctal(header, 100, 8) & 0o777,
+        size,
+      })
+    }
+    offset += 512 + Math.ceil(size / 512) * 512
+  }
+  return files.sort((a, b) => a.path.localeCompare(b.path))
+}
+
+function assertCanonicalPackModes(source: typeof publishDirs[number], files: PackRecord[]): void {
+  const executablePaths = source === 'dist-publish'
+    ? new Set(['dist/cli.js', 'dist/speech/transcribe_audio.sh'])
+    : new Set<string>()
+  for (const file of files) {
+    const expected = executablePaths.has(file.path) ? 0o755 : 0o644
+    if (file.mode !== expected) {
+      throw new Error(`${source} tar header has mode ${file.mode.toString(8)} for ${file.path}; expected ${expected.toString(8)}`)
+    }
+  }
+}
+
+function packArtifact(source: typeof publishDirs[number], destination: string): PackedArtifact {
+  fs.mkdirSync(destination, { recursive: true })
+  const directory = `./${source}`
+  const output = execFileSync('npm', [
+    'pack', '--json', '--pack-destination', destination, directory,
+  ], { cwd: root, encoding: 'utf8' })
+  const parsed = JSON.parse(output) as Array<Omit<PackedArtifact, 'sha256' | 'tarball'>>
+    | Record<string, Omit<PackedArtifact, 'sha256' | 'tarball'>>
+  const packs = Array.isArray(parsed) ? parsed : Object.values(parsed)
+  if (packs.length !== 1) throw new Error(`npm pack returned ${packs.length} records for ${directory}`)
+  const pack = packs[0]
+  if (!pack?.filename || !pack.files) throw new Error(`npm pack produced no artifact for ${directory}`)
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, source, 'package.json'), 'utf8')) as {
+    name?: string
+    version?: string
+  }
+  if (pack.name !== manifest.name || pack.version !== manifest.version) {
+    throw new Error(`npm pack returned the wrong package identity for ${directory}`)
+  }
+  const expectedFilename = `${manifest.name?.replace(/^@/, '').replaceAll('/', '-')}-${manifest.version}.tgz`
+  if (pack.filename !== expectedFilename || path.basename(pack.filename) !== pack.filename
+    || path.isAbsolute(pack.filename) || /[\\/]/.test(pack.filename)) {
+    throw new Error(`npm pack returned an unsafe or unexpected filename for ${directory}`)
+  }
+  const resolvedDestination = path.resolve(destination)
+  const tarball = path.resolve(resolvedDestination, pack.filename)
+  if (path.dirname(tarball) !== resolvedDestination) {
+    throw new Error(`npm pack artifact escaped its destination for ${directory}`)
+  }
+  const content = fs.readFileSync(tarball)
+  const files = pack.files
+    .map(({ path: file, mode, size }) => ({ path: file, mode, size }))
+    .sort((a, b) => a.path.localeCompare(b.path))
+  const archivedFiles = tarManifest(content)
+  if (JSON.stringify(files) !== JSON.stringify(archivedFiles)) {
+    throw new Error(`${source} npm JSON manifest differs from its actual tar headers`)
+  }
+  assertCanonicalPackModes(source, archivedFiles)
+  return {
+    name: pack.name,
+    version: pack.version,
+    filename: pack.filename,
+    size: pack.size,
+    unpackedSize: pack.unpackedSize,
+    shasum: pack.shasum,
+    integrity: pack.integrity,
+    entryCount: pack.entryCount,
+    files,
+    sha256: createHash('sha256').update(content).digest('hex'),
+    tarball,
+  }
+}
+
+function comparablePack(pack: PackedArtifact): Omit<PackedArtifact, 'tarball'> {
+  const { tarball: _tarball, ...comparable } = pack
+  return comparable
 }
 
 function assertPackAllowlist(name: typeof publishDirs[number], files: PackRecord[]): void {
@@ -54,6 +183,56 @@ function assertPackAllowlist(name: typeof publishDirs[number], files: PackRecord
   }
 }
 
+function assertPackagedSpeechRuntime(files: PackRecord[]): void {
+  const source = path.join(root, 'src', 'plugins', 'speech', 'scripts', 'transcribe_audio.sh')
+  const packaged = path.join(root, 'dist-publish', 'dist', 'speech', 'transcribe_audio.sh')
+  if (!fs.existsSync(packaged)) throw new Error('Packaged local Whisper runtime is missing')
+  if (!fs.readFileSync(source).equals(fs.readFileSync(packaged))) {
+    throw new Error('Packaged local Whisper runtime differs byte-for-byte from source')
+  }
+  if ((fs.statSync(packaged).mode & 0o111) === 0) {
+    throw new Error('Packaged local Whisper runtime is not executable')
+  }
+  const packedRuntime = files.find((file) => file.path === 'dist/speech/transcribe_audio.sh')
+  if (!packedRuntime) throw new Error('npm pack omits the local Whisper runtime')
+  if ((packedRuntime.mode & 0o111) === 0) {
+    throw new Error('npm pack strips the local Whisper runtime executable mode')
+  }
+}
+
+function assertPackagedRegistrySnapshot(): void {
+  const sourcePath = path.join(root, 'src', 'data', 'registry-snapshot.json')
+  const packagedPath = path.join(root, 'dist-publish', 'dist', 'data', 'registry-snapshot.json')
+  const source = fs.readFileSync(sourcePath)
+  const packaged = fs.readFileSync(packagedPath)
+  if (!source.equals(packaged)) {
+    throw new Error('Packaged ACP registry snapshot differs byte-for-byte from source')
+  }
+  const sourceHash = createHash('sha256').update(source).digest('hex')
+  if (sourceHash !== '493e1fba107d69a3bedc2201e30c5c4fd6d9fcfdf378b18c7172982d2bd68af1') {
+    throw new Error('ACP registry snapshot differs from the reviewed official release snapshot')
+  }
+
+  const registry = JSON.parse(source.toString('utf8')) as {
+    agents?: Array<{ id?: string; version?: string; distribution?: { npx?: { package?: string } } }>
+  }
+  if (!Array.isArray(registry.agents) || registry.agents.length !== 38) {
+    throw new Error('ACP registry snapshot must contain the reviewed 38-agent release set')
+  }
+  const expected = new Map([
+    ['auggie', ['0.33.0', '@augmentcode/auggie@0.33.0']],
+    ['codex-acp', ['1.1.4', '@agentclientprotocol/codex-acp@1.1.4']],
+    ['grok-build', ['0.2.104', '@xai-official/grok@0.2.104']],
+    ['factory-droid', ['0.175.0', 'droid@0.175.0']],
+  ])
+  for (const [id, [version, packageName]] of expected) {
+    const agent = registry.agents.find((candidate) => candidate.id === id)
+    if (agent?.version !== version || agent.distribution?.npx?.package !== packageName) {
+      throw new Error(`ACP registry snapshot has unexpected ${id} release metadata`)
+    }
+  }
+}
+
 function dirtyPublishRoots(marker: string): void {
   for (const name of publishDirs) {
     const directory = path.join(root, name)
@@ -61,10 +240,41 @@ function dirtyPublishRoots(marker: string): void {
     fs.writeFileSync(path.join(directory, `${marker}.stale`), marker)
     fs.writeFileSync(path.join(directory, 'dist', 'dist', `${marker}.stale`), marker)
   }
+  const rootDist = path.join(root, 'dist')
+  fs.mkdirSync(rootDist, { recursive: true })
+  fs.writeFileSync(path.join(rootDist, `${marker}.stale.d.ts`), `export type ${marker}Stale = true\n`)
+}
+
+function assertRootTypesWereRebuilt(): void {
+  for (const marker of ['first', 'second']) {
+    if (fs.existsSync(path.join(root, 'dist', `${marker}.stale.d.ts`))) {
+      throw new Error(`Publish build retained stale root declarations from ${marker}`)
+    }
+  }
 }
 
 function build(): void {
-  execFileSync('pnpm', ['build:publish'], { cwd: root, stdio: 'inherit' })
+  runProjectPnpm(root, ['build:publish'])
+}
+
+function assertPublishedSpeechContract(): void {
+  runProjectPnpm(root, [
+    'exec',
+    'tsc',
+    '--project',
+    'scripts/type-tests/tsconfig.published-speech-plugin.json',
+  ])
+}
+
+function assertPublishedNodePolicy(): void {
+  for (const name of publishDirs) {
+    const manifest = JSON.parse(fs.readFileSync(path.join(root, name, 'package.json'), 'utf8')) as {
+      engines?: { node?: string }
+    }
+    if (manifest.engines?.node !== '>=22') {
+      throw new Error(`${name} must publish with engines.node >=22`)
+    }
+  }
 }
 
 function exactKeys(value: Record<string, unknown>, expected: string[], label: string): void {
@@ -118,7 +328,7 @@ async function assertPackagedProxyContract(): Promise<void> {
   assertPluginCatalog(JSON.parse(packagedCatalog.toString('utf8')))
   if (createHash('sha256').update(sourceCatalog).digest('hex') !== createHash('sha256').update(packagedCatalog).digest('hex')) throw new Error('Packaged plugin catalog SHA-256 mismatch')
   assertRetiredSurfaceAbsent()
-  const workspace = fs.mkdtempSync(path.join(root, '.verify-proxy-help-'))
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-verify-proxy-help-'))
   const env = { ...process.env, HOME: workspace, OPENACP_HOME: workspace }
   try {
     const mainHelp = execFileSync(process.execPath, [cli, '--help'], {
@@ -268,31 +478,102 @@ async function assertPackagedProxyContract(): Promise<void> {
   }
 }
 
-dirtyPublishRoots('first')
-build()
-await assertPackagedProxyContract()
-const firstArtifacts = Object.fromEntries(publishDirs.map((name) => [name, artifactManifest(path.join(root, name))]))
-const firstPacks = Object.fromEntries(publishDirs.map((name) => {
-  const manifest = packManifest(`./${name}`)
-  assertPackAllowlist(name, manifest)
-  return [name, manifest]
-}))
+fs.rmSync(releaseArtifactsDir, { recursive: true, force: true })
+const firstPackDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-first-pack-'))
+const stagingArtifactsDir = fs.mkdtempSync(path.join(
+  path.dirname(root),
+  `.${path.basename(root)}-release-artifacts-staging-`,
+))
+let publishedVerifiedArtifacts = false
 
-dirtyPublishRoots('second')
-build()
-await assertPackagedProxyContract()
-const secondArtifacts = Object.fromEntries(publishDirs.map((name) => [name, artifactManifest(path.join(root, name))]))
-const secondPacks = Object.fromEntries(publishDirs.map((name) => {
-  const manifest = packManifest(`./${name}`)
-  assertPackAllowlist(name, manifest)
-  return [name, manifest]
-}))
+try {
+  dirtyPublishRoots('first')
+  build()
+  assertRootTypesWereRebuilt()
+  assertPublishedNodePolicy()
+  assertPublishedSpeechContract()
+  assertPackagedRegistrySnapshot()
+  await assertPackagedProxyContract()
+  const firstArtifacts = Object.fromEntries(publishDirs.map((name) => [name, artifactManifest(path.join(root, name))]))
+  const firstPacks = Object.fromEntries(publishDirs.map((name) => {
+    const manifest = packManifest(`./${name}`)
+    assertPackAllowlist(name, manifest)
+    if (name === 'dist-publish') assertPackagedSpeechRuntime(manifest)
+    return [name, manifest]
+  }))
+  const firstTarballs = Object.fromEntries(publishDirs.map((name) => [
+    name,
+    packArtifact(name, firstPackDir),
+  ])) as Record<typeof publishDirs[number], PackedArtifact>
 
-if (JSON.stringify(firstArtifacts) !== JSON.stringify(secondArtifacts)) {
-  throw new Error('Repeated publish builds produced different file/hash manifests')
+  dirtyPublishRoots('second')
+  build()
+  assertRootTypesWereRebuilt()
+  assertPublishedNodePolicy()
+  assertPublishedSpeechContract()
+  assertPackagedRegistrySnapshot()
+  await assertPackagedProxyContract()
+  const secondArtifacts = Object.fromEntries(publishDirs.map((name) => [name, artifactManifest(path.join(root, name))]))
+  const secondPacks = Object.fromEntries(publishDirs.map((name) => {
+    const manifest = packManifest(`./${name}`)
+    assertPackAllowlist(name, manifest)
+    if (name === 'dist-publish') assertPackagedSpeechRuntime(manifest)
+    return [name, manifest]
+  }))
+  const releaseTarballs = {} as Record<typeof publishDirs[number], PackedArtifact>
+  for (const name of publishDirs) {
+    releaseTarballs[name] = packArtifact(name, stagingArtifactsDir)
+    if (name === publishDirs[0]
+      && process.env.OPENACP_VERIFY_PUBLISH_FAIL_AFTER_FIRST_RELEASE_PACK === '1') {
+      throw new Error('Injected publish verification failure after the first staged release pack')
+    }
+  }
+
+  if (JSON.stringify(firstArtifacts) !== JSON.stringify(secondArtifacts)) {
+    throw new Error('Repeated publish builds produced different file/hash manifests')
+  }
+  if (JSON.stringify(firstPacks) !== JSON.stringify(secondPacks)) {
+    throw new Error('Repeated publish builds produced different npm pack manifests')
+  }
+
+  for (const name of publishDirs) {
+    const firstTarball = firstTarballs[name]
+    const releaseTarball = releaseTarballs[name]
+    if (JSON.stringify(firstPacks[name]) !== JSON.stringify(releaseTarball.files)) {
+      throw new Error(`${name} verified dry-run manifest differs from the release tarball manifest`)
+    }
+    if (JSON.stringify(comparablePack(firstTarball)) !== JSON.stringify(comparablePack(releaseTarball))) {
+      throw new Error(`${name} repeated builds produced different npm tarball metadata`)
+    }
+    if (!fs.readFileSync(firstTarball.tarball).equals(fs.readFileSync(releaseTarball.tarball))) {
+      throw new Error(`${name} repeated builds produced different npm tarball bytes`)
+    }
+  }
+
+  const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version as string
+  const npmVersion = execFileSync('npm', ['--version'], { cwd: root, encoding: 'utf8' }).trim()
+  const releaseManifest = {
+    schemaVersion: 1,
+    version,
+    npmVersion,
+    packages: publishDirs.map((source) => {
+      const { tarball: _tarball, files: _files, ...artifact } = releaseTarballs[source]
+      return { source, ...artifact }
+    }),
+  }
+  fs.writeFileSync(
+    path.join(stagingArtifactsDir, 'manifest.json'),
+    `${JSON.stringify(releaseManifest, null, 2)}\n`,
+  )
+  fs.renameSync(stagingArtifactsDir, releaseArtifactsDir)
+  publishedVerifiedArtifacts = true
+
+  console.log(`✅ Publish builds and npm tarballs are clean, deterministic, and verified`)
+  console.log(`Verified release artifacts: ${path.relative(root, releaseArtifactsDir)}/`)
+} finally {
+  fs.rmSync(firstPackDir, { recursive: true, force: true })
+  fs.rmSync(stagingArtifactsDir, { recursive: true, force: true })
+  if (!publishedVerifiedArtifacts) {
+    fs.rmSync(releaseArtifactsDir, { recursive: true, force: true })
+  }
 }
-if (JSON.stringify(firstPacks) !== JSON.stringify(secondPacks)) {
-  throw new Error('Repeated publish builds produced different npm pack manifests')
-}
-
-console.log('✅ Publish builds are clean and deterministic; file hashes and npm pack manifests match')

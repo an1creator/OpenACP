@@ -14,9 +14,11 @@ import { daemonCheck } from "./checks/daemon.js";
 import { tunnelCheck } from "./checks/tunnel.js";
 import { inspectDaemonProxyEnvironment, proxyCheck } from './checks/proxy.js';
 import { speechCheck } from './checks/speech.js';
+import { runtimeCheck } from './checks/runtime.js';
 
 /** All registered checks, sorted by order before execution. */
 const ALL_CHECKS: DoctorCheck[] = [
+  runtimeCheck,
   configCheck,
   agentsCheck,
   telegramCheck,

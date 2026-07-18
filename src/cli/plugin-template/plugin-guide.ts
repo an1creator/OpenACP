@@ -26,7 +26,7 @@ src/
   index.ts              — Plugin entry point (exports OpenACPPlugin object)
   __tests__/
     index.test.ts       — Tests using Vitest + @n1creator/openacp-plugin-sdk/testing
-package.json            — npm package config with engines.openacp constraint
+package.json            — npm package config with Node.js and OpenACP engine constraints
 tsconfig.json           — TypeScript strict mode, ES2022, NodeNext
 CLAUDE.md               — Full technical reference for AI coding agents
 PLUGIN_GUIDE.md         — This file
@@ -93,6 +93,21 @@ async setup(ctx: PluginContext) {
 
 Other plugins access it with \`ctx.getService<MyServiceType>('my-service')\`.
 
+## Adapter Plugins
+
+Adapter plugins implement the exported \`IChannelAdapter\` contract. On threaded
+platforms, \`createSessionThread(sessionId, name)\` may receive an empty
+\`sessionId\` because Core creates the remote thread before agent startup.
+Return the platform thread ID and optionally implement
+\`deleteSessionThreadById(threadId)\` so Core can remove that remote resource if
+startup or the initial durable session write fails. The method is optional for
+backward compatibility; when a session exists, Core can still fall back to
+\`deleteSessionThread(sessionId)\`.
+
+When implementing an \`STTProvider\`, pass request options through to external calls and honor \`options.signal\`. Abort promptly, terminate descendant work, release temporary resources, and reject only after cleanup completes. OpenACP waits for the provider promise before it drains the next queued prompt.
+
+The runtime speech service exposes result-returning \`synthesize()\`, \`transcribe()\`, provider registration, TTS provider teardown, and availability checks. It does not expose \`textToSpeech()\`, \`speechToText()\`, or \`unregisterSTTProvider()\`. Only the SDK speech test mock retains the two deprecated conversion aliases for test-suite compatibility until the next major version.
+
 ## Adding Middleware
 
 Intercept and modify message flows. Requires \`middleware:register\` permission.
@@ -110,6 +125,8 @@ async setup(ctx: PluginContext) {
   })
 }
 \`\`\`
+
+The read-only \`turn:start\` hook runs before local preprocessing such as speech transcription. Its \`promptText\` is therefore the pre-STT prompt; use later agent events when a plugin needs the generated transcript.
 
 ## Handling Settings
 

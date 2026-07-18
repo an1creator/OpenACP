@@ -25,7 +25,15 @@ describe('binary download through real scoped transport', () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const address = server.address() as { port: number }
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-binary-fetch-')); roots.push(root)
-    const proxy = new ProxyService(root)
+    const connectivityTarget = `http://127.0.0.1:${address.port}/connectivity`
+    const proxy = new ProxyService(root, undefined, undefined, async (fetcher) => {
+      const check = await fetcher(connectivityTarget)
+      try {
+        if (!check.ok) throw new Error(`Connectivity check returned HTTP ${check.status}`)
+      } finally {
+        await check.arrayBuffer()
+      }
+    })
     await proxy.setRoute('services.agentRegistry', 'direct')
     const response = await proxy.createFetch('services.agentRegistry')(`http://127.0.0.1:${address.port}/agent.tar.gz`)
     expect(response.body?.getReader).toBeTypeOf('function')

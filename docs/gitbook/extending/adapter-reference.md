@@ -18,14 +18,21 @@ Complete API reference for the `ChannelAdapter` abstract class and the types it 
 | `createSessionThread` | `(sessionId: string, name: string) => Promise<string>` | Create a platform thread/channel for a new session. Returns the platform thread ID. |
 | `renameSessionThread` | `(sessionId: string, newName: string) => Promise<void>` | Rename the platform thread after auto-naming resolves. |
 
-### Optional (no-op defaults provided)
+### Optional
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `deleteSessionThread` | `(sessionId: string) => Promise<void>` | Delete the platform thread when a session is cleaned up. |
+| `deleteSessionThreadById` | `(threadId: string) => Promise<void>` | Delete a thread created before the initial session record is durable. Recommended when `createSessionThread` creates a remote resource. |
 | `sendSkillCommands` | `(sessionId: string, commands: AgentCommand[]) => Promise<void>` | Register dynamic slash commands or menu entries surfaced by the agent. |
 | `cleanupSkillCommands` | `(sessionId: string) => Promise<void>` | Remove dynamic commands when the session ends. |
 | `archiveSessionTopic` | `(sessionId: string) => Promise<void>` | Archive (rather than delete) the session thread — for platforms that support it (e.g. Telegram forum topics). |
+
+The legacy `ChannelAdapter` base class provides no-op defaults for the
+session-aware hooks, but intentionally does not implement
+`deleteSessionThreadById`. This lets Core distinguish adapters that can clean up
+a pre-created remote thread by its platform ID. Existing adapters do not need to
+add the method; it is optional, and Core retains the session-ID fallback.
 
 ### Constructor
 

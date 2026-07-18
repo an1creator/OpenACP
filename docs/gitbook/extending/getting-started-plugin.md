@@ -8,7 +8,7 @@ This is a **hands-on tutorial** that walks you through creating, developing, tes
 
 ## Prerequisites
 
-- **Node.js** 20+ installed
+- **Node.js** 22+ installed (Node.js 24 LTS recommended)
 - **npm** or **pnpm** installed
 - **OpenACP** installed globally (`npm install -g @n1creator/openacp-cli`)
 - A working OpenACP setup (run `openacp onboard` if you haven't yet)
@@ -100,20 +100,21 @@ Key fields in the generated `package.json`:
     "prepublishOnly": "npm run build"
   },
   "engines": {
-    "openacp": ">=2026.713.2"
+    "node": ">=22",
+    "openacp": ">=2026.718.1"
   },
   "peerDependencies": {
-    "@n1creator/openacp-cli": ">=2026.713.2"
+    "@n1creator/openacp-cli": ">=2026.718.1"
   },
   "devDependencies": {
-    "@n1creator/openacp-plugin-sdk": "2026.713.2",
+    "@n1creator/openacp-plugin-sdk": "2026.718.1",
     "typescript": "^5.4.0",
     "vitest": "^3.0.0"
   }
 }
 ```
 
-The example reflects the current `2026.713.2` release. The scaffold substitutes
+The example reflects the current `2026.718.1` release. The scaffold substitutes
 the version of the installed CLI: `engines.openacp` and the CLI peer dependency
 use `>=<cli-version>`, while the SDK dev dependency uses the exact same calendar
 version. This keeps plugin types aligned with the minimum compatible CLI.

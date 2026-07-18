@@ -1,46 +1,11 @@
-// Speech provider types for use by OpenACP plugins.
-// These are stable interfaces that plugins can rely on without depending
-// on @n1creator/openacp-cli internals.
-
-export interface TTSOptions {
-  language?: string;
-  voice?: string;
-  model?: string;
-}
-
-export interface TTSResult {
-  audioBuffer: Buffer;
-  mimeType: string;
-}
-
-export interface STTOptions {
-  language?: string;
-  model?: string;
-}
-
-export interface STTResult {
-  text: string;
-  language?: string;
-  duration?: number;
-}
-
-export interface TTSProvider {
-  readonly name: string;
-  synthesize(text: string, options?: TTSOptions): Promise<TTSResult>;
-}
-
-export interface STTProvider {
-  readonly name: string;
-  transcribe(audioBuffer: Buffer, mimeType: string, options?: STTOptions): Promise<STTResult>;
-}
-
-export interface SpeechServiceInterface {
-  registerTTSProvider(name: string, provider: TTSProvider): void;
-  unregisterTTSProvider(name: string): void;
-  registerSTTProvider(name: string, provider: STTProvider): void;
-  unregisterSTTProvider?(name: string): void;
-  isTTSAvailable(): boolean;
-  isSTTAvailable(): boolean;
-  synthesize(text: string, options?: TTSOptions): Promise<TTSResult>;
-  transcribe(audioBuffer: Buffer, mimeType: string, options?: STTOptions): Promise<STTResult>;
-}
+// Re-export the CLI's public speech contract. The SDK declares the CLI package
+// as a peer, so one declaration source keeps plugin and runtime types identical.
+export type {
+  SpeechServiceInterface,
+  STTOptions,
+  STTProvider,
+  STTResult,
+  TTSOptions,
+  TTSProvider,
+  TTSResult,
+} from '@n1creator/openacp-cli'

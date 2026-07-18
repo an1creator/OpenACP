@@ -15,11 +15,11 @@ jobs:
     strategy:
       matrix:
         node-version:
-          - 20
+          - 22
           - 24
     steps:
       # These pinned stable majors run their action code on Node 24 while the
-      # setup-node input below still selects the Node 20/24 test runtime.
+      # setup-node input below still selects the Node 22/24 test runtime.
       - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v6
@@ -32,6 +32,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm build
+
+      - name: Use the release npm version
+        if: matrix.node-version == 24
+        run: npm install --global npm@^11.16.0
 
       - name: Verify publish artifacts
         if: matrix.node-version == 24

@@ -26,6 +26,8 @@ The `@n1creator/openacp-plugin-sdk` package provides types, base classes, adapte
 
 ## Installation
 
+Use Node.js 22 or newer; Node.js 24 LTS is recommended.
+
 ```bash
 npm install --save-dev @n1creator/openacp-plugin-sdk
 ```
@@ -75,6 +77,24 @@ import type { OpenACPPlugin, PluginContext } from '@n1creator/openacp-plugin-sdk
 | `TunnelServiceInterface` | Port tunneling and public URL management. |
 | `ContextService` | Context building and provider registration for agent sessions. |
 
+### Speech service and provider contract
+
+The CLI and SDK export the same `SpeechServiceInterface`, `STTProvider`, and
+`TTSProvider` shapes. Runtime methods are `synthesize()`, `transcribe()`,
+`registerTTSProvider()`, `unregisterTTSProvider()`, `registerSTTProvider()`,
+`isTTSAvailable()`, and `isSTTAvailable()`. The runtime does not expose
+`textToSpeech()`, `speechToText()`, or `unregisterSTTProvider()`.
+
+`STTProvider.transcribe(audioBuffer, mimeType, options)` receives an optional `STTOptions.signal`. Providers should stop promptly when it aborts, terminate descendant processes or requests, release temporary files and listeners, and reject only after cleanup finishes. OpenACP waits for that provider promise before it starts the next queued prompt.
+
+```typescript
+interface STTOptions {
+  language?: string
+  model?: string
+  signal?: AbortSignal
+}
+```
+
 ### Adapter Types
 
 | Type | Description |
@@ -85,6 +105,12 @@ import type { OpenACPPlugin, PluginContext } from '@n1creator/openacp-plugin-sdk
 | `PermissionOption` | A selectable option in a permission request. |
 | `NotificationMessage` | Notification sent to the notification channel. |
 | `AgentCommand` | Command received from a channel adapter. |
+
+`IChannelAdapter.deleteSessionThreadById?(threadId)` is the optional cleanup
+contract for a remote thread created before the first session record is durable.
+Threaded adapters should implement it when `createSessionThread` allocates a
+remote resource. Existing adapters remain valid without it; Core uses
+`deleteSessionThread(sessionId)` as a fallback after a session identity exists.
 
 ---
 
@@ -354,8 +380,10 @@ const usage = mockServices.usage()
 
 ```typescript
 const speech = mockServices.speech()
-// { textToSpeech(), speechToText(), registerTTSProvider(), registerSTTProvider() }
+// { synthesize(), transcribe(), isTTSAvailable(), isSTTAvailable(), registerTTSProvider(), unregisterTTSProvider(), registerSTTProvider() }
 ```
+
+Only the test mock retains deprecated `textToSpeech()` and `speechToText()` aliases for test-suite compatibility until the next SDK major version. They are not methods of `SpeechServiceInterface` or the runtime service. New tests should use the canonical result-returning methods above.
 
 #### mockServices.tunnel(overrides?)
 

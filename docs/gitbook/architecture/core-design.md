@@ -98,7 +98,7 @@ class Session {
   state: SessionState  // 'idle' | 'processing' | 'waiting_permission' | 'ended'
   configOptions: ConfigOption[]  // agent-declared config (modes, models, etc.)
 
-  enqueuePrompt(text: string, attachments?: Attachment[]): Promise<void>
+  enqueuePrompt(text: string, attachments?: Attachment[]): Promise<string>
   switchAgent(agentName: string): Promise<void>
   cancel(reason?: string): Promise<void>
   destroy(): Promise<void>
@@ -106,6 +106,9 @@ class Session {
 ```
 
 Sessions emit events through the EventBus that plugins can subscribe to (e.g., `session:afterDestroy` for cleanup).
+
+`enqueuePrompt()` rejects with error code `SESSION_TERMINATING` once the session is
+finished, cancelled, or has started teardown; terminal sessions never accept new work.
 
 ### Lazy session resume
 
@@ -197,7 +200,11 @@ All built-in plugins register services with typed interfaces. Community plugins 
 - `FileServiceInterface` -- `saveFile()`, `resolveFile()`, `readTextFileWithRange()`
 - `NotificationService` -- `notify()`, `notifyAll()`
 - `UsageService` -- `trackUsage()`, `checkBudget()`, `getSummary()`
-- `SpeechServiceInterface` -- `textToSpeech()`, `speechToText()`
+- `SpeechServiceInterface` -- result-returning `synthesize()` / `transcribe()`,
+  TTS/STT provider registration, TTS provider teardown, and availability checks.
+  `STTOptions.signal` carries prompt cancellation into the active provider. The
+  runtime has no `textToSpeech()`, `speechToText()`, or
+  `unregisterSTTProvider()` method.
 - `TunnelServiceInterface` -- `getPublicUrl()`, `isConnected()`, `start()`, `stop()`
 - `ContextService` -- `buildContext()`, `registerProvider()`
 
@@ -246,7 +253,7 @@ type MiddlewareFn<T> = (payload: T, next: () => Promise<T>) => Promise<T | null>
 | `agent:beforePrompt` | Yes | Transform prompts before sending to agent |
 | `agent:beforeEvent` | Yes | Filter agent events |
 | `agent:afterEvent` | Read-only | Observe agent events |
-| `turn:start` | Read-only | Track turn starts |
+| `turn:start` | Read-only | Track turn starts before local preprocessing; `promptText` is the pre-STT prompt |
 | `turn:end` | Read-only | Track turn completions |
 | `fs:beforeRead` | Yes | Control file reads |
 | `fs:beforeWrite` | Yes | Control file writes |

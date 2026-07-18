@@ -146,18 +146,14 @@ describe("SessionFactory — Comprehensive Tests", () => {
       expect(sessionManager.registerSession).toHaveBeenCalledWith(session);
     });
 
-    it("emits session:created event", async () => {
-      const session = await factory.create({
+    it("defers session:created until Core durably persists the initial record", async () => {
+      await factory.create({
         channelId: "telegram",
         agentName: "claude",
         workingDirectory: "/workspace",
       });
 
-      expect(eventBus.emit).toHaveBeenCalledWith("session:created", {
-        sessionId: session.id,
-        agent: "claude",
-        status: "initializing",
-      });
+      expect(eventBus.emit).not.toHaveBeenCalledWith("session:created", expect.anything());
     });
 
     it("sets agentSessionId from agentInstance", async () => {

@@ -4,7 +4,7 @@
 
 | Requirement | Minimum |
 |---|---|
-| Node.js | 20 or later |
+| Node.js | 22 or later (24 LTS recommended) |
 | Package manager | npm (bundled with Node) or pnpm |
 | Operating system | macOS, Linux |
 | Windows | Supported via WSL2 |
@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/an1creator/OpenACP/main/scripts/ins
 The script automatically:
 
 1. Detects your platform (macOS or Linux).
-2. Checks for Node.js 20+ and installs it if missing.
+2. Checks for Node.js 22+ and installs Node.js 24 if the runtime is missing or unsupported.
 3. Installs `@n1creator/openacp-cli` globally via npm.
 4. Launches the setup wizard.
 
@@ -47,6 +47,8 @@ This prints the installed version (e.g., `2026.401.1`) and exits. If the command
 ## First Run and Setup Wizard
 
 The first time you run `openacp` (bare command, no arguments), the CLI detects that no instance exists and launches the interactive setup wizard automatically.
+
+Setup stops before writing instance state when the active runtime is older than Node.js 22 and prints the required upgrade.
 
 The wizard walks you through:
 

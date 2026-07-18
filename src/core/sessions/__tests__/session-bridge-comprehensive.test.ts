@@ -485,7 +485,7 @@ describe("SessionBridge — Auto-Disconnect on Terminal States", () => {
     expect(adapter.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("stays connected after cancelled (session can resume)", async () => {
+  it("does not forward events after cancelled becomes terminal", async () => {
     const agent = createMockAgentInstance();
     const session = createSession(agent);
     const adapter = createMockAdapter();
@@ -501,8 +501,7 @@ describe("SessionBridge — Auto-Disconnect on Terminal States", () => {
 
     vi.mocked(adapter.sendMessage).mockClear();
     session.emit("agent_event", { type: "text", content: "after cancel" });
-    // Bridge stays connected so events still reach adapter
-    expect(adapter.sendMessage).toHaveBeenCalled();
+    expect(adapter.sendMessage).not.toHaveBeenCalled();
   });
 
   it("does NOT auto-disconnect on error (recoverable)", () => {
@@ -546,7 +545,7 @@ describe("SessionBridge — Auto-Disconnect on Terminal States", () => {
 });
 
 describe("SessionBridge — Notification on session_end and error", () => {
-  it("sends completed notification with session name on session_end", () => {
+  it("sends completed notification with session name on session_end", async () => {
     const agent = createMockAgentInstance();
     const session = createSession(agent);
     session.name = "My Project";
@@ -558,13 +557,15 @@ describe("SessionBridge — Notification on session_end and error", () => {
 
     agent.emit("agent_event", { type: "session_end", reason: "done" });
 
-    expect(deps.notificationManager.notify).toHaveBeenCalledWith(
-      session.channelId,
-      expect.objectContaining({
-        type: "completed",
-        sessionName: "My Project",
-      }),
-    );
+    await vi.waitFor(() => {
+      expect(deps.notificationManager.notify).toHaveBeenCalledWith(
+        session.channelId,
+        expect.objectContaining({
+          type: "completed",
+          sessionName: "My Project",
+        }),
+      );
+    });
   });
 
   it("sends error notification with error message", () => {
@@ -587,7 +588,7 @@ describe("SessionBridge — Notification on session_end and error", () => {
     );
   });
 
-  it("calls cleanupSkillCommands on session_end", () => {
+  it("calls cleanupSkillCommands on session_end", async () => {
     const agent = createMockAgentInstance();
     const session = createSession(agent);
     const adapter = createMockAdapter();
@@ -598,7 +599,9 @@ describe("SessionBridge — Notification on session_end and error", () => {
 
     agent.emit("agent_event", { type: "session_end", reason: "done" });
 
-    expect(adapter.cleanupSkillCommands).toHaveBeenCalledWith(session.id);
+    await vi.waitFor(() => {
+      expect(adapter.cleanupSkillCommands).toHaveBeenCalledWith(session.id);
+    });
   });
 
   it("calls cleanupSkillCommands on error", () => {

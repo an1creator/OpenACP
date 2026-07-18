@@ -50,6 +50,8 @@ export interface IChannelAdapter {
   createSessionThread(sessionId: string, name: string): Promise<string>
   renameSessionThread(sessionId: string, newName: string): Promise<void>
   deleteSessionThread?(sessionId: string): Promise<void>
+  /** Delete a connector thread that was created before a Session record existed. */
+  deleteSessionThreadById?(threadId: string): Promise<void>
   archiveSessionTopic?(sessionId: string): Promise<void>
 
   // TTS strip — optional, called after TTS audio is synthesized to remove [TTS] block from text

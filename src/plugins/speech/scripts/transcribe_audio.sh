@@ -60,7 +60,7 @@ fi
 
 ensure_env
 
-"$PYTHON" - "$@" <<'PY'
+exec "$PYTHON" - "$@" <<'PY'
 import argparse
 import os
 import sys

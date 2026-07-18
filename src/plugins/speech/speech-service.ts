@@ -1,4 +1,5 @@
 import type { STTProvider, TTSProvider, STTOptions, STTResult, TTSOptions, TTSResult, SpeechServiceConfig } from './speech-types.js';
+import type { SpeechServiceInterface } from '../../core/plugin/types.js';
 
 /**
  * A factory that recreates provider instances from a new config snapshot.
@@ -26,7 +27,7 @@ export interface PreparedProviderRefresh {
  * and accessed by `session.ts` to synthesize audio after agent responses when
  * `voiceMode` is active.
  */
-export class SpeechService {
+export class SpeechService implements SpeechServiceInterface {
   private sttProviders = new Map<string, STTProvider>();
   private ttsProviders = new Map<string, TTSProvider>();
   private providerFactory?: ProviderFactory;

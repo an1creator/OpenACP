@@ -31,7 +31,7 @@ All overrides are applied before Zod schema validation, so the final config is a
 | `OPENACP_SPEECH_LOCAL_WHISPER_VAD_FILTER` | `@openacp/speech.localWhisperVadFilter` | boolean | Enable faster-whisper VAD filtering |
 | `OPENACP_SPEECH_LOCAL_WHISPER_DEVICE` | `@openacp/speech.localWhisperDevice` | string | Runtime device: `cpu`, `cuda`, or `auto` |
 | `OPENACP_SPEECH_LOCAL_WHISPER_COMPUTE_TYPE` | `@openacp/speech.localWhisperComputeType` | string | faster-whisper compute type (default `int8`) |
-| `OPENACP_SPEECH_LOCAL_WHISPER_TIMEOUT_MS` | `@openacp/speech.localWhisperTimeoutMs` | number | Transcription timeout in milliseconds |
+| `OPENACP_SPEECH_LOCAL_WHISPER_TIMEOUT_MS` | `@openacp/speech.localWhisperTimeoutMs` | number | Transcription timeout in milliseconds (default `600000`; `0` disables the provider timeout) |
 | `OPENACP_SPEECH_LOCAL_WHISPER_SCRIPT_PATH` | `@openacp/speech.localWhisperScriptPath` | string | Optional custom transcription executable |
 | `OPENACP_CONFIG_PATH` | — | string | Override the config file path (default: `<instance-root>/config.json`) |
 | `OPENACP_INSTANCE_ROOT` | — | string | Set the instance root directory. Overrides auto-detection and CLI flags. See [Multi-Instance](../features/multi-instance.md). |

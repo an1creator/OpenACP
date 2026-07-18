@@ -4,7 +4,7 @@ This guide gets you from zero to chatting with an AI agent in your Telegram (or 
 
 ## What you'll need
 
-- **Node.js 20 or later** — check with `node --version`. If Node.js is not installed, use the installer below or install it with a version manager such as `nvm`.
+- **Node.js 22 or later** — check with `node --version`. Node.js 24 LTS is recommended. If Node.js is not installed, use the installer below or install it with a version manager such as `nvm`.
 - **A bot token** for your chat platform:
   - Telegram: create one via [@BotFather](https://t.me/BotFather)
   - Discord: create one in the [Discord Developer Portal](https://discord.com/developers/applications)

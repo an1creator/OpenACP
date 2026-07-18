@@ -17,6 +17,7 @@ import { GroqSTT } from './providers/groq.js'
 // TTS is provided by a separate optional plugin so the core speech plugin
 // doesn't bundle a large native dependency on every install.
 const EDGE_TTS_PLUGIN = '@openacp/msedge-tts-plugin'
+const LEGACY_LOCAL_WHISPER_TIMEOUT_MS = 120_000
 
 async function verifyTerminalGroqCandidate(ctx: InstallContext, key: string): Promise<void> {
   const fetcher = ctx.instanceRoot
@@ -72,13 +73,23 @@ async function commitTerminalSettings(ctx: InstallContext, plan: TerminalSetting
 
 const speechPlugin: OpenACPPlugin = {
   name: '@openacp/speech',
-  version: '1.0.0',
+  version: '1.0.1',
   description: 'Text-to-speech and speech-to-text with pluggable providers',
   essential: false,
   // file-service is needed to persist synthesized audio for adapters that send files
   optionalPluginDependencies: { '@openacp/file-service': '^1.0.0' },
   permissions: ['services:register', 'commands:register', 'kernel:access'],
   inheritableKeys: ['ttsProvider', 'ttsVoice'],
+
+  async migrate(_ctx, oldSettings, oldVersion) {
+    const migrated = oldSettings && typeof oldSettings === 'object' && !Array.isArray(oldSettings)
+      ? { ...oldSettings as Record<string, unknown> }
+      : {}
+    if (oldVersion === '1.0.0' && migrated.localWhisperTimeoutMs === LEGACY_LOCAL_WHISPER_TIMEOUT_MS) {
+      migrated.localWhisperTimeoutMs = LOCAL_WHISPER_DEFAULTS.timeoutMs
+    }
+    return migrated
+  },
 
   async install(ctx: InstallContext) {
     const { terminal, settings } = ctx

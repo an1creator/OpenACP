@@ -2,7 +2,7 @@ import type { AgentManager } from "./agents/agent-manager.js";
 import type { SessionManager } from "./sessions/session-manager.js";
 import type { ConfigManager } from "./config/config.js";
 import type { SessionBridge } from "./sessions/session-bridge.js";
-import type { Session } from "./sessions/session.js";
+import { SessionTerminatingError, type Session } from "./sessions/session.js";
 import type { IChannelAdapter } from "./channel.js";
 import type { EventBus } from "./event-bus.js";
 import type { MiddlewareChain } from "./plugin/middleware-chain.js";
@@ -21,9 +21,8 @@ export interface AgentSwitchDeps {
   configManager: ConfigManager;
   eventBus: EventBus;
   adapters: Map<string, IChannelAdapter>;
-  bridges: Map<string, SessionBridge>;
   createBridge: (session: Session, adapter: IChannelAdapter, adapterId?: string) => SessionBridge;
-  getSessionBridgeKeys: (sessionId: string) => string[];
+  disconnectSessionBridges: (sessionId: string) => number;
   getMiddlewareChain: () => MiddlewareChain | undefined;
   getService: <T>(name: string) => T | undefined;
 }
@@ -48,6 +47,16 @@ export class AgentSwitchHandler {
 
   constructor(private deps: AgentSwitchDeps) {}
 
+  private isSwitchTargetLive(sessionId: string, session: Session): boolean {
+    return this.deps.sessionManager.getSession(sessionId) === session && !session.isTerminating;
+  }
+
+  private assertSwitchTargetLive(sessionId: string, session: Session): void {
+    if (!this.isSwitchTargetLive(sessionId, session)) {
+      throw new SessionTerminatingError(sessionId);
+    }
+  }
+
   /**
    * Switch a session to a different agent. Returns whether the previous
    * agent session was resumed or a new one was spawned.
@@ -65,7 +74,7 @@ export class AgentSwitchHandler {
   }
 
   private async doSwitch(sessionId: string, toAgent: string): Promise<{ resumed: boolean }> {
-    const { sessionManager, agentManager, configManager, eventBus, adapters, bridges, createBridge } = this.deps;
+    const { sessionManager, agentManager, configManager, eventBus, adapters, createBridge } = this.deps;
 
     const session = sessionManager.getSession(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -82,6 +91,7 @@ export class AgentSwitchHandler {
       fromAgent,
       toAgent,
     }, async (payload) => payload);
+    this.assertSwitchTargetLive(sessionId, session);
     if (middlewareChain && !result) throw new Error('Agent switch blocked by middleware');
 
     // 2. Determine resume vs new — if the agent was used before in this session
@@ -106,22 +116,16 @@ export class AgentSwitchHandler {
     });
 
     // 3. Disconnect ALL bridges for this session
-    const sessionBridgeKeys = this.deps.getSessionBridgeKeys(sessionId);
-    const hadBridges = sessionBridgeKeys.length > 0;
-    for (const key of sessionBridgeKeys) {
-      const bridge = bridges.get(key);
-      if (bridge) {
-        bridges.delete(key);
-        bridge.disconnect();
-      }
-    }
+    const hadBridges = this.deps.disconnectSessionBridges(sessionId) > 0;
 
     const switchAdapter = adapters.get(session.channelId);
     if (switchAdapter?.sendSkillCommands) {
       await switchAdapter.sendSkillCommands(session.id, []);
+      this.assertSwitchTargetLive(sessionId, session);
     }
     if (switchAdapter?.cleanupSessionState) {
       await switchAdapter.cleanupSessionState(session.id);
+      this.assertSwitchTargetLive(sessionId, session);
     }
 
     const fromAgentSessionId = session.agentSessionId;
@@ -132,6 +136,7 @@ export class AgentSwitchHandler {
     const fileService = this.deps.getService<import('../plugins/file-service/file-service.js').FileService>('file-service');
     const configAllowedPaths = configManager.get().workspace?.security?.allowedPaths ?? [];
     try {
+      this.assertSwitchTargetLive(sessionId, session);
       await session.switchAgent(toAgent, async () => {
         if (canResume) {
           try {
@@ -139,52 +144,51 @@ export class AgentSwitchHandler {
             if (fileService) instance.addAllowedPath(fileService.baseDir);
             resumed = true;
             return instance;
-          } catch {
+          } catch (error) {
+            this.assertSwitchTargetLive(sessionId, session);
             // Resume failed (session expired or unavailable) — fall through to spawn with context
-            log.warn({ sessionId, toAgent }, "Resume failed, falling back to new agent with context injection");
+            log.warn({ sessionId, toAgent, err: error }, "Resume failed, falling back to new agent with context injection");
           }
         }
 
-        // Fresh spawn: inject conversation history from the context service so the
-        // new agent has awareness of what was discussed with the previous agent
-        const instance = await agentManager.spawn(toAgent, session.workingDirectory, configAllowedPaths);
-        if (fileService) instance.addAllowedPath(fileService.baseDir);
+        // Build history before spawning. This keeps the replacement factory free of
+        // async boundaries after it owns a process, so terminal cleanup can take
+        // ownership as soon as spawn/resume returns.
+        let contextMarkdown: string | undefined;
         try {
           const contextService = this.deps.getService<ContextManager>('context');
           if (contextService) {
             const config = configManager.get();
             const labelAgent = config.agentSwitch?.labelHistory ?? true;
             await contextService.flushSession(sessionId);
+            this.assertSwitchTargetLive(sessionId, session);
             const contextResult = await contextService.buildContext(
               { type: 'session', value: sessionId, repoPath: session.workingDirectory },
               { labelAgent, noCache: true },
             );
-            if (contextResult?.markdown) {
-              session.setContext(contextResult.markdown);
-            }
+            this.assertSwitchTargetLive(sessionId, session);
+            contextMarkdown = contextResult?.markdown;
           }
-        } catch {
+        } catch (error) {
+          if (!this.isSwitchTargetLive(sessionId, session)) throw error;
           // Context injection is best-effort
         }
+        // Fresh spawn: inject conversation history from the context service so the
+        // new agent has awareness of what was discussed with the previous agent.
+        const instance = await agentManager.spawn(toAgent, session.workingDirectory, configAllowedPaths);
+        if (fileService) instance.addAllowedPath(fileService.baseDir);
+        if (contextMarkdown) session.setContext(contextMarkdown);
         return instance;
       });
-
-      const successEvent: AgentEvent = {
-        type: "system_message",
-        message: resumed
-          ? `Switched to ${toAgent} (resumed previous session).`
-          : `Switched to ${toAgent} (new session).`,
-      };
-      session.emit(SessionEv.AGENT_EVENT, successEvent);
-      eventBus.emit(BusEvent.AGENT_EVENT, { sessionId, turnId: '', event: successEvent });
-      eventBus.emit(BusEvent.SESSION_AGENT_SWITCH, {
-        sessionId,
-        fromAgent,
-        toAgent,
-        status: "succeeded",
-        resumed,
-      });
+      this.assertSwitchTargetLive(sessionId, session);
     } catch (err) {
+      // Cancellation/destroy is a terminal boundary, not a switch failure. Never
+      // resurrect the old agent, reconnect bridges, emit switch results, or patch
+      // the durable record after that boundary.
+      if (!this.isSwitchTargetLive(sessionId, session)) {
+        log.info({ sessionId, fromAgent, toAgent }, "Agent switch stopped because the session is terminating");
+        throw err instanceof SessionTerminatingError ? err : new SessionTerminatingError(sessionId);
+      }
       const errorMessage = err instanceof Error ? err.message : String(err);
 
       const failedEvent: AgentEvent = {
@@ -203,26 +207,32 @@ export class AgentSwitchHandler {
 
       // Rollback
       try {
-        let rollbackInstance;
-        try {
-          rollbackInstance = await agentManager.resume(fromAgent, session.workingDirectory, fromAgentSessionId);
-        } catch {
-          rollbackInstance = await agentManager.spawn(fromAgent, session.workingDirectory);
-        }
-        const oldInstance = rollbackInstance;
-        session.agentSwitchHistory.pop();
-        session.agentInstance = oldInstance;
-        session.agentName = fromAgent;
-        session.agentSessionId = oldInstance.sessionId;
-        // Reconnect all bridges on rollback
-        for (const adapterId of session.attachedAdapters) {
-          const adapter = adapters.get(adapterId);
-          if (adapter) {
-            createBridge(session, adapter, adapterId).connect();
+        await session.restoreAgentAfterFailedSwitch(fromAgent, async () => {
+          try {
+            return await agentManager.resume(fromAgent, session.workingDirectory, fromAgentSessionId);
+          } catch (resumeError) {
+            if (!this.isSwitchTargetLive(sessionId, session)) throw resumeError;
+            return agentManager.spawn(fromAgent, session.workingDirectory);
+          }
+        });
+        this.assertSwitchTargetLive(sessionId, session);
+        // Reconnect only resources that the switch actually detached.
+        if (hadBridges) {
+          for (const adapterId of session.attachedAdapters) {
+            const adapter = adapters.get(adapterId);
+            if (adapter) {
+              createBridge(session, adapter, adapterId).connect();
+            }
           }
         }
         log.warn({ sessionId, fromAgent, toAgent, err }, "Agent switch failed, rolled back to previous agent");
       } catch (rollbackErr) {
+        if (!this.isSwitchTargetLive(sessionId, session)) {
+          log.info({ sessionId, fromAgent, toAgent }, "Agent switch rollback stopped because the session is terminating");
+          throw rollbackErr instanceof SessionTerminatingError
+            ? rollbackErr
+            : new SessionTerminatingError(sessionId);
+        }
         session.fail(`Switch failed and rollback failed: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`);
         log.error({ sessionId, fromAgent, toAgent, err, rollbackErr }, "Agent switch failed and rollback also failed");
       }
@@ -231,6 +241,7 @@ export class AgentSwitchHandler {
 
     // 5. Reconnect bridges for ALL attached adapters
     if (hadBridges) {
+      this.assertSwitchTargetLive(sessionId, session);
       for (const adapterId of session.attachedAdapters) {
         const adapter = adapters.get(adapterId);
         if (adapter) {
@@ -242,12 +253,33 @@ export class AgentSwitchHandler {
     }
 
     // 6. Persist
+    this.assertSwitchTargetLive(sessionId, session);
     await sessionManager.patchRecord(sessionId, {
       agentName: toAgent,
       agentSessionId: session.agentSessionId,
       firstAgent: session.firstAgent,
       currentPromptCount: 0,
       agentSwitchHistory: session.agentSwitchHistory,
+    }, { expectedSession: session });
+    this.assertSwitchTargetLive(sessionId, session);
+
+    // Success is externally visible only after bridge ownership and durable state
+    // both commit. A cancellation while persistence is pending must not announce a
+    // switch that ultimately crosses the terminal boundary.
+    const successEvent: AgentEvent = {
+      type: "system_message",
+      message: resumed
+        ? `Switched to ${toAgent} (resumed previous session).`
+        : `Switched to ${toAgent} (new session).`,
+    };
+    session.emit(SessionEv.AGENT_EVENT, successEvent);
+    eventBus.emit(BusEvent.AGENT_EVENT, { sessionId, turnId: '', event: successEvent });
+    eventBus.emit(BusEvent.SESSION_AGENT_SWITCH, {
+      sessionId,
+      fromAgent,
+      toAgent,
+      status: "succeeded",
+      resumed,
     });
 
     // 7. Middleware: agent:afterSwitch (fire-and-forget)
@@ -256,7 +288,9 @@ export class AgentSwitchHandler {
       fromAgent,
       toAgent,
       resumed,
-    }, async (p) => p).catch(() => {});
+    }, async (p) => p).catch((error) => {
+      log.warn({ sessionId, fromAgent, toAgent, err: error }, "Agent afterSwitch hook failed");
+    });
 
     return { resumed };
   }

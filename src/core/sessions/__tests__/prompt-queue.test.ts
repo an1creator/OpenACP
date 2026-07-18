@@ -8,7 +8,7 @@ describe('PromptQueue', () => {
 
     await queue.enqueue('hello')
 
-    expect(processor).toHaveBeenCalledWith('hello', undefined, undefined, undefined, undefined, undefined)
+    expect(processor).toHaveBeenCalledWith('hello', undefined, undefined, undefined, undefined, undefined, expect.any(AbortSignal))
     expect(queue.pending).toBe(0)
     expect(queue.isProcessing).toBe(false)
   })
@@ -68,31 +68,25 @@ describe('PromptQueue', () => {
     await vi.waitFor(() => expect(calls).toEqual(['first', 'second']))
   })
 
-  it('clear() removes all pending, does not cancel active', async () => {
-    let resolveFirst!: () => void
-    const firstPromise = new Promise<void>((r) => { resolveFirst = r })
+  it('clear() cancels scheduled processing and removes all pending prompts', async () => {
     const calls: string[] = []
 
     const processor = vi.fn().mockImplementation(async (text: string) => {
       calls.push(text)
-      if (text === 'first') await firstPromise
     })
 
     const queue = new PromptQueue(processor)
-    queue.enqueue('first')
-    queue.enqueue('second')
-    queue.enqueue('third')
+    const first = queue.enqueue('first')
+    const second = queue.enqueue('second')
+    const third = queue.enqueue('third')
 
     expect(queue.pending).toBe(2)
-    queue.clear()
+    await queue.clear()
     expect(queue.pending).toBe(0)
 
-    resolveFirst()
-    // Wait for processing to finish
-    await vi.waitFor(() => expect(queue.isProcessing).toBe(false))
-
-    // Only first was processed (second/third were cleared)
-    expect(calls).toEqual(['first'])
+    await Promise.all([first, second, third])
+    expect(queue.isProcessing).toBe(false)
+    expect(calls).toEqual([])
   })
 
   it('handles processor errors without breaking the queue', async () => {
@@ -164,40 +158,33 @@ describe('PromptQueue', () => {
   })
 
   it('abort + clear prevents offset responses', async () => {
-    let resolveFirst!: () => void
-    const firstPromise = new Promise<void>((r) => { resolveFirst = r })
     const calls: string[] = []
 
     const processor = vi.fn().mockImplementation(async (text: string) => {
       calls.push(text)
-      if (text === 'stuck') await firstPromise
     })
 
     const queue = new PromptQueue(processor)
 
-    // Simulate: stuck prompt + queued messages
-    queue.enqueue('stuck')
-    queue.enqueue('queued-1')
-    queue.enqueue('queued-2')
+    // Simulate a prompt scheduled in the current tick plus queued messages.
+    const stuck = queue.enqueue('stuck')
+    const queuedOne = queue.enqueue('queued-1')
+    const queuedTwo = queue.enqueue('queued-2')
 
     expect(queue.pending).toBe(2)
     expect(queue.isProcessing).toBe(true)
 
     // User does /flush: clear everything
-    queue.clear()
+    await queue.clear()
     expect(queue.pending).toBe(0)
-
-    // Resolve the stuck prompt (simulates agent responding to cancel)
-    resolveFirst()
-    await new Promise(r => setTimeout(r, 10))
-
+    await Promise.all([stuck, queuedOne, queuedTwo])
     expect(queue.isProcessing).toBe(false)
 
     // User sends fresh message — should process immediately, no offset
     const freshPromise = queue.enqueue('fresh')
     await freshPromise
 
-    expect(calls).toEqual(['stuck', 'fresh'])
+    expect(calls).toEqual(['fresh'])
   })
 
   it('prioritize promotes target item and discards others', async () => {
@@ -260,5 +247,118 @@ describe('PromptQueue', () => {
 
     resolveFirst()
     await vi.waitFor(() => expect(queue.isProcessing).toBe(false))
+  })
+
+  it('passes cancellation to the processor and waits for cleanup plus the caller barrier before draining', async () => {
+    let finishCleanup!: () => void
+    let finishBarrier!: () => void
+    const cleanup = new Promise<void>((resolve) => { finishCleanup = resolve })
+    const barrier = new Promise<void>((resolve) => { finishBarrier = resolve })
+    const calls: string[] = []
+    let abortedSignal: AbortSignal | undefined
+    const processor = vi.fn(async (text: string, ...args: unknown[]) => {
+      calls.push(text)
+      if (text !== 'first') return
+      abortedSignal = args.at(-1) as AbortSignal
+      await new Promise<void>((resolve) => abortedSignal!.addEventListener('abort', resolve, { once: true }))
+      await cleanup
+    })
+    const queue = new PromptQueue(processor)
+    const first = queue.enqueue('first')
+    const second = queue.enqueue('second')
+
+    await vi.waitFor(() => expect(calls).toEqual(['first']))
+    queue.abortCurrent(barrier)
+    await Promise.resolve()
+    expect(abortedSignal?.aborted).toBe(true)
+    expect(calls).toEqual(['first'])
+
+    finishCleanup()
+    await Promise.resolve()
+    expect(calls).toEqual(['first'])
+
+    finishBarrier()
+    await Promise.all([first, second])
+    expect(calls).toEqual(['first', 'second'])
+  })
+
+  it('does not run a queued processor concurrently when the aborted processor ignores its signal', async () => {
+    let finishFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => { finishFirst = resolve })
+    const calls: string[] = []
+    let active = 0
+    let maxActive = 0
+    const queue = new PromptQueue(async (text) => {
+      calls.push(text)
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      if (text === 'first') await firstGate
+      active -= 1
+    })
+    const first = queue.enqueue('first')
+    const second = queue.enqueue('second')
+
+    await vi.waitFor(() => expect(calls).toEqual(['first']))
+    queue.abortCurrent()
+    await Promise.resolve()
+    expect(calls).toEqual(['first'])
+
+    finishFirst()
+    await Promise.all([first, second])
+    expect(calls).toEqual(['first', 'second'])
+    expect(maxActive).toBe(1)
+  })
+
+  it('honors a late abort barrier after the processor has already resolved', async () => {
+    let finishProcessor!: () => void
+    let finishBarrier!: () => void
+    const processorGate = new Promise<void>((resolve) => { finishProcessor = resolve })
+    const barrier = new Promise<void>((resolve) => { finishBarrier = resolve })
+    const calls: string[] = []
+    const queue = new PromptQueue(async (text) => {
+      calls.push(text)
+      if (text === 'first') await processorGate
+    })
+    const first = queue.enqueue('first')
+    const second = queue.enqueue('second')
+    await vi.waitFor(() => expect(calls).toEqual(['first']))
+
+    finishProcessor()
+    // Let processorPromise resolve while process() is still waiting to run its continuation.
+    await Promise.resolve()
+    queue.abortCurrent(barrier)
+    await Promise.resolve()
+    expect(calls).toEqual(['first'])
+
+    finishBarrier()
+    await Promise.all([first, second])
+    expect(calls).toEqual(['first', 'second'])
+  })
+
+  it('waits for every concurrent abort barrier before draining the next prompt', async () => {
+    let finishFirstBarrier!: () => void
+    let finishSecondBarrier!: () => void
+    const firstBarrier = new Promise<void>((resolve) => { finishFirstBarrier = resolve })
+    const secondBarrier = new Promise<void>((resolve) => { finishSecondBarrier = resolve })
+    const calls: string[] = []
+    const queue = new PromptQueue(async (text, ...args) => {
+      calls.push(text)
+      if (text !== 'first') return
+      const signal = args.at(-1) as AbortSignal
+      await new Promise<void>((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+    })
+    const first = queue.enqueue('first')
+    const second = queue.enqueue('second')
+    await vi.waitFor(() => expect(calls).toEqual(['first']))
+
+    const firstAbort = queue.abortCurrent(firstBarrier)
+    const secondAbort = queue.abortCurrent(secondBarrier)
+    finishSecondBarrier()
+    await Promise.resolve()
+    expect(calls).toEqual(['first'])
+
+    finishFirstBarrier()
+    await Promise.all([firstAbort, secondAbort, first, second])
+    expect(calls).toEqual(['first', 'second'])
   })
 })

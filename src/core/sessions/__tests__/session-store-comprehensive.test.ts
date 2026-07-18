@@ -243,6 +243,153 @@ describe("JsonFileSessionStore — Comprehensive Tests", () => {
       expect(fs.existsSync(deepPath)).toBe(true);
       store.destroy();
     });
+
+    it("keeps accepted debounced mutations pending when a global atomic write fails", async () => {
+      const store = new JsonFileSessionStore(filePath, 30);
+      await store.save(makeRecord({ status: "active" }));
+      store.flushSync();
+
+      await store.save(makeRecord({ status: "cancelled" }));
+      const write = vi.spyOn(fs, "writeFileSync").mockImplementationOnce(() => {
+        throw new Error("ENOSPC test failure");
+      });
+      expect(() => store.flushSync()).toThrow("ENOSPC test failure");
+      write.mockRestore();
+
+      expect(store.get("sess-1")?.status).toBe("cancelled");
+      expect(store.list()).toEqual([expect.objectContaining({ status: "cancelled" })]);
+      expect(JSON.parse(fs.readFileSync(filePath, "utf8")).sessions["sess-1"].status).toBe("active");
+      expect(fs.existsSync(`${filePath}.tmp`)).toBe(false);
+
+      store.flushSync();
+      expect(store.get("sess-1")?.status).toBe("cancelled");
+      store.destroy();
+
+      const reloaded = new JsonFileSessionStore(filePath, 30);
+      expect(reloaded.get("sess-1")?.status).toBe("cancelled");
+      reloaded.destroy();
+    });
+
+    it("rolls back only a failed immediate mutation and later persists unrelated accepted work", async () => {
+      const store = new JsonFileSessionStore(filePath, 30);
+      await store.save(makeRecord({ sessionId: "a", name: "A durable", status: "active" }));
+      store.flushSync();
+
+      await store.save(makeRecord({ sessionId: "b", name: "B pending" }));
+      const write = vi.spyOn(fs, "writeFileSync").mockImplementationOnce(() => {
+        throw new Error("ENOSPC immediate failure");
+      });
+      await expect(store.save(
+        makeRecord({ sessionId: "a", name: "A rejected", status: "cancelled" }),
+        { immediate: true },
+      )).rejects.toThrow("ENOSPC immediate failure");
+      write.mockRestore();
+
+      expect(store.get("a")).toMatchObject({ name: "A durable", status: "active" });
+      expect(store.get("b")).toMatchObject({ name: "B pending", status: "active" });
+      expect(store.list().map((record) => record.sessionId).sort()).toEqual(["a", "b"]);
+      expect(JSON.parse(fs.readFileSync(filePath, "utf8")).sessions.b).toBeUndefined();
+
+      store.flushSync();
+      store.destroy();
+      const reloaded = new JsonFileSessionStore(filePath, 30);
+      expect(reloaded.get("a")).toMatchObject({ name: "A durable", status: "active" });
+      expect(reloaded.get("b")).toMatchObject({ name: "B pending", status: "active" });
+      reloaded.destroy();
+    });
+
+    it("replays same-ID saves and delete/save mutations in accepted order", async () => {
+      const store = new JsonFileSessionStore(filePath, 30);
+      await store.save(makeRecord({ sessionId: "ordered", name: "durable" }));
+      store.flushSync();
+      await store.save(makeRecord({ sessionId: "ordered", name: "first" }));
+      await store.save(makeRecord({ sessionId: "ordered", name: "second" }));
+
+      const write = vi.spyOn(fs, "writeFileSync").mockImplementationOnce(() => {
+        throw new Error("reject third");
+      });
+      await expect(store.save(
+        makeRecord({ sessionId: "ordered", name: "third" }),
+        { immediate: true },
+      )).rejects.toThrow("reject third");
+      write.mockRestore();
+      expect(store.get("ordered")?.name).toBe("second");
+
+      await store.remove("ordered");
+      await store.save(makeRecord({ sessionId: "ordered", name: "after delete" }));
+      store.flushSync();
+      store.destroy();
+
+      const reloaded = new JsonFileSessionStore(filePath, 30);
+      expect(reloaded.get("ordered")?.name).toBe("after delete");
+      reloaded.destroy();
+    });
+
+    it("observes a failed debounce flush and retries without poisoning the timer", async () => {
+      vi.useFakeTimers();
+      const store = new JsonFileSessionStore(filePath, 30);
+      try {
+        await store.save(makeRecord({ sessionId: "retry", name: "pending" }));
+        const write = vi.spyOn(fs, "writeFileSync").mockImplementationOnce(() => {
+          throw new Error("background ENOSPC");
+        });
+
+        await vi.advanceTimersByTimeAsync(2000);
+        expect(store.get("retry")?.name).toBe("pending");
+        expect(fs.existsSync(filePath)).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(2000);
+        write.mockRestore();
+        expect(JSON.parse(fs.readFileSync(filePath, "utf8")).sessions.retry.name).toBe("pending");
+      } finally {
+        store.destroy();
+        vi.useRealTimers();
+      }
+    });
+
+    it("retains pending intent and retries after directory creation fails", async () => {
+      vi.useFakeTimers();
+      const deepPath = path.join(tmpDir, "missing", "sessions.json");
+      const store = new JsonFileSessionStore(deepPath, 30);
+      try {
+        await store.save(makeRecord({ sessionId: "mkdir-retry", name: "pending" }));
+        const mkdir = vi.spyOn(fs, "mkdirSync").mockImplementationOnce(() => {
+          throw new Error("EACCES mkdir");
+        });
+        expect(() => store.flushSync()).toThrow("EACCES mkdir");
+        expect(store.get("mkdir-retry")?.name).toBe("pending");
+        expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+        await vi.advanceTimersByTimeAsync(2000);
+        mkdir.mockRestore();
+        expect(JSON.parse(fs.readFileSync(deepPath, "utf8")).sessions["mkdir-retry"].name).toBe("pending");
+      } finally {
+        store.destroy();
+        vi.useRealTimers();
+      }
+    });
+
+    it("retains pending intent and retries after atomic rename fails", async () => {
+      vi.useFakeTimers();
+      const store = new JsonFileSessionStore(filePath, 30);
+      try {
+        await store.save(makeRecord({ sessionId: "rename-retry", name: "pending" }));
+        const rename = vi.spyOn(fs, "renameSync").mockImplementationOnce(() => {
+          throw new Error("EACCES rename");
+        });
+        expect(() => store.flushSync()).toThrow("EACCES rename");
+        expect(store.get("rename-retry")?.name).toBe("pending");
+        expect(fs.existsSync(`${filePath}.tmp`)).toBe(false);
+        expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+        await vi.advanceTimersByTimeAsync(2000);
+        rename.mockRestore();
+        expect(JSON.parse(fs.readFileSync(filePath, "utf8")).sessions["rename-retry"].name).toBe("pending");
+      } finally {
+        store.destroy();
+        vi.useRealTimers();
+      }
+    });
   });
 
   describe("TTL cleanup", () => {

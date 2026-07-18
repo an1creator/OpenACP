@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": ".",
+    "paths": {
+      "@n1creator/openacp-cli": ["dist-publish/dist/index.d.ts"],
+      "@n1creator/openacp-plugin-sdk": ["dist-publish-sdk/dist/index.d.ts"]
+    }
+  },
+  "include": ["published-speech-plugin.ts", "published-adapter-contract.ts"],
+  "exclude": []
+}

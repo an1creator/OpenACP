@@ -37,6 +37,7 @@ import { Hook, BusEvent, SessionEv } from "./events.js";
 import { extractSender, type TurnContext, type TurnRouting } from "./sessions/turn-context.js";
 import { ProxyService } from './network/proxy-service.js';
 const log = createChildLogger({ module: "core" });
+const FAILED_THREAD_CLEANUP_TIMEOUT_MS = 5_000;
 
 /**
  * Top-level orchestrator that wires all OpenACP modules together.
@@ -155,6 +156,9 @@ export class OpenACPCore {
     this.messageTransformer = new MessageTransformer();
     this.eventBus = new EventBus();
     this.sessionManager.setEventBus(this.eventBus);
+    this.sessionManager.setSessionResourceCleanup((sessionId) => {
+      this.disconnectSessionBridges(sessionId);
+    });
 
     // SessionFactory uses a lazy accessor for speechService (resolved from ServiceRegistry after plugin boot)
     this.sessionFactory = new SessionFactory(
@@ -206,9 +210,8 @@ export class OpenACPCore {
       configManager: this.configManager,
       eventBus: this.eventBus,
       adapters: this.adapters,
-      bridges: this.bridges,
       createBridge: (session, adapter, adapterId) => this.createBridge(session, adapter, adapterId),
-      getSessionBridgeKeys: (sessionId: string) => this.getSessionBridgeKeys(sessionId),
+      disconnectSessionBridges: (sessionId: string) => this.disconnectSessionBridges(sessionId),
       getMiddlewareChain: () => this.lifecycleManager?.middlewareChain,
       getService: <T>(name: string) => this.lifecycleManager.serviceRegistry.get<T>(name),
     });
@@ -493,7 +496,7 @@ export class OpenACPCore {
     // Update activity timestamp for all sources
     this.sessionManager.patchRecord(session.id, {
       lastActiveAt: new Date().toISOString(),
-    });
+    }, { expectedSession: session });
 
     // Emit MESSAGE_QUEUED — always, for all sources, no adapter-specific conditions
     this.eventBus.emit(BusEvent.MESSAGE_QUEUED, {
@@ -603,74 +606,116 @@ export class OpenACPCore {
     threadTitle?: string;
     threadId?: string;
     isAssistant?: boolean;
+    userId?: string;
     /** Glob patterns matched against bash command descriptions to auto-approve without user prompts. */
     autoApprovedCommands?: string[];
   }): Promise<Session> {
     const adapter = this.adapters.get(params.channelId);
 
-    // Create thread FIRST (before spawning the agent) so the user sees the topic
-    // appear immediately. Session ID is not yet known at this point — the adapter
-    // logs it as empty and skips tracing; this is updated in the persisted record below.
+    // Existing IDs acquire their exclusive lifecycle owner before connector side
+    // effects (for example creating a Telegram topic). SessionFactory accepts the
+    // same lease so it does not open a second registration generation.
+    const registrationLease = params.existingSessionId
+      ? this.sessionManager.beginSessionRegistration?.(params.existingSessionId)
+      : undefined;
+
     let preCreatedThreadId: string | undefined;
-    if (params.createThread && adapter) {
-      const name = params.threadTitle ?? params.initialName ?? `🔄 ${params.agentName} — New Session`;
-      preCreatedThreadId = await adapter.createSessionThread("", name);
-    }
-
-    // 1-3. Spawn/resume agent, create Session, register in SessionManager
-    const session = await this.sessionFactory.create(params);
-
-    // Apply thread ID: pre-created thread takes priority over params.threadId
-    const resolvedThreadId = preCreatedThreadId ?? params.threadId;
-    if (resolvedThreadId) {
-      session.threadId = resolvedThreadId;
-    }
-
-    // 5. Persist initial record BEFORE bridge.connect() so that:
-    //    - Lazy resume can find the record by threadId
-    //    - sendSkillCommands/renameSessionThread have threadId available
-    const existingRecord = this.sessionStore?.get(session.id);
-    const platform: Record<string, unknown> = {
-      ...(existingRecord?.platform ?? {}),
-    };
-    if (session.threadId) {
-      if (params.channelId === "telegram") {
-        platform.topicId = Number(session.threadId);
-      } else {
-        platform.threadId = session.threadId;
+    let session!: Session;
+    try {
+      // Connector side effects happen only after exclusive ownership is known,
+      // but before agent startup so the user sees setup progress immediately.
+      if (params.createThread && adapter) {
+        const name = params.threadTitle ?? params.initialName ?? `🔄 ${params.agentName} — New Session`;
+        preCreatedThreadId = await adapter.createSessionThread("", name);
       }
+      session = await this.sessionFactory.create(params, registrationLease);
+    } catch (error) {
+      if (preCreatedThreadId && adapter) {
+        await this.cleanupFailedSessionThread(adapter, preCreatedThreadId, session?.id);
+      }
+      if (session) await this.sessionManager.discardSession(session);
+      if (registrationLease) this.sessionManager.releaseSessionRegistration?.(registrationLease);
+      throw error;
     }
+    try {
+      this.sessionManager.assertCurrentLiveSession?.(session);
 
-    // Also persist the multi-adapter platforms map so lazy resume can find sessions
-    // by threadId for non-Telegram adapters (which use threadId instead of topicId).
-    const platforms: Record<string, Record<string, unknown>> = {
-      ...(existingRecord?.platforms ?? {}),
-    };
-    if (session.threadId) {
-      platforms[params.channelId] = params.channelId === "telegram"
-        ? { topicId: Number(session.threadId) || session.threadId }
-        : { threadId: session.threadId };
+      // Apply thread ID: pre-created thread takes priority over params.threadId
+      const resolvedThreadId = preCreatedThreadId ?? params.threadId;
+      if (resolvedThreadId) {
+        session.threadId = resolvedThreadId;
+      }
+
+      // 5. Persist initial record BEFORE bridge.connect() so that:
+      //    - Lazy resume can find the record by threadId
+      //    - sendSkillCommands/renameSessionThread have threadId available
+      const existingRecord = this.sessionStore?.get(session.id);
+      const platform: Record<string, unknown> = {
+        ...(existingRecord?.platform ?? {}),
+      };
+      if (session.threadId) {
+        if (params.channelId === "telegram") {
+          platform.topicId = Number(session.threadId);
+        } else {
+          platform.threadId = session.threadId;
+        }
+      }
+
+      // Also persist the multi-adapter platforms map so lazy resume can find sessions
+      // by threadId for non-Telegram adapters (which use threadId instead of topicId).
+      const platforms: Record<string, Record<string, unknown>> = {
+        ...(existingRecord?.platforms ?? {}),
+      };
+      if (session.threadId) {
+        platforms[params.channelId] = params.channelId === "telegram"
+          ? { topicId: Number(session.threadId) || session.threadId }
+          : { threadId: session.threadId };
+      }
+
+      try {
+        await this.sessionManager.patchRecord(session.id, {
+          sessionId: session.id,
+          agentSessionId: session.agentSessionId,
+          agentName: params.agentName,
+          workingDir: params.workingDirectory,
+          channelId: params.channelId,
+          status: session.status,
+          createdAt: session.createdAt.toISOString(),
+          lastActiveAt: new Date().toISOString(),
+          name: session.name,
+          isAssistant: params.isAssistant,
+          platform,
+          platforms,
+          firstAgent: session.firstAgent,
+          currentPromptCount: session.promptCount,
+          agentSwitchHistory: session.agentSwitchHistory,
+          clientOverrides: session.clientOverrides,
+          attachedAdapters: session.attachedAdapters,
+          // Cache ACP state for display before agent reconnects on lazy resume
+          acpState: session.toAcpStateSnapshot(),
+        }, { immediate: true, expectedSession: session, registrationLease });
+      } catch (error) {
+        if (preCreatedThreadId && adapter) {
+          await this.cleanupFailedSessionThread(adapter, preCreatedThreadId, session.id);
+        }
+        await this.sessionManager.discardSession(session);
+        throw error;
+      }
+    } finally {
+      if (registrationLease) this.sessionManager.releaseSessionRegistration?.(registrationLease);
     }
+    this.sessionManager.assertCurrentLiveSession?.(session);
 
-    await this.sessionManager.patchRecord(session.id, {
-      sessionId: session.id,
-      agentSessionId: session.agentSessionId,
-      agentName: params.agentName,
-      workingDir: params.workingDirectory,
-      channelId: params.channelId,
-      status: session.status,
-      createdAt: session.createdAt.toISOString(),
-      lastActiveAt: new Date().toISOString(),
-      name: session.name,
-      isAssistant: params.isAssistant,
-      platform,
-      platforms,
-      firstAgent: session.firstAgent,
-      currentPromptCount: session.promptCount,
-      agentSwitchHistory: session.agentSwitchHistory,
-      // Cache ACP state for display before agent reconnects on lazy resume
-      acpState: session.toAcpStateSnapshot(),
-    }, { immediate: true });
+    // Success becomes externally observable only after the initial record is durable.
+    if (!session.isAssistant) {
+      this.eventBus.emit(BusEvent.SESSION_CREATED, {
+        sessionId: session.id,
+        name: session.name,
+        agent: session.agentName,
+        status: session.status,
+        userId: params.userId,
+      });
+    }
 
     // 6. Connect SessionBridge — agent events can now fire with threadId available
     if (adapter) {
@@ -713,29 +758,76 @@ export class OpenACPCore {
       // Persist session name and notify SSE clients when autoName fires.
       // For bridged sessions this is handled by SessionBridge's "named" listener;
       // headless sessions have no bridge so we wire it here instead.
-      session.on(SessionEv.NAMED, async (name: string) => {
-        await this.sessionManager.patchRecord(session.id, { name });
-        this.eventBus.emit(BusEvent.SESSION_UPDATED, { sessionId: session.id, name });
+      session.on(SessionEv.NAMED, (name: string) => {
+        const task = async () => {
+          const agentGeneration = session.agentGeneration;
+          if (!this.sessionManager.isCurrentLiveSession(session)) return;
+          await this.sessionManager.patchRecord(
+            session.id,
+            { name },
+            { expectedSession: session },
+          );
+          if (
+            !this.sessionManager.isCurrentLiveSession(session) ||
+            session.agentGeneration !== agentGeneration
+          ) return;
+          this.eventBus.emit(BusEvent.SESSION_UPDATED, { sessionId: session.id, name });
+        };
+        void task().catch((err) => {
+          log.error({ err, sessionId: session.id }, "Headless session name persistence failed");
+        });
       });
 
       // Forward agent events to EventBus so SSE clients can observe the session.
       // Also handles session lifecycle transitions (session_end → finish, error → fail)
       // and fires agent:beforeEvent middleware — all normally handled by SessionBridge.
       const mw = () => this.lifecycleManager?.middlewareChain;
-      session.on(SessionEv.AGENT_EVENT, async (event: AgentEvent) => {
+      session.on(SessionEv.AGENT_EVENT, (event: AgentEvent) => {
+        const task = async () => {
+        const agentGeneration = session.agentGeneration;
+        const isCurrentGeneration = (allowFinished = false) => (
+          this.sessionManager.isCurrentSession(session) &&
+          session.agentGeneration === agentGeneration &&
+          (allowFinished
+            ? session.status === 'finished' || this.sessionManager.isCurrentLiveSession(session)
+            : this.sessionManager.isCurrentLiveSession(session) &&
+              session.status !== 'finished' && session.status !== 'cancelled')
+        );
+        if (!isCurrentGeneration()) return;
         let processedEvent = event;
         const chain = mw();
         if (chain) {
           const result = await chain.execute(Hook.AGENT_BEFORE_EVENT, { sessionId: session.id, event }, async (e) => e);
+          if (!isCurrentGeneration()) return;
           if (!result) return; // blocked by middleware
           processedEvent = result.event;
         }
         if (processedEvent.type === "session_end") {
-          session.finish((processedEvent as { reason?: string }).reason);
+          if (!session.finish((processedEvent as { reason?: string }).reason)) return;
+          await this.sessionManager.patchRecord(session.id, {
+            status: 'finished',
+            lastActiveAt: new Date().toISOString(),
+          }, { immediate: true, expectedSession: session });
+          if (!isCurrentGeneration(true)) return;
         } else if (processedEvent.type === "error") {
-          session.fail((processedEvent as { message: string }).message);
+          if (!isCurrentGeneration()) return;
+          if (!session.fail((processedEvent as { message: string }).message)) return;
+        } else if (processedEvent.type === "session_info_update" && processedEvent.title) {
+          if (!isCurrentGeneration()) return;
+          session.setName(processedEvent.title);
+        } else if (processedEvent.type === "config_option_update") {
+          await session.updateConfigOptions(processedEvent.options, agentGeneration);
+          if (!isCurrentGeneration()) return;
+          await this.sessionManager.patchRecord(session.id, {
+            acpState: session.toAcpStateSnapshot(),
+          }, { expectedSession: session });
         }
+        if (!isCurrentGeneration(processedEvent.type === 'session_end')) return;
         this.eventBus.emit(BusEvent.AGENT_EVENT, { sessionId: session.id, turnId: session.activeTurnContext?.turnId ?? '', event: processedEvent });
+        };
+        void task().catch((err) => {
+          log.error({ err, sessionId: session.id }, "Headless agent event handling failed");
+        });
       });
 
       // Persist status changes and notify SSE clients — normally wired by SessionBridge.
@@ -743,13 +835,21 @@ export class OpenACPCore {
         this.sessionManager.patchRecord(session.id, {
           status: to,
           lastActiveAt: new Date().toISOString(),
+        }, { expectedSession: session }).catch((err) => {
+          log.error({ err, sessionId: session.id }, "Headless status persistence failed");
         });
         this.eventBus.emit(BusEvent.SESSION_UPDATED, { sessionId: session.id, status: to });
       });
 
       // Persist prompt count after each prompt — normally wired by SessionBridge.
       session.on(SessionEv.PROMPT_COUNT_CHANGED, (count: number) => {
-        this.sessionManager.patchRecord(session.id, { currentPromptCount: count });
+        this.sessionManager.patchRecord(
+          session.id,
+          { currentPromptCount: count },
+          { expectedSession: session },
+        ).catch((err) => {
+          log.error({ err, sessionId: session.id }, "Headless prompt count persistence failed");
+        });
       });
 
       // Emit message:processing so SSE clients (App) can transition pending → conversation.
@@ -780,6 +880,39 @@ export class OpenACPCore {
       "Session created via pipeline",
     );
     return session;
+  }
+
+  private async cleanupFailedSessionThread(
+    adapter: IChannelAdapter,
+    threadId: string,
+    sessionId?: string,
+  ): Promise<void> {
+    const cleanupThread = adapter.deleteSessionThreadById
+      ? () => adapter.deleteSessionThreadById!(threadId)
+      : sessionId && adapter.deleteSessionThread
+        ? () => adapter.deleteSessionThread!(sessionId)
+        : undefined;
+    if (!cleanupThread) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = Promise.resolve()
+      .then(cleanupThread)
+      .then(
+        () => ({ status: "completed" as const }),
+        () => ({ status: "failed" as const }),
+      );
+    const result = await Promise.race([
+      cleanup,
+      new Promise<{ status: "timed-out" }>((resolve) => {
+        timer = setTimeout(() => resolve({ status: "timed-out" }), FAILED_THREAD_CLEANUP_TIMEOUT_MS);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (result.status !== "completed") {
+      log.warn(
+        { sessionId, adapterId: adapter.name, cleanupStatus: result.status },
+        "Failed session thread cleanup did not complete",
+      );
+    }
   }
 
   /** Convenience wrapper: create a new session with default agent/workspace resolution. */
@@ -946,7 +1079,7 @@ export class OpenACPCore {
       originalAgentSessionId: agentSessionId,
       platform: adoptPlatform,
       platforms: adoptPlatforms,
-    });
+    }, { expectedSession: session });
 
     return {
       ok: true,
@@ -1000,6 +1133,7 @@ export class OpenACPCore {
   async attachAdapter(sessionId: string, adapterId: string): Promise<{ threadId: string }> {
     const session = this.sessionManager.getSession(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
+    this.sessionManager.assertCurrentLiveSession(session);
 
     const adapter = this.adapters.get(adapterId);
     if (!adapter) throw new Error(`Adapter "${adapterId}" not found or not running`);
@@ -1015,6 +1149,7 @@ export class OpenACPCore {
       session.id,
       session.name ?? `Session ${session.id.slice(0, 6)}`,
     );
+    this.sessionManager.assertCurrentLiveSession(session);
     session.threadIds.set(adapterId, threadId);
     session.attachedAdapters.push(adapterId);
 
@@ -1026,7 +1161,8 @@ export class OpenACPCore {
     await this.sessionManager.patchRecord(session.id, {
       attachedAdapters: session.attachedAdapters,
       platforms: this.buildPlatformsFromSession(session),
-    });
+    }, { expectedSession: session });
+    this.sessionManager.assertCurrentLiveSession(session);
 
     return { threadId };
   }
@@ -1057,6 +1193,7 @@ export class OpenACPCore {
         });
       } catch { /* best effort */ }
     }
+    this.sessionManager.assertCurrentLiveSession(session);
 
     // Disconnect bridge
     const key = this.bridgeKey(adapterId, session.id);
@@ -1074,7 +1211,7 @@ export class OpenACPCore {
     await this.sessionManager.patchRecord(session.id, {
       attachedAdapters: session.attachedAdapters,
       platforms: this.buildPlatformsFromSession(session),
-    });
+    }, { expectedSession: session });
   }
 
   /** Build the platforms map (adapter → thread/topic IDs) for persistence. */
@@ -1106,8 +1243,20 @@ export class OpenACPCore {
     return keys;
   }
 
+  /** Core owns the bridge registry; terminal lifecycle code calls this synchronously. */
+  private disconnectSessionBridges(sessionId: string): number {
+    const keys = this.getSessionBridgeKeys(sessionId);
+    for (const key of keys) {
+      const bridge = this.bridges.get(key);
+      this.bridges.delete(key);
+      bridge?.disconnect();
+    }
+    return keys.length;
+  }
+
   /** Connect a session bridge for the given session (used by AssistantManager) */
   connectSessionBridge(session: Session): void {
+    this.sessionManager.assertCurrentLiveSession(session);
     const adapter = this.adapters.get(session.channelId);
     if (!adapter) return;
     const bridge = this.createBridge(session, adapter, session.channelId);
@@ -1122,6 +1271,7 @@ export class OpenACPCore {
    * bridge for the same adapter+session first to avoid duplicate event handlers.
    */
   createBridge(session: Session, adapter: IChannelAdapter, adapterId?: string): SessionBridge {
+    this.sessionManager.assertCurrentLiveSession?.(session);
     const id = adapterId ?? adapter.name;
     const key = this.bridgeKey(id, session.id);
     const existing = this.bridges.get(key);

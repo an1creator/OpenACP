@@ -30,9 +30,9 @@ $ERROR_C   = "$ESC[38;2;239;68;68m"      # red #ef4444
 $MUTED     = "$ESC[38;2;90;100;128m"     # text-muted #5a6480
 $NC        = "$ESC[0m"
 
-$INSTALLER_VERSION = "1.0.1"
+$INSTALLER_VERSION = "1.0.2"
 
-$NODE_MIN_MAJOR = 20
+$NODE_MIN_MAJOR = 22
 
 function Write-Msg {
     param(

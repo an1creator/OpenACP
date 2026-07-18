@@ -32,6 +32,26 @@ function makePluginCtx(overrides: {
 }
 
 describe("speech plugin setup()", () => {
+  it('migrates only the persisted 1.0.0 timeout default to the safer value', async () => {
+    expect(speechPlugin.version).toBe('1.0.1')
+    await expect(speechPlugin.migrate!({} as any, { localWhisperTimeoutMs: 120_000, keep: true }, '1.0.0'))
+      .resolves.toEqual({ localWhisperTimeoutMs: 600_000, keep: true })
+  })
+
+  it.each([undefined, 1_000, 300_000, 600_000])('preserves an absent or non-legacy-value 1.0.0 timeout (%s)', async (timeout) => {
+    const settings = timeout === undefined ? { keep: true } : { localWhisperTimeoutMs: timeout, keep: true }
+    await expect(speechPlugin.migrate!({} as any, settings, '1.0.0')).resolves.toEqual(settings)
+  })
+
+  it('does not reapply the legacy migration on a future version mismatch', async () => {
+    await expect(speechPlugin.migrate!({} as any, { localWhisperTimeoutMs: 120_000 }, '1.0.1'))
+      .resolves.toEqual({ localWhisperTimeoutMs: 120_000 })
+  })
+
+  it('recovers a non-object legacy settings payload to an empty settings object', async () => {
+    await expect(speechPlugin.migrate!({} as any, null, '1.0.0')).resolves.toEqual({})
+  })
+
   it("enables STT when groqApiKey is in plugin settings", async () => {
     const { ctx, getService } = makePluginCtx({
       pluginConfig: { groqApiKey: "gsk_from_settings" },

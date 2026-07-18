@@ -72,6 +72,7 @@ export class GroqSTT implements STTProvider {
       method: "POST",
       headers: { Authorization: `Bearer ${this.apiKey}` },
       body: form,
+      signal: options?.signal,
     });
 
     if (!resp.ok) {

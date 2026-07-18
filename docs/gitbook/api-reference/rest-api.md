@@ -165,11 +165,13 @@ request for a persisted terminal session is idempotent.
 }
 ```
 
-The terminal record is flushed before agent/logger teardown. If teardown fails,
-the request still truthfully returns `status: "cancelled"`, plus
-`cleanupPending: true` and a safe warning. Repeating DELETE retries cleanup
-without aborting twice; the cancelled record is never resumed after restart.
-Unknown IDs return HTTP 404 with `SESSION_NOT_FOUND`.
+The terminal record is flushed before agent/logger teardown. The request has a
+bounded wait: if teardown fails or is still running at the deadline, it still
+truthfully returns `status: "cancelled"`, plus `cleanupPending: true` and a safe
+warning. Repeating DELETE observes the same in-flight teardown or retries a
+completed failure without duplicating prompt cancellation or process destroy.
+The cancelled record is never resumed after restart. Unknown IDs return HTTP
+404 with `SESSION_NOT_FOUND`.
 
 ---
 
@@ -239,24 +241,6 @@ curl -X POST \
   -H "Content-Type: application/json" \
   -d '{"agent":"claude","workspace":"/path/to/project"}' \
   http://localhost:21420/api/sessions
-```
-
----
-
-### DELETE /api/sessions/:id
-
-Cancels a session.
-
-**Response**
-```json
-{ "ok": true }
-```
-
-Returns `404` if not found.
-
-```bash
-curl -X DELETE -H "Authorization: Bearer $TOKEN" \
-  http://localhost:21420/api/sessions/sess_abc123
 ```
 
 ---

@@ -64,10 +64,10 @@ describe("AgentCatalog", () => {
         ttlHours: 24,
         data: {
           agents: [{
-            id: "codex-acp", name: "Codex", version: "1.1.2",
+            id: "codex-acp", name: "Codex", version: "1.1.4",
             description: "ACP adapter for OpenAI's coding assistant",
             distribution: {
-              npx: { package: "@agentclientprotocol/codex-acp@1.1.2" },
+              npx: { package: "@agentclientprotocol/codex-acp@1.1.4" },
             },
           }],
         },
@@ -87,7 +87,7 @@ describe("AgentCatalog", () => {
       });
       expect(catalog.getInstalledAgent("codex")).toMatchObject({
         name: "Codex",
-        version: "1.1.2",
+        version: "1.1.4",
       });
     });
   });

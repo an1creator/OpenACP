@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": "../..",
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": ".",
+    "paths": {
+      "@n1creator/openacp-cli": ["dist/index.d.ts"],
+      "@n1creator/openacp-plugin-sdk": ["packages/plugin-sdk/dist/index.d.ts"]
+    }
+  },
+  "include": ["published-adapter-contract.ts"],
+  "exclude": []
+}

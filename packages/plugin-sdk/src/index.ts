@@ -33,7 +33,7 @@ export type {
   ScopedFetch, ScopedRequestBody, ScopedRequestInit,
 } from './proxy-types.js'
 
-// --- Speech types (self-contained, no @n1creator/openacp-cli dependency) ---
+// --- Speech types (canonical CLI runtime contract) ---
 export type {
   TTSProvider, TTSOptions, TTSResult,
   STTProvider, STTOptions, STTResult,

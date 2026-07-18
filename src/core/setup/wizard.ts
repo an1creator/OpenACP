@@ -20,6 +20,7 @@ import { getGlobalRoot } from "../instance/instance-context.js";
 import { randomUUID } from "node:crypto";
 import { copyInstance } from "../instance/instance-copy.js";
 import { protectLocalInstance } from "./git-protect.js";
+import { evaluateNodeRuntime, nodeRuntimeMessage } from '../utils/node-runtime.js';
 
 // ─── Registry discovery ───
 
@@ -106,6 +107,11 @@ export async function runSetup(
 ): Promise<boolean> {
   await printStartBanner();
   clack.intro("Let's set up OpenACP");
+
+  if (!evaluateNodeRuntime().supported) {
+    console.log(fail(nodeRuntimeMessage()));
+    return false;
+  }
 
   const { settingsManager, pluginRegistry } = opts ?? {};
 
@@ -520,7 +526,7 @@ async function registerBuiltinPlugins(
     { name: '@openacp/security', version: '1.0.0', description: 'User access control and session limits' },
     { name: '@openacp/file-service', version: '1.0.0', description: 'File storage and management' },
     { name: '@openacp/context', version: '1.0.0', description: 'Conversation context management' },
-    { name: '@openacp/speech', version: '1.0.0', description: 'Text-to-speech and speech-to-text' },
+    { name: '@openacp/speech', version: '1.0.1', description: 'Text-to-speech and speech-to-text' },
     { name: '@openacp/notifications', version: '1.0.0', description: 'Cross-session notification routing' },
     { name: '@openacp/tunnel', version: '1.0.0', description: 'Expose local services via tunnel' },
     { name: '@openacp/api-server', version: '1.0.0', description: 'REST API + SSE streaming server' },

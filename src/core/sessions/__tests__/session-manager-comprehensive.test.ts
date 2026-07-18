@@ -32,7 +32,7 @@ function createSession(overrides: Record<string, unknown> = {}): Session {
 function createMockStore(): SessionStore {
   const records = new Map<string, SessionRecord>();
   return {
-    save: vi.fn(async (record: SessionRecord) => {
+    save: vi.fn(async (record: SessionRecord, _options?: { immediate?: boolean }) => {
       records.set(record.sessionId, { ...record });
     }),
     get: vi.fn((id: string) => records.get(id)),
@@ -75,7 +75,7 @@ describe("SessionManager — Comprehensive Tests", () => {
       expect(mgr.getSession("nonexistent")).toBeUndefined();
     });
 
-    it("overwrites registration with same id", () => {
+    it("rejects and destroys a duplicate registration without replacing the owner", async () => {
       const mgr = new SessionManager();
       const session1 = createSession();
       const id = session1.id;
@@ -88,9 +88,13 @@ describe("SessionManager — Comprehensive Tests", () => {
         workingDirectory: "/other",
         agentInstance: mockAgentInstance(),
       });
-      mgr.registerSession(session2);
+      expect(() => mgr.registerSession(session2)).toThrow(
+        expect.objectContaining({ code: 'SESSION_REGISTRATION_SUPERSEDED' }),
+      );
 
-      expect(mgr.getSession(id)).toBe(session2);
+      expect(mgr.getSession(id)).toBe(session1);
+      await vi.waitFor(() => expect(session2.agentInstance.destroy).toHaveBeenCalledOnce());
+      expect(session1.agentInstance.destroy).not.toHaveBeenCalled();
     });
   });
 
@@ -271,8 +275,9 @@ describe("SessionManager — Comprehensive Tests", () => {
       await mgr.cancelSession("orphan");
 
       // Store should have been updated
-      expect(store.save).toHaveBeenCalledWith(
+      expect(store.save).toHaveBeenLastCalledWith(
         expect.objectContaining({ sessionId: "orphan", status: "cancelled" }),
+        { immediate: true },
       );
     });
 

@@ -203,4 +203,71 @@ describe('Session.switchAgent', () => {
     // Old agent should not receive the new prompt (only destroy was called)
     expect(oldAgent.prompt).not.toHaveBeenCalled()
   })
+
+  it('destroys an unresponsive in-flight agent before creating the replacement', async () => {
+    vi.useFakeTimers()
+    try {
+      let finishPrompt!: () => void
+      const oldAgent = mockAgentInstance()
+      oldAgent.prompt.mockImplementation(() => new Promise<void>((resolve) => { finishPrompt = resolve }))
+      oldAgent.cancel.mockImplementation(() => new Promise<void>(() => {}))
+      oldAgent.destroy.mockImplementation(async () => { finishPrompt() })
+      const session = createTestSession(oldAgent, 'claude')
+      const newAgent = mockAgentInstance({ sessionId: 'new-sess' })
+      const createNewAgent = vi.fn(async () => newAgent)
+
+      const prompt = session.enqueuePrompt('in flight')
+      await vi.waitFor(() => expect(oldAgent.prompt).toHaveBeenCalledOnce())
+      const switching = session.switchAgent('gemini', createNewAgent)
+      await Promise.resolve()
+
+      expect(oldAgent.cancel).toHaveBeenCalledOnce()
+      expect(oldAgent.destroy).not.toHaveBeenCalled()
+      expect(createNewAgent).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(5_000)
+      vi.useRealTimers()
+
+      await Promise.all([prompt, switching])
+      expect(oldAgent.destroy).toHaveBeenCalledOnce()
+      expect(oldAgent.prompt).toHaveBeenCalledOnce()
+      expect(createNewAgent).toHaveBeenCalledOnce()
+      expect(session.agentInstance).toBe(newAgent)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('destroys an unresponsive auto-name agent before creating the replacement', async () => {
+    vi.useFakeTimers()
+    try {
+      let finishAutoName!: () => void
+      const oldAgent = mockAgentInstance()
+      oldAgent.prompt
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(() => new Promise<void>((resolve) => { finishAutoName = resolve }))
+      oldAgent.cancel.mockImplementation(() => new Promise<void>(() => {}))
+      oldAgent.destroy.mockImplementation(async () => { finishAutoName() })
+      const session = createTestSession(oldAgent, 'claude')
+      const newAgent = mockAgentInstance({ sessionId: 'new-sess' })
+      const createNewAgent = vi.fn(async () => newAgent)
+
+      const prompt = session.enqueuePrompt('name this session')
+      await vi.waitFor(() => expect(oldAgent.prompt).toHaveBeenCalledTimes(2))
+      const switching = session.switchAgent('gemini', createNewAgent)
+      await Promise.resolve()
+
+      expect(oldAgent.cancel).toHaveBeenCalledOnce()
+      expect(oldAgent.destroy).not.toHaveBeenCalled()
+      expect(createNewAgent).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(5_000)
+      vi.useRealTimers()
+
+      await Promise.all([prompt, switching])
+      expect(oldAgent.destroy).toHaveBeenCalledOnce()
+      expect(createNewAgent).toHaveBeenCalledOnce()
+      expect(session.agentInstance).toBe(newAgent)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

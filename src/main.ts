@@ -602,7 +602,7 @@ async function autoRegisterBuiltinPlugins(
     { name: '@openacp/security', version: '1.0.0', description: 'User access control and session limits' },
     { name: '@openacp/file-service', version: '1.0.0', description: 'File storage and management' },
     { name: '@openacp/context', version: '1.0.0', description: 'Conversation context management' },
-    { name: '@openacp/speech', version: '1.0.0', description: 'Text-to-speech and speech-to-text' },
+    { name: '@openacp/speech', version: '1.0.1', description: 'Text-to-speech and speech-to-text' },
     { name: '@openacp/notifications', version: '1.0.0', description: 'Cross-session notification routing' },
     { name: '@openacp/tunnel', version: '1.0.0', description: 'Expose local services via tunnel' },
     { name: '@openacp/api-server', version: '1.0.0', description: 'REST API + SSE streaming server' },

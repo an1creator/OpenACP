@@ -134,7 +134,7 @@ openacp install @openacp/adapter-discord
 
 ## Maintainer release recovery
 
-The release workflow verifies Node 20 and 24, checks that the versioned tag is
+The release workflow verifies Node 22 and 24, checks that the versioned tag is
 reachable from `main`, and requires the tag, both package manifests, and the
 CHANGELOG release heading to match. It packs both npm artifacts before making a
 registry change. With npm trusted-publishing OIDC it publishes the CLI and then

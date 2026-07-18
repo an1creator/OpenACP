@@ -184,7 +184,8 @@ Core manages sessions and expects the adapter to maintain corresponding UI threa
 async createSessionThread(sessionId: string, name: string): Promise<string> {
   // Create a thread or channel for this session
   const thread = await this.client.createThread(name)
-  this.sessionThreads.set(sessionId, thread.id)
+  // sessionId can be empty while Core pre-creates the thread before agent startup.
+  if (sessionId) this.sessionThreads.set(sessionId, thread.id)
   return thread.id  // return the platform thread ID
 }
 
@@ -192,9 +193,22 @@ async renameSessionThread(sessionId: string, newName: string): Promise<void> {
   const threadId = this.sessionThreads.get(sessionId)
   if (threadId) await this.client.renameThread(threadId, newName)
 }
+
+async deleteSessionThreadById(threadId: string): Promise<void> {
+  // Optional, but recommended for threaded platforms. Core calls this when
+  // startup or the initial durable session write fails after thread creation.
+  await this.client.deleteThread(threadId)
+}
 ```
 
-`deleteSessionThread` and `archiveSessionTopic` are optional — the base class provides no-op defaults.
+`deleteSessionThread(sessionId)` and `archiveSessionTopic(sessionId)` are optional
+session-aware cleanup hooks with base-class no-op defaults.
+`deleteSessionThreadById(threadId)` is an optional capability without a base
+default, so Core can detect support. Implement it when `createSessionThread`
+creates a remote resource: Core uses it to remove a pre-created thread even when
+agent startup fails before a `Session` record exists. Adapters that omit it remain
+compatible; Core falls back to `deleteSessionThread(sessionId)` once a session ID
+is available.
 
 ---
 

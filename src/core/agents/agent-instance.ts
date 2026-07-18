@@ -51,6 +51,7 @@ import type {
 } from "@agentclientprotocol/sdk";
 import { createDebugTracer, type DebugTracer } from "../utils/debug-tracer.js";
 import { createChildLogger } from "../utils/log.js";
+import { redactNetworkSecrets } from "../security/network-redaction.js";
 import { Hook, SessionEv } from "../events.js";
 const log = createChildLogger({ module: "agent-instance" });
 
@@ -276,6 +277,8 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
   private static mcpManager = new McpManager();
   /** Guards against emitting crash events during intentional shutdown. */
   private _destroying = false;
+  /** All teardown callers share one exact subprocess cleanup operation. */
+  private _destroyOperation: Promise<void> | null = null;
   /** Restricts agent file I/O to the workspace directory and explicitly allowed paths. */
   private pathGuard!: PathGuard;
 
@@ -306,6 +309,26 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
   private constructor(agentName: string) {
     super();
     this.agentName = agentName;
+  }
+
+  private static async cleanupFailedInitialization(
+    instance: AgentInstance,
+    originalError: unknown,
+  ): Promise<never> {
+    try {
+      await instance.destroy();
+    } catch (cleanupError) {
+      log.warn(
+        {
+          agentName: instance.agentName,
+          error: redactNetworkSecrets(
+            cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+          ),
+        },
+        "Failed agent initialization cleanup did not complete",
+      );
+    }
+    throw originalError;
   }
 
   /**
@@ -358,6 +381,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
       },
     );
 
+    try {
     await new Promise<void>((resolve, reject) => {
       instance.child.on("error", (err) => {
         reject(
@@ -452,6 +476,9 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     );
 
     return instance;
+    } catch (error) {
+      return AgentInstance.cleanupFailedInitialization(instance, error);
+    }
   }
 
   /**
@@ -556,7 +583,11 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     const spawnStart = Date.now();
 
     const instance = await AgentInstance.spawnSubprocess(agentDef, workingDirectory, allowedPaths, environment);
-    await instance.claimForSession(workingDirectory, mcpServers, agentDef.initTimeoutMs);
+    try {
+      await instance.claimForSession(workingDirectory, mcpServers, agentDef.initTimeoutMs);
+    } catch (error) {
+      return AgentInstance.cleanupFailedInitialization(instance, error);
+    }
 
     log.info(
       {
@@ -599,6 +630,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
 
     const resolvedMcp = AgentInstance.mcpManager.resolve(mcpServers);
 
+    try {
     try {
       if (instance.agentCapabilities?.loadSession) {
         // Agent supports session/load — preferred over unstable session/resume
@@ -660,6 +692,9 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
 
     instance.setupCrashDetection();
     return instance;
+    } catch (error) {
+      return AgentInstance.cleanupFailedInitialization(instance, error);
+    }
   }
 
   /**
@@ -1104,22 +1139,34 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
    * during shutdown.
    */
   async destroy(): Promise<void> {
+    if (this._destroyOperation) return this._destroyOperation;
     this._destroying = true;
+    const operation = this.performDestroy();
+    this._destroyOperation = operation;
+    return operation;
+  }
 
+  private async performDestroy(): Promise<void> {
     this.terminalManager.destroyAll();
 
-    if (this.child.exitCode !== null) return;
+    if (!this.child || this.child.exitCode !== null) return;
 
     await new Promise<void>((resolve) => {
+      let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
       // Register exit listener BEFORE sending signal to avoid race
       this.child.on("exit", () => {
-        clearTimeout(forceKillTimer);
+        if (forceKillTimer) clearTimeout(forceKillTimer);
         resolve();
       });
 
-      this.child.kill("SIGTERM");
+      try {
+        this.child.kill("SIGTERM");
+      } catch {
+        resolve();
+        return;
+      }
 
-      const forceKillTimer = setTimeout(() => {
+      forceKillTimer = setTimeout(() => {
         // Use exitCode check — child.killed is true after ANY kill() call,
         // even if the process hasn't actually exited yet
         if (this.child.exitCode === null) this.child.kill("SIGKILL");

@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { buildSpeechServiceConfig, createNativeSTTProviders } from '../native-stt.js'
+import { buildSpeechServiceConfig, createNativeSTTProviders, readLocalWhisperSettings } from '../native-stt.js'
 
 describe('native STT configuration', () => {
+  it('uses a ten-minute local timeout for first-run setup and CPU transcription', () => {
+    expect(readLocalWhisperSettings({}).timeoutMs).toBe(600_000)
+  })
+
+  it.each([Number.NaN, -1, 2_147_483_648, 1.5])('falls back for an invalid persisted timeout (%s)', (timeout) => {
+    expect(readLocalWhisperSettings({ localWhisperTimeoutMs: timeout }).timeoutMs).toBe(600_000)
+  })
+
+  it.each([0, 1_000, 600_000, 2_147_483_647])('preserves a valid host timeout (%s)', (timeout) => {
+    expect(readLocalWhisperSettings({ localWhisperTimeoutMs: timeout }).timeoutMs).toBe(timeout)
+  })
+
   it('builds and instantiates the local Whisper provider without an API key', () => {
     const config = buildSpeechServiceConfig({
       sttProvider: 'local-whisper',

@@ -111,7 +111,10 @@ describe('SessionFactory lazy resume — configOptions re-application', () => {
     // Agent spawns fresh and reports default mode = 'normal'
     const agentInst = mockAgentInstance()
     const resumedSession = buildResumedSession(agentInst, 'normal')
-    factory.createFullSession = vi.fn().mockResolvedValue(resumedSession)
+    factory.createFullSession = vi.fn().mockImplementation(async () => {
+      sessionManager.registerSession(resumedSession)
+      return resumedSession
+    })
 
     const result = await factory.getOrResume('telegram', '777')
 
@@ -149,7 +152,10 @@ describe('SessionFactory lazy resume — configOptions re-application', () => {
     const agentInst = mockAgentInstance()
     const resumedSession = buildResumedSession(agentInst, 'normal')
     resumedSession.id = 'sess-resume-2'
-    factory.createFullSession = vi.fn().mockResolvedValue(resumedSession)
+    factory.createFullSession = vi.fn().mockImplementation(async () => {
+      sessionManager.registerSession(resumedSession)
+      return resumedSession
+    })
 
     const result = await factory.getOrResume('telegram', '888')
 
@@ -186,11 +192,167 @@ describe('SessionFactory lazy resume — configOptions re-application', () => {
     const agentInst = mockAgentInstance()
     const resumedSession = buildResumedSession(agentInst, 'normal')
     resumedSession.id = 'sess-resume-byid'
-    factory.createFullSession = vi.fn().mockResolvedValue(resumedSession)
+    factory.createFullSession = vi.fn().mockImplementation(async () => {
+      sessionManager.registerSession(resumedSession)
+      return resumedSession
+    })
 
     const result = await factory.getOrResumeById('sess-resume-byid')
 
     expect(result).toBe(resumedSession)
     expect(agentInst.setConfigOption).toHaveBeenCalledWith('mode', { type: 'select', value: 'bypassPermissions' })
+  })
+
+  it('returns null when cancellation wins while best-effort config hydration later rejects', async () => {
+    const persistedRecord: SessionRecord = {
+      sessionId: 'sess-resume-cancel-hydration',
+      agentSessionId: 'agent-uuid-cancel-hydration',
+      agentName: 'claude',
+      workingDir: '/tmp',
+      channelId: 'telegram',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      platform: { topicId: 1000 },
+      acpState: {
+        configOptions: [
+          {
+            id: 'mode',
+            name: 'Mode',
+            category: 'mode',
+            type: 'select',
+            currentValue: 'bypassPermissions',
+            options: MODE_OPTIONS,
+          },
+        ],
+      },
+    }
+    await store.save(persistedRecord)
+
+    let rejectConfig!: (error: Error) => void
+    const delayedConfig = new Promise<never>((_, reject) => { rejectConfig = reject })
+    const agentInst = mockAgentInstance()
+    agentInst.setConfigOption = vi.fn().mockReturnValue(delayedConfig)
+    const resumedSession = buildResumedSession(agentInst, 'normal')
+    resumedSession.id = persistedRecord.sessionId
+    factory.createFullSession = vi.fn().mockImplementation(async () => {
+      sessionManager.registerSession(resumedSession)
+      return resumedSession
+    })
+
+    const resume = factory.getOrResumeById(persistedRecord.sessionId)
+    await vi.waitFor(() => expect(agentInst.setConfigOption).toHaveBeenCalledOnce())
+    await sessionManager.cancelSession(persistedRecord.sessionId)
+    rejectConfig(new Error('late config hydration failure'))
+
+    await expect(resume).resolves.toBeNull()
+    expect(sessionManager.getSession(persistedRecord.sessionId)).toBeUndefined()
+    expect(agentInst.destroy).toHaveBeenCalledOnce()
+  })
+
+  it('hydrates durable metadata before the initial resume commit and preserves it across another restart', async () => {
+    const createdAt = '2025-01-02T03:04:05.000Z'
+    const persistedMode: ConfigOption = {
+      id: 'mode', name: 'Mode', category: 'mode', type: 'select',
+      currentValue: 'bypassPermissions', options: MODE_OPTIONS,
+    }
+    const persistedRecord: SessionRecord = {
+      sessionId: 'sess-metadata',
+      agentSessionId: 'old-agent-id',
+      agentName: 'claude',
+      workingDir: '/tmp',
+      channelId: 'telegram',
+      status: 'active',
+      createdAt,
+      lastActiveAt: '2026-07-17T00:00:00.000Z',
+      platform: { topicId: 1234 },
+      platforms: { telegram: { topicId: 1234 } },
+      attachedAdapters: ['telegram'],
+      clientOverrides: { bypassPermissions: true },
+      firstAgent: 'codex',
+      currentPromptCount: 17,
+      agentSwitchHistory: [{
+        agentName: 'codex', agentSessionId: 'codex-old',
+        switchedAt: '2026-07-16T00:00:00.000Z', promptCount: 11,
+      }],
+      acpState: { configOptions: [persistedMode] },
+    }
+    await store.save(persistedRecord)
+    store.flush()
+
+    const makeFactory = (manager: SessionManager, activeStore: JsonFileSessionStore, newAgentId: string) => {
+      const agent = mockAgentInstance()
+      agent.sessionId = newAgentId
+      agent.initialSessionResponse = {
+        configOptions: [{ ...persistedMode, currentValue: 'normal' }],
+      }
+      const localFactory = new SessionFactory(
+        { resume: vi.fn().mockResolvedValue(agent) } as any,
+        manager,
+        null as any,
+        { emit: vi.fn() } as any,
+      )
+      localFactory.sessionStore = activeStore
+      return { localFactory, agent }
+    }
+
+    const first = makeFactory(sessionManager, store, 'fresh-agent-id')
+    const resumed = await first.localFactory.create({
+      channelId: persistedRecord.channelId,
+      agentName: persistedRecord.agentName,
+      workingDirectory: persistedRecord.workingDir,
+      resumeAgentSessionId: persistedRecord.agentSessionId,
+      existingSessionId: persistedRecord.sessionId,
+    })
+    expect(resumed.createdAt.toISOString()).toBe(createdAt)
+    expect(resumed.firstAgent).toBe('codex')
+    expect(resumed.promptCount).toBe(17)
+    expect(resumed.clientOverrides).toEqual({ bypassPermissions: true })
+    expect(resumed.getConfigValue('mode')).toBe('bypassPermissions')
+
+    await sessionManager.patchRecord(resumed.id, {
+      sessionId: resumed.id,
+      agentSessionId: resumed.agentSessionId,
+      agentName: resumed.agentName,
+      workingDir: resumed.workingDirectory,
+      channelId: resumed.channelId,
+      status: resumed.status,
+      createdAt: resumed.createdAt.toISOString(),
+      lastActiveAt: new Date().toISOString(),
+      platform: persistedRecord.platform,
+      platforms: persistedRecord.platforms,
+      firstAgent: resumed.firstAgent,
+      currentPromptCount: resumed.promptCount,
+      agentSwitchHistory: resumed.agentSwitchHistory,
+      clientOverrides: resumed.clientOverrides,
+      attachedAdapters: resumed.attachedAdapters,
+      acpState: resumed.toAcpStateSnapshot(),
+    }, { immediate: true, expectedSession: resumed })
+    expect(store.get(resumed.id)).toMatchObject({
+      agentSessionId: 'fresh-agent-id',
+      createdAt,
+      firstAgent: 'codex',
+      currentPromptCount: 17,
+      clientOverrides: { bypassPermissions: true },
+      acpState: { configOptions: [expect.objectContaining({ currentValue: 'bypassPermissions' })] },
+    })
+    await sessionManager.discardSession(resumed)
+    store.destroy()
+
+    store = new JsonFileSessionStore(path.join(tmpDir, 'sessions.json'), 30)
+    const restartedManager = new SessionManager(store)
+    const second = makeFactory(restartedManager, store, 'second-agent-id')
+    const restarted = await second.localFactory.create({
+      channelId: persistedRecord.channelId,
+      agentName: persistedRecord.agentName,
+      workingDirectory: persistedRecord.workingDir,
+      resumeAgentSessionId: 'fresh-agent-id',
+      existingSessionId: persistedRecord.sessionId,
+    })
+    expect(restarted.createdAt.toISOString()).toBe(createdAt)
+    expect(restarted.promptCount).toBe(17)
+    expect(restarted.agentSwitchHistory).toEqual(persistedRecord.agentSwitchHistory)
+    expect(restarted.getConfigValue('mode')).toBe('bypassPermissions')
+    await restartedManager.discardSession(restarted)
   })
 })

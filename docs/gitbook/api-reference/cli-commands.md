@@ -213,8 +213,9 @@ The JSON result mirrors the daemon's typed cancellation result, including
 `previousStatus`, `status`, and `alreadyTerminal`. Repeated cancellation of a
 persisted terminal session succeeds idempotently; an unknown ID returns
 `SESSION_NOT_FOUND`. `cleanupPending: true` means the cancelled state is already
-durable but agent/logger teardown failed; repeat the same command to retry
-cleanup without aborting the prompt twice.
+durable but agent/logger teardown either failed or exceeded the bounded API
+wait. Repeat the same command to observe the shared cleanup operation or retry
+a completed failure without issuing duplicate prompt cancellation.
 
 ### api cleanup
 

@@ -1,5 +1,54 @@
 ## Unreleased
 
+## 2026.718.1 - 2026-07-18
+
+### Changed
+
+- Raise the native Local Whisper time limit from two to ten minutes so first-run
+  environment setup, model download, and CPU transcription have a practical
+  default. Migrate 1.0.0 settings equal to that old default and preserve absent
+  settings and all other values.
+- Pass prompt cancellation to STT providers and define the optional SDK
+  `STTOptions.signal` cleanup contract. The turn lifecycle now starts before
+  local speech preprocessing so cancellation retains paired lifecycle events.
+- Align the SDK speech test mock with canonical result-returning methods while
+  retaining deprecated `textToSpeech()` and `speechToText()` aliases for
+  test-only backward compatibility. The CLI, SDK, and runtime now expose the
+  same `synthesize()`, `transcribe()`, and provider-registration contract and
+  no longer advertise an STT unregister method that the runtime does not have.
+- Refresh the bundled offline ACP catalog from the official public registry,
+  including `@agentclientprotocol/codex-acp` 1.1.4 and Claude Agent ACP 0.59.0.
+  Update compatible Fastify Swagger, grammY, and tsx patch/minor dependencies.
+- Raise the supported runtime from Node.js 20 to Node.js 22 because Claude
+  Agent ACP 0.59.0 requires Node.js 22. Installers default to Node.js 24, and
+  release gates cover Node.js 22 and 24; Node.js 20 is no longer supported.
+
+### Fixed
+
+- Replace the opaque Local Whisper `(exit null)` failure with specific bounded
+  timeout, signal, output-limit, missing-runtime, and exit-code diagnostics.
+  Timeouts and cancellation terminate the helper process group, remove temporary
+  audio, and wait for cleanup before the next queued prompt starts.
+- Keep transcription fallback nonfatal: show a visible warning, preserve the
+  original audio for the agent, and leave the session active.
+- Bound service/API session cancellation even when both the ACP prompt and its
+  cancel request never settle. Terminal teardown is shared and idempotent,
+  force-destroys the agent after the cancellation grace period, closes the
+  queue without draining, and releases prompt callers after process teardown.
+- Keep Local Whisper temporary-file cleanup best-effort so an `rm` failure
+  cannot replace a successful transcript, the transcription error, or the
+  caller's `AbortError`; log only a safe filesystem error code.
+- Accept both npm 11 and npm 12 `npm pack --json` output shapes in the publish
+  artifact verifier.
+
+### Security
+
+- Redact network credentials and cap transcription diagnostics before logging or
+  connector delivery.
+- Refresh the test and publish toolchain to patched Vitest, Vite, picomatch,
+  postcss, and esbuild releases; pin pnpm 10.34.5 so the esbuild security
+  override is enforced consistently in local and release installs.
+
 ## 2026.713.2 - 2026-07-13
 
 ### Added

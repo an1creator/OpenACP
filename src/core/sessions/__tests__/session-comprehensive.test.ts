@@ -33,7 +33,7 @@ describe("Session — State Machine Exhaustive Transitions", () => {
   // initializing -> active, error
   // active -> error, finished, cancelled
   // error -> active, cancelled
-  // cancelled -> active
+  // cancelled -> (nothing)
   // finished -> (nothing)
 
   describe("valid transitions", () => {
@@ -79,13 +79,13 @@ describe("Session — State Machine Exhaustive Transitions", () => {
       expect(session.status).toBe("active");
     });
 
-    it("cancelled → active via activate() (resume after cancel)", () => {
+    it("keeps cancelled terminal when activate() is requested", () => {
       const session = createTestSession();
       session.activate();
       session.markCancelled();
       expect(session.status).toBe("cancelled");
-      session.activate();
-      expect(session.status).toBe("active");
+      expect(session.activate()).toBe(false);
+      expect(session.status).toBe("cancelled");
     });
   });
 
@@ -168,18 +168,11 @@ describe("Session — State Machine Exhaustive Transitions", () => {
 
       session.activate(); // initializing → active
       session.markCancelled(); // active → cancelled
-      session.activate(); // cancelled → active
-      session.fail("err"); // active → error
-      session.activate(); // error → active
-      session.finish("done"); // active → finished
+      expect(session.activate()).toBe(false); // cancelled is terminal
 
       expect(changes).toEqual([
         ["initializing", "active"],
         ["active", "cancelled"],
-        ["cancelled", "active"],
-        ["active", "error"],
-        ["error", "active"],
-        ["active", "finished"],
       ]);
     });
 
@@ -533,9 +526,8 @@ describe("Session — Audio Transcription (STT)", () => {
 
     // Audio attachment should be preserved on error
     expect(agent.prompt).toHaveBeenCalledWith("listen", [audioAtt]);
-    // Error event should have been emitted
-    const errEvt = events.find((e) => e.type === "error");
-    expect(errEvt).toBeDefined();
+    const warning = events.find((e) => e.type === "system_message");
+    expect(warning).toMatchObject({ type: 'system_message', message: expect.stringContaining('STT failed') });
 
     vi.restoreAllMocks();
   });

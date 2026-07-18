@@ -1,10 +1,14 @@
 import type { AgentManager } from "../agents/agent-manager.js";
-import type { SessionManager } from "./session-manager.js";
+import {
+  SessionRegistrationSupersededError,
+  type SessionManager,
+  type SessionRegistrationLease,
+} from "./session-manager.js";
 import type { SpeechService } from "../../plugins/speech/exports.js";
 import type { EventBus } from "../event-bus.js";
 import type { NotificationManager } from "../../plugins/notifications/notification.js";
 import type { TunnelService } from "../../plugins/tunnel/tunnel-service.js";
-import type { AgentEvent, ConfigOption, SetConfigOptionValue } from "../types.js";
+import type { AgentEvent, ConfigOption, SessionRecord, SetConfigOptionValue } from "../types.js";
 import type { MiddlewareChain } from "../plugin/middleware-chain.js";
 import type { SessionStore } from "./session-store.js";
 import type { IChannelAdapter } from "../channel.js";
@@ -15,6 +19,7 @@ import type { ContextQuery, ContextOptions, ContextResult } from "../../plugins/
 import { Session } from "./session.js";
 import { createChildLogger } from "../utils/log.js";
 import { Hook, BusEvent, SessionEv } from "../events.js";
+import { redactNetworkSecrets } from "../security/network-redaction.js";
 
 const log = createChildLogger({ module: "session-factory" });
 
@@ -88,11 +93,173 @@ export class SessionFactory {
       : this.speechServiceAccessor;
   }
 
+  private async awaitRegistrationBoundary<T>(
+    operation: Promise<T>,
+    lease?: SessionRegistrationLease,
+  ): Promise<T> {
+    if (!lease) return operation;
+    const outcome = operation.then(
+      (value) => ({ status: 'completed' as const, value }),
+      (error: unknown) => ({ status: 'failed' as const, error }),
+    );
+    const result = await Promise.race([
+      outcome,
+      lease.invalidation.then(() => ({ status: 'invalidated' as const })),
+    ]);
+    if (result.status === 'invalidated') {
+      throw new SessionRegistrationSupersededError(lease.sessionId);
+    }
+    if (result.status === 'failed') throw result.error;
+    if (lease.invalidated) throw new SessionRegistrationSupersededError(lease.sessionId);
+    return result.value;
+  }
+
+  private observeAgentCleanup(agentInstance: import('../agents/agent-instance.js').AgentInstance): void {
+    Promise.resolve()
+      .then(() => agentInstance.destroy())
+      .catch((error) => {
+        log.warn(
+          { err: redactNetworkSecrets(error instanceof Error ? error.message : String(error)) },
+          "Superseded session agent cleanup failed",
+        );
+      });
+  }
+
+  private async createAgentUnderLease(
+    createAgent: () => Promise<import('../agents/agent-instance.js').AgentInstance>,
+    lease?: SessionRegistrationLease,
+  ): Promise<import('../agents/agent-instance.js').AgentInstance> {
+    if (!lease) return createAgent();
+    const creation = Promise.resolve().then(createAgent);
+    const outcome = creation.then(
+      (agent) => ({ status: 'created' as const, agent }),
+      (error: unknown) => ({ status: 'failed' as const, error }),
+    );
+    const result = await Promise.race([
+      outcome,
+      lease.invalidation.then(() => ({ status: 'invalidated' as const })),
+    ]);
+    if (result.status === 'invalidated') {
+      void outcome.then((lateResult) => {
+        if (lateResult.status === 'created') this.observeAgentCleanup(lateResult.agent);
+      });
+      throw new SessionRegistrationSupersededError(lease.sessionId);
+    }
+    if (result.status === 'failed') throw result.error;
+    if (lease.invalidated) {
+      this.observeAgentCleanup(result.agent);
+      throw new SessionRegistrationSupersededError(lease.sessionId);
+    }
+    return result.agent;
+  }
+
+  private observeSessionCleanup(session: Session): void {
+    session.destroy().catch((error) => {
+      log.warn(
+        { err: redactNetworkSecrets(error instanceof Error ? error.message : String(error)) },
+        "Superseded session cleanup failed",
+      );
+    });
+  }
+
+  private isRegisteredSessionLive(session: Session): boolean {
+    const check = this.sessionManager.isCurrentLiveSession;
+    return typeof check !== 'function' || check.call(this.sessionManager, session);
+  }
+
+  /** Restore durable metadata before Core publishes the resumed generation. */
+  private hydrateSessionFromRecord(session: Session, record: SessionRecord): void {
+    const createdAt = new Date(record.createdAt);
+    if (!Number.isNaN(createdAt.getTime())) session.createdAt = createdAt;
+    if (record.clientOverrides) {
+      session.clientOverrides = structuredClone(record.clientOverrides);
+    } else if (record.dangerousMode) {
+      session.clientOverrides = { bypassPermissions: true };
+    }
+    if (record.firstAgent) session.firstAgent = record.firstAgent;
+    if (record.agentSwitchHistory) {
+      session.agentSwitchHistory = structuredClone(record.agentSwitchHistory);
+    }
+    if (record.currentPromptCount != null) session.promptCount = record.currentPromptCount;
+    if (record.attachedAdapters) session.attachedAdapters = [...record.attachedAdapters];
+    if (record.platforms) {
+      for (const [adapterId, platformData] of Object.entries(record.platforms)) {
+        const data = platformData as Record<string, unknown>;
+        const threadId = adapterId === "telegram"
+          ? String(data.topicId ?? "")
+          : String(data.threadId ?? "");
+        if (threadId) session.threadIds.set(adapterId, threadId);
+      }
+    }
+    if (record.acpState?.configOptions && session.configOptions.length === 0) {
+      session.setInitialConfigOptions(structuredClone(record.acpState.configOptions));
+    }
+    if (record.acpState?.agentCapabilities && !session.agentCapabilities) {
+      session.setAgentCapabilities(structuredClone(record.acpState.agentCapabilities));
+    }
+  }
+
+  /** Apply persisted ACP preferences while the registration lease is still current. */
+  private async restorePersistedConfig(
+    session: Session,
+    record: SessionRecord,
+    lease?: SessionRegistrationLease,
+  ): Promise<void> {
+    for (const persisted of record.acpState?.configOptions ?? []) {
+      const live = session.getConfigOption(persisted.id);
+      if (!live || live.currentValue === persisted.currentValue) continue;
+      try {
+        await this.awaitRegistrationBoundary(
+          session.setConfigOption(persisted.id, toSetConfigOptionValue(persisted)),
+          lease,
+        );
+      } catch (error) {
+        if (error instanceof SessionRegistrationSupersededError) throw error;
+        // Keep resume available when an older agent cannot restore one option.
+      }
+      if (!this.isRegisteredSessionLive(session)) {
+        throw new SessionRegistrationSupersededError(session.id);
+      }
+    }
+
+    // A best-effort ACP restore may be rejected or blocked. Preserve the user's
+    // durable preference in the record rather than replacing it with a fresh
+    // agent default during the initial resume commit.
+    if (record.acpState?.configOptions) {
+      const persistedById = new Map(record.acpState.configOptions.map((option) => [option.id, option]));
+      session.setInitialConfigOptions(session.configOptions.map((option) => {
+        const persisted = persistedById.get(option.id);
+        return persisted ? { ...option, currentValue: persisted.currentValue } as ConfigOption : option;
+      }));
+    }
+  }
+
   /**
    * Create a new Session: spawn agent → create Session instance → hydrate ACP state → register.
    * Runs session:beforeCreate middleware (which can modify params or block creation).
    */
-  async create(params: SessionCreateParams): Promise<Session> {
+  async create(
+    params: SessionCreateParams,
+    registrationLease?: SessionRegistrationLease,
+  ): Promise<Session> {
+    const ownsLease = registrationLease === undefined && params.existingSessionId !== undefined;
+    const lease = registrationLease ?? (params.existingSessionId
+      ? this.sessionManager.beginSessionRegistration?.(params.existingSessionId)
+      : undefined);
+    try {
+      return await this.createWithRegistration(params, lease);
+    } finally {
+      // A caller-provided lease belongs to the wider create pipeline and remains
+      // current through its initial durable write. Direct factory callers own and
+      // release the lease they acquire here.
+      if (ownsLease && lease) this.sessionManager.releaseSessionRegistration?.(lease);
+    }
+  }
+
+  private async createWithRegistration(
+    params: SessionCreateParams,
+    lease?: SessionRegistrationLease,
+  ): Promise<Session> {
     // Hook: session:beforeCreate — modifiable, can block
     let createParams = params;
     if (this.middlewareChain) {
@@ -103,7 +270,10 @@ export class SessionFactory {
         channelId: params.channelId,
         threadId: '', // threadId is assigned after session creation
       };
-      const result = await this.middlewareChain.execute(Hook.SESSION_BEFORE_CREATE, payload, async (p) => p);
+      const result = await this.awaitRegistrationBoundary(
+        this.middlewareChain.execute(Hook.SESSION_BEFORE_CREATE, payload, async (p) => p),
+        lease,
+      );
       if (!result) throw new Error("Session creation blocked by middleware");
       // Apply any middleware modifications back to create params
       createParams = {
@@ -122,32 +292,43 @@ export class SessionFactory {
     try {
       if (createParams.resumeAgentSessionId) {
         try {
-          agentInstance = await this.agentManager.resume(
-            createParams.agentName,
-            createParams.workingDirectory,
-            createParams.resumeAgentSessionId,
-            configAllowedPaths,
+          agentInstance = await this.createAgentUnderLease(
+            () => this.agentManager.resume(
+              createParams.agentName,
+              createParams.workingDirectory,
+              createParams.resumeAgentSessionId!,
+              configAllowedPaths,
+            ),
+            lease,
           );
         } catch (resumeErr) {
+          if (resumeErr instanceof SessionRegistrationSupersededError) throw resumeErr;
           // Resume failed (session expired after restart) — fall back to fresh spawn
           log.warn(
             { agentName: createParams.agentName, resumeErr },
             "Agent session resume failed, falling back to fresh spawn",
           );
-          agentInstance = await this.agentManager.spawn(
-            createParams.agentName,
-            createParams.workingDirectory,
-            configAllowedPaths,
+          agentInstance = await this.createAgentUnderLease(
+            () => this.agentManager.spawn(
+              createParams.agentName,
+              createParams.workingDirectory,
+              configAllowedPaths,
+            ),
+            lease,
           );
         }
       } else {
-        agentInstance = await this.agentManager.spawn(
-          createParams.agentName,
-          createParams.workingDirectory,
-          configAllowedPaths,
+        agentInstance = await this.createAgentUnderLease(
+          () => this.agentManager.spawn(
+            createParams.agentName,
+            createParams.workingDirectory,
+            configAllowedPaths,
+          ),
+          lease,
         );
       }
     } catch (err) {
+      if (err instanceof SessionRegistrationSupersededError) throw err;
       const message =
         err instanceof Error ? err.message : String(err);
 
@@ -213,6 +394,7 @@ export class SessionFactory {
       workingDirectory: createParams.workingDirectory,
       agentInstance,
       speechService: this.speechService,
+      isAssistant: createParams.isAssistant,
       autoApprovedCommands: createParams.autoApprovedCommands,
     });
     session.agentSessionId = agentInstance.sessionId;
@@ -223,17 +405,24 @@ export class SessionFactory {
 
     // 3. Propagate ACP state from agent session response
     session.applySpawnResponse(agentInstance.initialSessionResponse, agentInstance.agentCapabilities);
+    const persistedRecord = createParams.existingSessionId
+      ? this.sessionStore?.get(createParams.existingSessionId)
+      : undefined;
+    if (persistedRecord) this.hydrateSessionFromRecord(session, persistedRecord);
 
     // 4. Register in SessionManager
-    this.sessionManager.registerSession(session);
-    if (!session.isAssistant) {
-      this.eventBus.emit(BusEvent.SESSION_CREATED, {
-        sessionId: session.id,
-        name: session.name,
-        agent: session.agentName,
-        status: session.status,
-        userId: createParams.userId,
-      });
+    try {
+      if (lease) this.sessionManager.registerSession(session, lease);
+      else this.sessionManager.registerSession(session);
+    } catch (error) {
+      this.observeSessionCleanup(session);
+      throw error;
+    }
+    try {
+      if (persistedRecord) await this.restorePersistedConfig(session, persistedRecord, lease);
+    } catch (error) {
+      await this.sessionManager.discardSession(session);
+      throw error;
     }
 
     return session;
@@ -245,13 +434,25 @@ export class SessionFactory {
    */
   async getOrResume(channelId: string, threadId: string): Promise<Session | null> {
     const session = this.sessionManager.getSessionByThread(channelId, threadId);
-    if (session) return session;
+    if (session) {
+      return this.sessionManager.isCurrentLiveSession(session)
+        && session.status !== "cancelled"
+        && session.status !== "finished"
+        ? session
+        : null;
+    }
     return this.lazyResume(channelId, threadId);
   }
 
   async getOrResumeById(sessionId: string): Promise<Session | null> {
     const live = this.sessionManager.getSession(sessionId);
-    if (live) return live;
+    if (live) {
+      return this.sessionManager.isCurrentLiveSession(live)
+        && live.status !== "cancelled"
+        && live.status !== "finished"
+        ? live
+        : null;
+    }
 
     if (!this.sessionStore || !this.createFullSession) return null;
     const record = this.sessionStore.get(sessionId);
@@ -276,6 +477,10 @@ export class SessionFactory {
           initialName: record.name,
           threadId: existingThreadId,
         });
+        if (!this.isRegisteredSessionLive(session)) {
+          this.observeSessionCleanup(session);
+          return null;
+        }
         session.activate();
         if (record.clientOverrides) {
           session.clientOverrides = record.clientOverrides;
@@ -314,13 +519,25 @@ export class SessionFactory {
               try {
                 await session.setConfigOption(persisted.id, toSetConfigOptionValue(persisted));
               } catch { /* best-effort — don't fail resume if one option sync fails */ }
+              if (!this.isRegisteredSessionLive(session)) {
+                this.observeSessionCleanup(session);
+                return null;
+              }
             }
           }
         }
 
+        if (!this.isRegisteredSessionLive(session)) {
+          this.observeSessionCleanup(session);
+          return null;
+        }
         log.info({ sessionId }, "Lazy resume by ID successful");
         return session;
       } catch (err) {
+        if (err instanceof SessionRegistrationSupersededError) {
+          log.debug({ sessionId }, "Lazy resume by ID joined another lifecycle owner");
+          return null;
+        }
         log.error({ err, sessionId }, "Lazy resume by ID failed");
         return null;
       } finally {
@@ -380,6 +597,10 @@ export class SessionFactory {
           initialName: record.name,
           threadId,
         });
+        if (!this.isRegisteredSessionLive(session)) {
+          this.observeSessionCleanup(session);
+          return null;
+        }
         session.activate();
         // MIGRATION: old records with dangerousMode but no clientOverrides
         if (record.clientOverrides) {
@@ -425,6 +646,10 @@ export class SessionFactory {
               try {
                 await session.setConfigOption(persisted.id, toSetConfigOptionValue(persisted));
               } catch { /* best-effort — don't fail resume if one option sync fails */ }
+              if (!this.isRegisteredSessionLive(session)) {
+                this.observeSessionCleanup(session);
+                return null;
+              }
             }
           }
         }
@@ -443,16 +668,31 @@ export class SessionFactory {
                 { type: 'session', value: record.sessionId, repoPath: record.workingDir },
                 { labelAgent, noCache: true },
               );
-              if (contextResult?.markdown) {
+              if (this.isRegisteredSessionLive(session) && contextResult?.markdown) {
                 session.setContext(contextResult.markdown);
               }
             } catch { /* context injection is best-effort */ }
+            if (!this.isRegisteredSessionLive(session)) {
+              this.observeSessionCleanup(session);
+              return null;
+            }
           }
         }
 
+        if (!this.isRegisteredSessionLive(session)) {
+          this.observeSessionCleanup(session);
+          return null;
+        }
         log.info({ sessionId: session.id, threadId }, "Lazy resume successful");
         return session;
       } catch (err) {
+        if (err instanceof SessionRegistrationSupersededError) {
+          log.debug(
+            { sessionId: record.sessionId, threadId, channelId },
+            "Lazy resume joined another lifecycle owner",
+          );
+          return null;
+        }
         log.error({ err, record }, "Lazy resume failed");
         // Send error feedback to user
         const adapter = this.adapters?.get(channelId);

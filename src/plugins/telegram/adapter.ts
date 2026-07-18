@@ -2269,11 +2269,12 @@ export class TelegramAdapter extends MessagingAdapter {
 
   /** Delete the forum topic associated with a session. */
   async deleteSessionThread(sessionId: string): Promise<void> {
+    const liveTopicId = Number(this.core.sessionManager.getSession(sessionId)?.threadId);
     const record = this.core.sessionManager.getSessionRecord(sessionId);
     const platform = record?.platform as
       | import("../../core/types.js").TelegramPlatformData
       | undefined;
-    const topicId = platform?.topicId;
+    const topicId = liveTopicId || platform?.topicId;
     if (!topicId) return;
 
     try {
@@ -2282,6 +2283,20 @@ export class TelegramAdapter extends MessagingAdapter {
       log.warn(
         { err, sessionId, topicId },
         "Failed to delete forum topic (may already be deleted)",
+      );
+    }
+  }
+
+  /** Delete a topic created before agent startup produced a durable Session record. */
+  async deleteSessionThreadById(threadId: string): Promise<void> {
+    const topicId = Number(threadId);
+    if (!topicId) return;
+    try {
+      await this.bot.api.deleteForumTopic(this.telegramConfig.chatId, topicId);
+    } catch (err) {
+      log.warn(
+        { err, topicId },
+        "Failed to delete pre-created forum topic (may already be deleted)",
       );
     }
   }

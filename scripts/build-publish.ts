@@ -1,12 +1,29 @@
-import { execSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { runProjectPnpm } from './project-pnpm.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(__dirname, '..')
 const cliPublishDir = path.join(root, 'dist-publish')
 const sdkPublishDir = path.join(root, 'dist-publish-sdk')
+
+function normalizePublishTree(directory: string, executablePaths: Set<string>): void {
+  const visit = (relative: string): void => {
+    const current = path.join(directory, relative)
+    fs.chmodSync(current, 0o755)
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const child = path.join(relative, entry.name)
+      if (entry.isDirectory()) {
+        visit(child)
+      } else {
+        const normalized = child.split(path.sep).join('/')
+        fs.chmodSync(path.join(directory, child), executablePaths.has(normalized) ? 0o755 : 0o644)
+      }
+    }
+  }
+  visit('')
+}
 
 // Publish builds must never inherit files from an earlier local or CI build.
 // In particular, copying an SDK dist directory into an existing destination
@@ -16,7 +33,7 @@ fs.rmSync(sdkPublishDir, { recursive: true, force: true })
 
 // 1. Run tsup
 console.log('Building with tsup...')
-execSync('pnpm tsup --config tsup.config.ts', { cwd: root, stdio: 'inherit' })
+runProjectPnpm(root, ['tsup', '--config', 'tsup.config.ts'])
 
 // 2. Rename .mjs → .js and .d.mts → .d.ts, update internal imports
 const distDir = path.join(cliPublishDir, 'dist')
@@ -89,7 +106,7 @@ const publishPkg = {
     },
   },
   files: ['dist/', 'README.md'],
-  engines: { node: '>=20' },
+  engines: { node: '>=22' },
   dependencies: publishDeps,
   repository: {
     type: 'git',
@@ -163,16 +180,16 @@ console.log('✅ All external imports are covered by published dependencies')
 // 7. Build and prepare @n1creator/openacp-plugin-sdk
 const sdkDir = path.join(root, 'packages/plugin-sdk')
 if (fs.existsSync(sdkDir)) {
-  // SDK needs CLI type declarations — ensure tsc has been run on root first
-  const rootDtsPath = path.join(root, 'dist/index.d.ts')
-  if (!fs.existsSync(rootDtsPath)) {
-    console.log('\nBuilding CLI types (required by SDK)...')
-    execSync('pnpm tsc', { cwd: root, stdio: 'inherit' })
-  }
+  // SDK consumes the CLI declarations. Always rebuild them so a stale local
+  // dist directory can never validate or shape the published SDK.
+  console.log('\nBuilding CLI types (required by SDK)...')
+  fs.rmSync(path.join(root, 'dist'), { recursive: true, force: true })
+  runProjectPnpm(root, ['tsc'])
 
   console.log('\nBuilding @n1creator/openacp-plugin-sdk...')
   fs.rmSync(path.join(sdkDir, 'dist'), { recursive: true, force: true })
-  execSync('pnpm build', { cwd: sdkDir, stdio: 'inherit' })
+  runProjectPnpm(root, ['--dir', sdkDir, 'test:types'])
+  runProjectPnpm(root, ['--dir', sdkDir, 'exec', 'tsc'])
 
   // Generate SDK publish package.json (replace workspace:* with actual version)
   const sdkPkg = JSON.parse(fs.readFileSync(path.join(sdkDir, 'package.json'), 'utf-8'))
@@ -201,9 +218,14 @@ if (fs.existsSync(sdkDir)) {
   console.log(`✅ SDK built: @n1creator/openacp-plugin-sdk@${rootPkg.version}`)
 }
 
+// npm preserves ambient source modes in the tarball. Normalize every publish
+// tree so restrictive local umasks and root-owned CI builds produce readable,
+// byte-reproducible packages.
+normalizePublishTree(cliPublishDir, new Set([
+  'dist/cli.js',
+  'dist/speech/transcribe_audio.sh',
+]))
+if (fs.existsSync(sdkPublishDir)) normalizePublishTree(sdkPublishDir, new Set())
+
 console.log(`\nBuild complete! Package: @n1creator/openacp-cli@${rootPkg.version}`)
-console.log('To publish:')
-console.log('  cd dist-publish && npm publish --access=public')
-if (fs.existsSync(path.join(root, 'dist-publish-sdk'))) {
-  console.log('  cd dist-publish-sdk && npm publish --access=public')
-}
+console.log('Run pnpm verify:publish-artifacts to create the verified release tarballs.')

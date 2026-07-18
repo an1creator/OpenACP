@@ -17,6 +17,46 @@ import { isSystemEvent, getEffectiveTarget, extractSender, type TurnContext, typ
 import { Hook, BusEvent, SessionEv } from "../events.js";
 
 const log = createChildLogger({ module: "session-bridge" });
+const TERMINAL_STEP_TIMEOUT_MS = 2_000;
+
+type AwaitedStep<T> =
+  | { status: "fulfilled"; value: T }
+  | { status: "rejected"; error: unknown }
+  | { status: "timed-out" }
+  | { status: "aborted" };
+
+async function observeBoundedStep<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<AwaitedStep<T>> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let removeAbortListener: (() => void) | undefined;
+  const observed = operation.then<AwaitedStep<T>, AwaitedStep<T>>(
+    (value) => ({ status: "fulfilled", value }),
+    (error: unknown) => ({ status: "rejected", error }),
+  );
+  try {
+    return await Promise.race([
+      observed,
+      new Promise<AwaitedStep<T>>((resolve) => {
+        timer = setTimeout(() => resolve({ status: "timed-out" }), timeoutMs);
+      }),
+      new Promise<AwaitedStep<T>>((resolve) => {
+        if (signal.aborted) {
+          resolve({ status: "aborted" });
+          return;
+        }
+        const onAbort = () => resolve({ status: "aborted" });
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    removeAbortListener?.();
+  }
+}
 
 /** Services required by SessionBridge for message transformation, persistence, and middleware. */
 export interface BridgeDeps {
@@ -43,6 +83,7 @@ export interface BridgeDeps {
 export class SessionBridge {
   private connected = false;
   private cleanupFns: Array<() => void> = [];
+  private lifecycleController: AbortController | null = null;
   readonly adapterId: string;
 
   constructor(
@@ -58,6 +99,63 @@ export class SessionBridge {
     return this.session.agentInstance.debugTracer ?? null;
   }
 
+  /** Async continuations may resume after cancellation disconnected this bridge. */
+  private isCurrentBridgeIdentity(): boolean {
+    const manager = this.deps.sessionManager;
+    const check = manager.isCurrentSession ?? manager.isCurrentLiveSession;
+    return this.connected && (
+      typeof check !== "function" || check.call(manager, this.session)
+    );
+  }
+
+  /** Ordinary work cannot continue after either terminal state. */
+  private isCurrentLiveBridge(): boolean {
+    return this.isCurrentBridgeIdentity()
+      && !this.session.isTerminating
+      && this.session.status !== "finished"
+      && this.session.status !== "cancelled";
+  }
+
+  private canHandleAgentEvent(event: AgentEvent, agentGeneration: number): boolean {
+    if (!this.isCurrentBridgeIdentity() || this.session.agentGeneration !== agentGeneration) return false;
+    if (event.type !== "session_end") return this.isCurrentLiveBridge();
+    if (!this.session.isTerminating && this.session.status === "active") return true;
+    return this.session.isTerminalDeliveryRecipient(this.adapterId);
+  }
+
+  private isCurrentTerminalBridge(generation: number): boolean {
+    return this.isCurrentBridgeIdentity()
+      && !this.deps.sessionManager.isClosing
+      && this.session.isTerminalDeliveryRecipient(this.adapterId, generation);
+  }
+
+  private async awaitTerminalStep<T>(
+    label: string,
+    generation: number,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const deadline = this.session.terminalDeliveryDeadline(generation);
+    const signal = this.lifecycleController?.signal;
+    if (!signal || deadline === null || !this.isCurrentTerminalBridge(generation)) {
+      throw new Error(`Terminal ${label} aborted`);
+    }
+    const timeoutMs = Math.min(TERMINAL_STEP_TIMEOUT_MS, Math.max(1, deadline - Date.now()));
+    const deferredOperation = Promise.resolve().then(() => {
+      if (signal.aborted || !this.isCurrentTerminalBridge(generation)) {
+        throw new Error(`Terminal ${label} superseded`);
+      }
+      return operation();
+    });
+    const outcome = await observeBoundedStep(deferredOperation, timeoutMs, signal);
+    if (!this.isCurrentTerminalBridge(generation)) {
+      throw new Error(`Terminal ${label} superseded`);
+    }
+    if (outcome.status === "fulfilled") return outcome.value;
+    if (outcome.status === "rejected") throw outcome.error;
+    if (outcome.status === "timed-out") throw new Error(`Terminal ${label} timed out after ${timeoutMs}ms`);
+    throw new Error(`Terminal ${label} aborted`);
+  }
+
   /** Register a listener and track it for cleanup */
   private listen(emitter: any, event: string, handler: (...args: any[]) => void): void {
     emitter.on(event, handler);
@@ -65,11 +163,17 @@ export class SessionBridge {
   }
 
   /** Send message to adapter, optionally running through message:outgoing middleware */
-  private async sendMessage(sessionId: string, message: ReturnType<MessageTransformer["transform"]>): Promise<void> {
+  private async sendMessage(
+    sessionId: string,
+    message: ReturnType<MessageTransformer["transform"]>,
+    agentGeneration = this.session.agentGeneration,
+  ): Promise<void> {
     try {
+      if (!this.isCurrentLiveBridge()) return;
       const mw = this.deps.middlewareChain;
       if (mw) {
         const result = await mw.execute(Hook.MESSAGE_OUTGOING, { sessionId, message }, async (m) => m);
+        if (!this.isCurrentLiveBridge() || this.session.agentGeneration !== agentGeneration) return;
         this.tracer?.log("core", { step: "middleware:outgoing", sessionId, hook: "message:outgoing", blocked: !result });
         if (!result) return;
         this.tracer?.log("core", { step: "dispatch", sessionId, message: result.message });
@@ -77,6 +181,7 @@ export class SessionBridge {
           log.error({ err, sessionId }, "Failed to send message to adapter");
         });
       } else {
+        if (!this.isCurrentLiveBridge() || this.session.agentGeneration !== agentGeneration) return;
         this.tracer?.log("core", { step: "dispatch", sessionId, message });
         this.adapter.sendMessage(sessionId, message).catch((err) => {
           log.error({ err, sessionId }, "Failed to send message to adapter");
@@ -85,6 +190,33 @@ export class SessionBridge {
     } catch (err) {
       log.error({ err, sessionId }, "Error in sendMessage middleware");
     }
+  }
+
+  /** Terminal delivery awaits middleware and the adapter before bridge cleanup. */
+  private async sendTerminalMessage(
+    sessionId: string,
+    message: ReturnType<MessageTransformer["transform"]>,
+    terminalGeneration: number,
+  ): Promise<void> {
+    if (!this.isCurrentTerminalBridge(terminalGeneration)) return;
+    const mw = this.deps.middlewareChain;
+    const result = mw
+      ? await this.awaitTerminalStep(
+          "outgoing middleware",
+          terminalGeneration,
+          () => mw.execute(Hook.MESSAGE_OUTGOING, { sessionId, message }, async (m) => m),
+        )
+      : { sessionId, message };
+    if (
+      !result ||
+      !this.isCurrentTerminalBridge(terminalGeneration)
+    ) return;
+    this.tracer?.log("core", { step: "dispatch", sessionId, message: result.message });
+    await this.awaitTerminalStep(
+      "adapter send",
+      terminalGeneration,
+      () => this.adapter.sendMessage(sessionId, result.message),
+    );
   }
 
   /**
@@ -119,13 +251,16 @@ export class SessionBridge {
   connect(): void {
     if (this.connected) return;
     this.connected = true;
+    this.lifecycleController = new AbortController();
+    this.session.registerBridge(this.adapterId);
 
     // Wire session events to adapter (session → adapter dispatch)
     // The agent→session relay is owned by the Session itself (wireAgentRelay),
     // so session.on(SessionEv.AGENT_EVENT) fires for all sessions including headless ones.
     this.listen(this.session, SessionEv.AGENT_EVENT, (event: AgentEvent) => {
+      const agentGeneration = this.session.agentGeneration;
       if (this.shouldForward(event)) {
-        this.dispatchAgentEvent(event);
+        this.dispatchAgentEvent(event, agentGeneration);
       } else {
         // Event is not forwarded to this adapter's channel, but EventBus observers
         // (e.g. /events SSE stream) still need to see it for cross-adapter visibility.
@@ -151,6 +286,7 @@ export class SessionBridge {
     // The primary bridge sends its UI directly in resolvePermission (awaited, preserving
     // ordering guarantees). Secondary bridges use this fire-and-forget listener.
     this.listen(this.session, SessionEv.PERMISSION_REQUEST, async (request: PermissionRequest) => {
+      if (!this.isCurrentLiveBridge()) return;
       // Skip if this is the primary bridge — it handles UI directly in resolvePermission.
       const current = this.session.agentInstance.onPermissionRequest as any;
       if (current?.__bridgeId === this.adapterId) return;
@@ -169,6 +305,8 @@ export class SessionBridge {
       this.deps.sessionManager.patchRecord(this.session.id, {
         status: to,
         lastActiveAt: new Date().toISOString(),
+      }, { expectedSession: this.session }).catch((err) => {
+        log.error({ err, sessionId: this.session.id }, "Failed to persist session status");
       });
       if (!this.session.isAssistant) {
         this.deps.eventBus?.emit(BusEvent.SESSION_UPDATED, {
@@ -177,28 +315,50 @@ export class SessionBridge {
         });
       }
 
-      // Auto-disconnect on terminal states (finished only — cancelled sessions can resume)
-      if (to === "finished") {
-        // Disconnect on next tick so current event handlers can complete
-        queueMicrotask(() => this.disconnect());
+      // A direct finish() call has no agent completion event to own a delivery
+      // barrier, so retain the legacy cleanup path for that special case.
+      if (to === "finished" && !this.session.hasTerminalDelivery) {
+        // Release the Core-owned bridge map after current event handlers complete.
+        // Cancellation may have already done this synchronously; connected guards
+        // keep the cleanup idempotent in that race.
+        queueMicrotask(() => {
+          this.deps.sessionManager.releaseSessionResources?.(this.session);
+          if (this.connected) this.disconnect();
+        });
       }
     });
 
     // Wire lifecycle: persist and relay name changes to all adapters.
     this.listen(this.session, SessionEv.NAMED, async (name: string) => {
-      await this.deps.sessionManager.patchRecord(this.session.id, { name });
-      if (!this.session.isAssistant) {
-        this.deps.eventBus?.emit(BusEvent.SESSION_UPDATED, {
-          sessionId: this.session.id,
-          name,
-        });
+      try {
+        if (!this.isCurrentLiveBridge()) return;
+        await this.deps.sessionManager.patchRecord(
+          this.session.id,
+          { name },
+          { expectedSession: this.session },
+        );
+        if (!this.isCurrentLiveBridge()) return;
+        if (!this.session.isAssistant) {
+          this.deps.eventBus?.emit(BusEvent.SESSION_UPDATED, {
+            sessionId: this.session.id,
+            name,
+          });
+        }
+        await this.adapter.renameSessionThread(this.session.id, name);
+      } catch (err) {
+        log.error({ err, sessionId: this.session.id }, "Failed to persist or relay session name");
       }
-      await this.adapter.renameSessionThread(this.session.id, name);
     });
 
     // Wire lifecycle: persist prompt count after each prompt for resume decisions
     this.listen(this.session, SessionEv.PROMPT_COUNT_CHANGED, (count: number) => {
-      this.deps.sessionManager.patchRecord(this.session.id, { currentPromptCount: count });
+      this.deps.sessionManager.patchRecord(
+        this.session.id,
+        { currentPromptCount: count },
+        { expectedSession: this.session },
+      ).catch((err) => {
+        log.error({ err, sessionId: this.session.id }, "Failed to persist prompt count");
+      });
     });
 
     // Wire turn_started: emit message:processing on EventBus so SSE clients
@@ -243,6 +403,9 @@ export class SessionBridge {
   disconnect(): void {
     if (!this.connected) return;
     this.connected = false;
+    this.lifecycleController?.abort();
+    this.lifecycleController = null;
+    this.session.unregisterBridge(this.adapterId);
     this.cleanupFns.forEach(fn => fn());
     this.cleanupFns = [];
     // Only clear onPermissionRequest if this bridge currently owns it.
@@ -257,34 +420,39 @@ export class SessionBridge {
   }
 
   /** Dispatch an agent event through middleware and to the adapter */
-  private async dispatchAgentEvent(event: AgentEvent): Promise<void> {
+  private async dispatchAgentEvent(event: AgentEvent, agentGeneration: number): Promise<void> {
+    if (!this.canHandleAgentEvent(event, agentGeneration)) return;
     this.tracer?.log("core", { step: "agent_event", sessionId: this.session.id, event });
     const mw = this.deps.middlewareChain;
     if (mw) {
       try {
         const result = await mw.execute(Hook.AGENT_BEFORE_EVENT, { sessionId: this.session.id, event }, async (e) => e);
+        if (!this.canHandleAgentEvent(event, agentGeneration)) return;
         this.tracer?.log("core", { step: "middleware:before", sessionId: this.session.id, hook: "agent:beforeEvent", blocked: !result });
         if (!result) return; // blocked by middleware
         const transformedEvent = result.event;
-        this.handleAgentEvent(transformedEvent);
+        if (!this.canHandleAgentEvent(transformedEvent, agentGeneration)) return;
+        this.handleAgentEvent(transformedEvent, agentGeneration);
       } catch {
         // Middleware error — proceed with original event
+        if (!this.canHandleAgentEvent(event, agentGeneration)) return;
         try {
-          this.handleAgentEvent(event);
+          this.handleAgentEvent(event, agentGeneration);
         } catch (err) {
           log.error({ err, sessionId: this.session.id }, "Error handling agent event (middleware fallback)");
         }
       }
     } else {
       try {
-        this.handleAgentEvent(event);
+        this.handleAgentEvent(event, agentGeneration);
       } catch (err) {
         log.error({ err, sessionId: this.session.id }, "Error handling agent event");
       }
     }
   }
 
-  private handleAgentEvent(event: AgentEvent): import('../types.js').OutgoingMessage | undefined {
+  private handleAgentEvent(event: AgentEvent, agentGeneration: number): import('../types.js').OutgoingMessage | undefined {
+    if (!this.canHandleAgentEvent(event, agentGeneration)) return undefined;
     const session = this.session;
     const ctx = {
       get id() {
@@ -306,27 +474,18 @@ export class SessionBridge {
         case "usage":
           outgoing = this.deps.messageTransformer.transform(event, ctx);
           this.tracer?.log("core", { step: "transform", sessionId: this.session.id, input: event, output: outgoing });
-          this.sendMessage(this.session.id, outgoing);
+          this.sendMessage(this.session.id, outgoing, agentGeneration);
           break;
 
         case "session_end":
-          this.session.finish(event.reason);
-          this.adapter.cleanupSkillCommands?.(this.session.id);
-          outgoing = this.deps.messageTransformer.transform(event);
-          this.sendMessage(this.session.id, outgoing);
-          this.deps.notificationManager.notify(this.session.channelId, {
-            sessionId: this.session.id,
-            sessionName: this.session.name,
-            type: "completed",
-            summary: `Session "${this.session.name || this.session.id}" completed\n⏱ ${Math.round((Date.now() - this.session.createdAt.getTime()) / 60000)} min · 💬 ${this.session.promptCount} prompts`,
-          });
+          outgoing = this.beginTerminalDelivery(event);
           break;
 
         case "error":
-          this.session.fail(event.message);
+          if (!this.session.fail(event.message)) break;
           this.adapter.cleanupSkillCommands?.(this.session.id);
           outgoing = this.deps.messageTransformer.transform(event);
-          this.sendMessage(this.session.id, outgoing);
+          this.sendMessage(this.session.id, outgoing, agentGeneration);
           this.deps.notificationManager.notify(this.session.channelId, {
             sessionId: this.session.id,
             sessionName: this.session.name,
@@ -344,11 +503,12 @@ export class SessionBridge {
             const ext = fs.extensionFromMime(mimeType);
             fs.saveFile(sid, `agent-image${ext}`, buffer, mimeType)
               .then((att) => {
+                if (!this.isCurrentLiveBridge() || this.session.agentGeneration !== agentGeneration) return;
                 this.sendMessage(sid, {
                   type: "attachment",
                   text: "",
                   attachment: att,
-                });
+                }, agentGeneration);
               })
               .catch((err) => log.error({ err }, "Failed to save agent image"));
           }
@@ -363,11 +523,12 @@ export class SessionBridge {
             const ext = fs.extensionFromMime(mimeType);
             fs.saveFile(sid, `agent-audio${ext}`, buffer, mimeType)
               .then((att) => {
+                if (!this.isCurrentLiveBridge() || this.session.agentGeneration !== agentGeneration) return;
                 this.sendMessage(sid, {
                   type: "attachment",
                   text: "",
                   attachment: att,
-                });
+                }, agentGeneration);
               })
               .catch((err) => log.error({ err }, "Failed to save agent audio"));
           }
@@ -381,35 +542,36 @@ export class SessionBridge {
 
         case "system_message":
           outgoing = this.deps.messageTransformer.transform(event);
-          this.sendMessage(this.session.id, outgoing);
+          this.sendMessage(this.session.id, outgoing, agentGeneration);
           break;
 
         case "session_info_update":
           if (event.title) {
             this.session.setName(event.title);
             outgoing = this.deps.messageTransformer.transform(event);
-            this.sendMessage(this.session.id, outgoing);
+            this.sendMessage(this.session.id, outgoing, agentGeneration);
           }
           // title-less updates (e.g. updatedAt-only) carry no user-visible content
           break;
 
         case "config_option_update":
-          this.session.updateConfigOptions(event.options).then(() => {
+          this.session.updateConfigOptions(event.options, agentGeneration).then(() => {
+            if (!this.isCurrentLiveBridge() || this.session.agentGeneration !== agentGeneration) return;
             this.persistAcpState();
           }).catch(() => { /* middleware blocked or error — skip persist */ });
           outgoing = this.deps.messageTransformer.transform(event);
-          this.sendMessage(this.session.id, outgoing);
+          this.sendMessage(this.session.id, outgoing, agentGeneration);
           break;
 
         case "user_message_chunk":
           outgoing = this.deps.messageTransformer.transform(event);
-          this.sendMessage(this.session.id, outgoing);
+          this.sendMessage(this.session.id, outgoing, agentGeneration);
           break;
 
         case "resource_content":
         case "resource_link":
           outgoing = this.deps.messageTransformer.transform(event);
-          this.sendMessage(this.session.id, outgoing);
+          this.sendMessage(this.session.id, outgoing, agentGeneration);
           break;
 
         case "tts_strip":
@@ -417,24 +579,104 @@ export class SessionBridge {
           break;
       }
 
-      this.deps.eventBus?.emit(BusEvent.AGENT_EVENT, {
-        sessionId: this.session.id,
-        turnId: this.session.activeTurnContext?.turnId ?? '',
-        event,
-      });
+      if (event.type !== "session_end") {
+        this.deps.eventBus?.emit(BusEvent.AGENT_EVENT, {
+          sessionId: this.session.id,
+          turnId: this.session.activeTurnContext?.turnId ?? '',
+          event,
+        });
+      }
 
     return outgoing;
   }
 
+  private beginTerminalDelivery(
+    event: Extract<AgentEvent, { type: "session_end" }>,
+  ): import('../types.js').OutgoingMessage | undefined {
+    const generation = this.session.beginTerminalDelivery(event.reason);
+    if (generation === null || !this.session.claimTerminalDelivery(this.adapterId, generation)) {
+      return undefined;
+    }
+    const outgoing = this.deps.messageTransformer.transform(event);
+    void this.deliverTerminalEvent(event, outgoing, generation);
+    return outgoing;
+  }
+
+  private async deliverTerminalEvent(
+    event: Extract<AgentEvent, { type: "session_end" }>,
+    outgoing: import('../types.js').OutgoingMessage,
+    generation: number,
+  ): Promise<void> {
+    let durable = false;
+    try {
+      await this.session.ensureTerminalDurability(generation, () => (
+        this.deps.sessionManager.patchRecord(this.session.id, {
+          status: "finished",
+          lastActiveAt: new Date().toISOString(),
+        }, { immediate: true, expectedSession: this.session })
+      ));
+      durable = true;
+      if (!this.isCurrentTerminalBridge(generation)) return;
+
+      if (this.adapter.cleanupSkillCommands) {
+        await this.awaitTerminalStep(
+          "skill cleanup",
+          generation,
+          () => this.adapter.cleanupSkillCommands!(this.session.id),
+        );
+      }
+      if (!this.isCurrentTerminalBridge(generation)) return;
+      if (this.session.claimTerminalEventPublication(generation)) {
+        this.deps.eventBus?.emit(BusEvent.AGENT_EVENT, {
+          sessionId: this.session.id,
+          turnId: this.session.activeTurnContext?.turnId ?? '',
+          event,
+        });
+      }
+      await this.sendTerminalMessage(this.session.id, outgoing, generation);
+      if (!this.isCurrentTerminalBridge(generation)) return;
+      if (this.session.claimTerminalNotification(generation)) {
+        await this.awaitTerminalStep(
+          "notification",
+          generation,
+          () => this.deps.notificationManager.notify(this.session.channelId, {
+            sessionId: this.session.id,
+            sessionName: this.session.name,
+            type: "completed",
+            summary: `Session "${this.session.name || this.session.id}" completed\n⏱ ${Math.round((Date.now() - this.session.createdAt.getTime()) / 60000)} min · 💬 ${this.session.promptCount} prompts`,
+          }),
+        );
+      }
+    } catch (err) {
+      this.session.markTerminalDeliveryFailed(
+        generation,
+        err instanceof Error ? err.message : String(err),
+      );
+      log.error({ err, sessionId: this.session.id, adapterId: this.adapterId }, "Terminal session delivery failed");
+    } finally {
+      if (!durable) {
+        if (this.session.abortTerminalDelivery(generation)) {
+          this.deps.sessionManager.releaseSessionResources?.(this.session);
+        }
+        return;
+      }
+      if (this.session.completeTerminalDelivery(this.adapterId, generation)) {
+        this.deps.sessionManager.releaseSessionResources?.(this.session);
+      }
+    }
+  }
+
   /** Persist current ACP state (configOptions, agentCapabilities) to session store as cache */
   private persistAcpState(): void {
+    if (!this.isCurrentLiveBridge()) return;
     this.deps.sessionManager.patchRecord(this.session.id, {
       acpState: this.session.toAcpStateSnapshot(),
-    });
+    }, { expectedSession: this.session });
   }
 
   /** Resolve a permission request through the full pipeline: middleware -> auto-approve -> ask user */
   private async resolvePermission(request: PermissionRequest): Promise<string> {
+    if (!this.isCurrentLiveBridge()) return "";
     const startTime = Date.now();
     const mw = this.deps.middlewareChain;
 
@@ -443,6 +685,7 @@ export class SessionBridge {
     if (mw) {
       const payload = { sessionId: this.session.id, request, autoResolve: undefined as string | undefined };
       const result = await mw.execute(Hook.PERMISSION_BEFORE_REQUEST, payload, async (r) => r);
+      if (!this.isCurrentLiveBridge()) return "";
       if (!result) return ""; // blocked by middleware
       permReq = result.request;
       // If middleware set autoResolve, skip UI and return directly
@@ -479,9 +722,11 @@ export class SessionBridge {
     // Send permission UI to this bridge's own adapter (primary bridge path, awaited to
     // preserve the ordering guarantee: setPending → sendPermissionRequest).
     await this.adapter.sendPermissionRequest(this.session.id, permReq);
+    if (!this.isCurrentLiveBridge()) return "";
 
     // Wait for user response — adapter resolves this promise
     const optionId = await promise;
+    if (!this.isCurrentLiveBridge()) return optionId;
 
     // Broadcast permission:resolved so other adapters can dismiss their UI
     this.deps.eventBus?.emit(BusEvent.PERMISSION_RESOLVED, {

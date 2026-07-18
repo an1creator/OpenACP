@@ -136,12 +136,23 @@ Text-to-speech and speech-to-text with pluggable providers.
 
 ```typescript
 interface SpeechServiceInterface {
-  textToSpeech(text: string, opts?: { language?: string; voice?: string }): Promise<Buffer>
-  speechToText(audio: Buffer, opts?: { language?: string }): Promise<string>
+  synthesize(text: string, options?: TTSOptions): Promise<TTSResult>
+  transcribe(audio: Buffer, mimeType: string, options?: STTOptions): Promise<STTResult>
+  isTTSAvailable(): boolean
+  isSTTAvailable(): boolean
   registerTTSProvider(name: string, provider: TTSProvider): void
   registerSTTProvider(name: string, provider: STTProvider): void
+  unregisterTTSProvider(name: string): void
+}
+
+interface STTOptions {
+  language?: string
+  model?: string
+  signal?: AbortSignal
 }
 ```
+
+STT providers must honor `options.signal` when supplied: stop promptly, terminate descendant work, and release temporary resources before rejecting with the abort reason. This keeps prompt cancellation serialized with the next queued turn.
 
 **Settings**:
 

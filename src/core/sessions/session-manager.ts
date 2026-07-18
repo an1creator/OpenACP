@@ -1,5 +1,5 @@
 import type { AgentManager } from "../agents/agent-manager.js";
-import { Session } from "./session.js";
+import { Session, SessionTerminatingError } from "./session.js";
 import type { SessionStore } from "./session-store.js";
 import type { EventBus } from "../event-bus.js";
 import type { MiddlewareChain } from "../plugin/middleware-chain.js";
@@ -9,6 +9,76 @@ import { createChildLogger } from "../utils/log.js";
 import { redactNetworkSecrets } from "../security/network-redaction.js";
 
 const log = createChildLogger({ module: 'session-manager' });
+const SESSION_CANCEL_CLEANUP_TIMEOUT_MS = 9_000;
+
+function isTerminalStatus(status: SessionStatus | undefined): status is 'cancelled' | 'finished' {
+  return status === 'cancelled' || status === 'finished';
+}
+
+/**
+ * Merge a durable record without ever replacing an already-persisted terminal
+ * winner. Metadata remains patchable after termination, but status is monotonic.
+ */
+function mergeRecordMonotonic(
+  record: import('../types.js').SessionRecord,
+  patch: Partial<import('../types.js').SessionRecord>,
+): import('../types.js').SessionRecord {
+  if (isTerminalStatus(record.status)) {
+    // Metadata-only patches (or an idempotent write of the same terminal state)
+    // remain useful. A conflicting status identifies stale lifecycle work, so its
+    // accompanying metadata is rejected as one atomic patch.
+    if (patch.status !== undefined && patch.status !== record.status) return record;
+    return { ...record, ...patch, status: record.status };
+  }
+  return { ...record, ...patch };
+}
+
+export class SessionRegistrationSupersededError extends Error {
+  readonly code = 'SESSION_REGISTRATION_SUPERSEDED';
+
+  constructor(sessionId: string, reason = 'session lifecycle changed') {
+    super(`Session ${sessionId} registration was superseded: ${reason}`);
+    this.name = 'SessionRegistrationSupersededError';
+  }
+}
+
+/** A bounded, one-use lease for registering a resumed existing session. */
+export interface SessionRegistrationLease {
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly invalidated: boolean;
+  readonly invalidation: Promise<void>;
+}
+
+interface ManagedSessionRegistrationLease extends SessionRegistrationLease {
+  invalidated: boolean;
+  released: boolean;
+  finishedReopenConsumed: boolean;
+  invalidate(reason: string): void;
+}
+
+type CleanupOutcome =
+  | { status: 'completed' }
+  | { status: 'failed'; error: unknown }
+  | { status: 'timed-out' };
+
+async function waitForSessionCleanup(operation: Promise<void>): Promise<CleanupOutcome> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const observed = operation.then<CleanupOutcome, CleanupOutcome>(
+    () => ({ status: 'completed' }),
+    (error: unknown) => ({ status: 'failed', error }),
+  );
+  try {
+    return await Promise.race([
+      observed,
+      new Promise<CleanupOutcome>((resolve) => {
+        timer = setTimeout(() => resolve({ status: 'timed-out' }), SESSION_CANCEL_CLEANUP_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 /** Flattened view of a session for API consumers — merges live state with stored record. */
 export interface SessionSummary {
@@ -56,7 +126,76 @@ export class SessionManager {
   // Prevents SessionBridge STATUS_CHANGE listeners from overwriting the flushed state
   // with transient error status from in-flight prompts that fail after shutdown.
   private _shutdownComplete = false;
+  /** Global lifecycle fence: no session may register after teardown begins. */
+  private _closing = false;
+  private closeOperation: Promise<void> | null = null;
   private cancellationOps = new Map<string, Promise<CancelSessionResult>>();
+  private nextRegistrationGeneration = 1;
+  private pendingRegistrations = new Map<string, Set<ManagedSessionRegistrationLease>>();
+  private ownedRegistrationLeases = new WeakSet<object>();
+  /** Transient only; completed cancellation is enforced by the terminal store record. */
+  private cancellingSessionIds = new Set<string>();
+  /** Serialize durable mutations per session so terminal cancellation always wins. */
+  private recordMutationTails = new Map<string, Promise<void>>();
+  /** Core-owned resources (bridges, adapter listeners) must detach at the sync terminal boundary. */
+  private cleanupSessionResources?: (sessionId: string) => void;
+
+  private async withRecordMutation<T>(sessionId: string, mutation: () => Promise<T>): Promise<T> {
+    const previous = this.recordMutationTails.get(sessionId) ?? Promise.resolve();
+    const operation = previous.then(mutation);
+    const tail = operation.then(() => undefined, () => undefined);
+    this.recordMutationTails.set(sessionId, tail);
+    try {
+      return await operation;
+    } finally {
+      if (this.recordMutationTails.get(sessionId) === tail) {
+        this.recordMutationTails.delete(sessionId);
+      }
+    }
+  }
+
+  private cleanupOwnedResources(sessionId: string): void {
+    try {
+      this.cleanupSessionResources?.(sessionId);
+    } catch (error) {
+      log.warn(
+        {
+          sessionId,
+          error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        'Session resource cleanup failed at terminal boundary',
+      );
+    }
+  }
+
+  /** Cross the manager-wide terminal boundary before teardown performs any I/O. */
+  private beginClosing(reason: string): void {
+    if (!this._closing) {
+      this._closing = true;
+      for (const pending of this.pendingRegistrations.values()) {
+        for (const lease of pending) lease.invalidate(reason);
+      }
+      this.pendingRegistrations.clear();
+    }
+    for (const session of this.sessions.values()) {
+      session.beginTermination();
+      this.cleanupOwnedResources(session.id);
+    }
+  }
+
+  private rejectRegistration(session: Session, reason: string): never {
+    session.beginTermination();
+    session.destroy().catch((error) => {
+      log.warn(
+        {
+          sessionId: session.id,
+          error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        'Rejected session registration cleanup failed',
+      );
+    });
+    throw new SessionRegistrationSupersededError(session.id, reason);
+  }
 
   /**
    * Inject the EventBus after construction. Deferred because EventBus is created
@@ -64,6 +203,10 @@ export class SessionManager {
    */
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
+  }
+
+  setSessionResourceCleanup(cleanup: (sessionId: string) => void): void {
+    this.cleanupSessionResources = cleanup;
   }
 
   constructor(store: SessionStore | null = null) {
@@ -86,23 +229,28 @@ export class SessionManager {
       agentInstance,
       autoApprovedCommands: options?.autoApprovedCommands ?? [],
     });
-    this.sessions.set(session.id, session);
     session.agentSessionId = session.agentInstance.sessionId;
+    this.registerSession(session);
 
-    if (this.store) {
-      await this.store.save({
-        sessionId: session.id,
-        agentSessionId: session.agentInstance.sessionId,
-        agentName: session.agentName,
-        workingDir: session.workingDirectory,
-        channelId,
-        status: session.status,
-        createdAt: session.createdAt.toISOString(),
-        lastActiveAt: new Date().toISOString(),
-        name: session.name,
-        clientOverrides: {},
-        platform: {},
-      });
+    try {
+      if (this.store) {
+        await this.withRecordMutation(session.id, () => this.store!.save({
+          sessionId: session.id,
+          agentSessionId: session.agentInstance.sessionId,
+          agentName: session.agentName,
+          workingDir: session.workingDirectory,
+          channelId,
+          status: session.status,
+          createdAt: session.createdAt.toISOString(),
+          lastActiveAt: new Date().toISOString(),
+          name: session.name,
+          clientOverrides: {},
+          platform: {},
+        }));
+      }
+    } catch (error) {
+      await this.discardSession(session);
+      throw error;
     }
 
     return session;
@@ -111,6 +259,25 @@ export class SessionManager {
   /** Look up a live session by its OpenACP session ID. */
   getSession(sessionId: string): Session | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  isCurrentLiveSession(session: Session): boolean {
+    return this.sessions.get(session.id) === session && !session.isTerminating;
+  }
+
+  /** Exact live-map identity, including a finished winner completing final delivery. */
+  isCurrentSession(session: Session): boolean {
+    return this.sessions.get(session.id) === session;
+  }
+
+  get isClosing(): boolean {
+    return this._closing;
+  }
+
+  assertCurrentLiveSession(session: Session): void {
+    if (!this.isCurrentLiveSession(session)) {
+      throw new SessionTerminatingError(session.id);
+    }
   }
 
   /** Look up a live session by adapter channel and thread ID (checks per-adapter threadIds map first, then legacy fields). */
@@ -155,9 +322,125 @@ export class SessionManager {
     );
   }
 
+  /**
+   * Acquire a one-use registration generation before the first async resume/create
+   * boundary. Cancellation invalidates every outstanding lease for the session ID.
+   */
+  beginSessionRegistration(sessionId: string): SessionRegistrationLease {
+    if (this._closing) {
+      throw new SessionRegistrationSupersededError(sessionId, 'session manager is shutting down');
+    }
+    if (this.cancellingSessionIds.has(sessionId)) {
+      throw new SessionRegistrationSupersededError(sessionId, 'cancellation is in progress');
+    }
+    if (this.sessions.has(sessionId)) {
+      throw new SessionRegistrationSupersededError(sessionId, 'session is already live');
+    }
+    if ((this.pendingRegistrations.get(sessionId)?.size ?? 0) > 0) {
+      throw new SessionRegistrationSupersededError(sessionId, 'session registration is already in progress');
+    }
+    const record = this.store?.get(sessionId);
+    if (record?.status === 'cancelled') {
+      throw new SessionRegistrationSupersededError(sessionId, `stored session is ${record.status}`);
+    }
+
+    let resolveInvalidation!: () => void;
+    const invalidation = new Promise<void>((resolve) => { resolveInvalidation = resolve; });
+    const lease: ManagedSessionRegistrationLease = {
+      sessionId,
+      generation: this.nextRegistrationGeneration++,
+      invalidated: false,
+      released: false,
+      finishedReopenConsumed: false,
+      invalidation,
+      invalidate: () => {
+        if (lease.invalidated) return;
+        lease.invalidated = true;
+        resolveInvalidation();
+      },
+    };
+    this.ownedRegistrationLeases.add(lease);
+    const pending = this.pendingRegistrations.get(sessionId) ?? new Set();
+    pending.add(lease);
+    this.pendingRegistrations.set(sessionId, pending);
+    return lease;
+  }
+
+  releaseSessionRegistration(lease: SessionRegistrationLease): void {
+    const managed = lease as ManagedSessionRegistrationLease;
+    if (!this.ownedRegistrationLeases.has(managed) || managed.released) return;
+    managed.released = true;
+    const pending = this.pendingRegistrations.get(managed.sessionId);
+    pending?.delete(managed);
+    if (pending?.size === 0) this.pendingRegistrations.delete(managed.sessionId);
+  }
+
+  private invalidateSessionRegistrations(sessionId: string, reason: string): void {
+    this.cancellingSessionIds.add(sessionId);
+    const pending = this.pendingRegistrations.get(sessionId);
+    if (!pending) return;
+    for (const lease of pending) lease.invalidate(reason);
+    this.pendingRegistrations.delete(sessionId);
+  }
+
   /** Register a session that was created externally (e.g. restored from store on startup). */
-  registerSession(session: Session): void {
+  registerSession(session: Session, lease?: SessionRegistrationLease): void {
+    if (this._closing) {
+      this.rejectRegistration(session, 'session manager is shutting down');
+    }
+    const existing = this.sessions.get(session.id);
+    if (existing) {
+      if (existing === session) return;
+      this.rejectRegistration(session, 'session is already live');
+    }
+    if (!lease && (this.pendingRegistrations.get(session.id)?.size ?? 0) > 0) {
+      this.rejectRegistration(session, 'session registration is already in progress');
+    }
+    if (lease) {
+      const managed = lease as ManagedSessionRegistrationLease;
+      const pending = this.pendingRegistrations.get(session.id);
+      const invalid = !this.ownedRegistrationLeases.has(managed)
+        || managed.sessionId !== session.id
+        || managed.released
+        || managed.invalidated
+        || !pending?.has(managed)
+        || this.cancellingSessionIds.has(session.id);
+      if (invalid) {
+        this.rejectRegistration(session, 'registration lease is no longer current');
+      }
+    } else if (this.cancellingSessionIds.has(session.id)) {
+      this.rejectRegistration(session, 'cancellation is in progress');
+    }
     this.sessions.set(session.id, session);
+  }
+
+  /**
+   * Roll back a just-registered live session when Core cannot durably create its
+   * initial record. Identity guarding prevents an old failure from removing a retry.
+   */
+  async discardSession(session: Session): Promise<void> {
+    if (this.sessions.get(session.id) !== session) return;
+    session.beginTermination();
+    this.cleanupOwnedResources(session.id);
+    this.sessions.delete(session.id);
+    const cleanup = await waitForSessionCleanup(session.destroy());
+    if (cleanup.status !== 'completed') {
+      log.warn(
+        {
+          sessionId: session.id,
+          error: cleanup.status === 'failed'
+            ? redactNetworkSecrets(cleanup.error instanceof Error ? cleanup.error.message : String(cleanup.error))
+            : `cleanup exceeded ${SESSION_CANCEL_CLEANUP_TIMEOUT_MS}ms`,
+        },
+        'Discarded session cleanup did not complete',
+      );
+    }
+  }
+
+  /** Release Core-owned listeners/bridges for a terminal live identity. */
+  releaseSessionResources(session: Session): void {
+    if (this.sessions.get(session.id) !== session) return;
+    this.cleanupOwnedResources(session.id);
   }
 
   /**
@@ -168,22 +451,86 @@ export class SessionManager {
   async patchRecord(
     sessionId: string,
     patch: Partial<import("../types.js").SessionRecord>,
-    options?: { immediate?: boolean },
+    options?: {
+      immediate?: boolean;
+      expectedSession?: Session;
+      /**
+       * Authorizes one initial finished -> initializing transition for the exact
+       * live session registered under this still-current lifecycle lease.
+       */
+      registrationLease?: SessionRegistrationLease;
+    },
   ): Promise<void> {
     if (!this.store) return;
-    // After shutdown, the store was already flushed with terminal state — ignore further patches
-    // to prevent in-flight prompt failures from overwriting "finished" with "error" on disk.
-    if (this._shutdownComplete) return;
-    const record = this.store.get(sessionId);
-    if (record) {
-      await this.store.save({ ...record, ...patch });
-    } else if (patch.sessionId) {
-      // Initial save — treat patch as full record
-      await this.store.save(patch as import("../types.js").SessionRecord);
-    }
-    if (options?.immediate) {
-      this.store.flush();
-    }
+    await this.withRecordMutation(sessionId, async () => {
+      // Check lifecycle inside the serialized mutation, not before waiting: a
+      // cancellation may have crossed the terminal boundary while this patch queued.
+      if (this._shutdownComplete) return;
+      if (options?.expectedSession && (
+        this.sessions.get(sessionId) !== options.expectedSession ||
+        options.expectedSession.isTerminating
+      )) {
+        if (options.registrationLease) {
+          throw new SessionRegistrationSupersededError(sessionId, 'initial persistence no longer owns the live session');
+        }
+        return;
+      }
+      const record = this.store!.get(sessionId);
+      if (record) {
+        let merged: import('../types.js').SessionRecord;
+        if (record.status === 'finished' && patch.status === 'initializing' && options?.registrationLease) {
+          const managed = options.registrationLease as ManagedSessionRegistrationLease;
+          const pending = this.pendingRegistrations.get(sessionId);
+          const expectedSession = options.expectedSession;
+          const authorized = this.ownedRegistrationLeases.has(managed)
+            && managed.sessionId === sessionId
+            && !managed.released
+            && !managed.invalidated
+            && !managed.finishedReopenConsumed
+            && pending?.has(managed) === true
+            && !this.cancellingSessionIds.has(sessionId)
+            && expectedSession !== undefined
+            && this.sessions.get(sessionId) === expectedSession
+            && !expectedSession.isTerminating
+            && expectedSession.status === 'initializing';
+          if (!authorized) {
+            throw new SessionRegistrationSupersededError(sessionId, 'finished-session reopen authorization is no longer current');
+          }
+          // Consume before persistence. A failed save must not leave reusable
+          // authorization that could reopen the same terminal generation twice.
+          managed.finishedReopenConsumed = true;
+          merged = { ...record, ...patch, status: 'initializing' };
+        } else {
+          if (options?.registrationLease && isTerminalStatus(record.status) && patch.status !== record.status) {
+            throw new SessionRegistrationSupersededError(sessionId, `stored session is ${record.status}`);
+          }
+          merged = mergeRecordMonotonic(record, patch);
+        }
+        if (merged !== record) {
+          if (options?.immediate) {
+            await this.store!.save(merged, { immediate: true });
+          } else {
+            await this.store!.save(merged);
+          }
+        } else if (options?.immediate) {
+          // The terminal state may already be accepted in memory by an earlier
+          // debounced mutation. Force that generation durable before teardown.
+          this.store!.flush();
+        }
+      } else if (patch.sessionId) {
+        // Initial save — treat patch as full record
+        if (options?.immediate) {
+          await this.store!.save(
+            patch as import("../types.js").SessionRecord,
+            { immediate: true },
+          );
+        } else {
+          await this.store!.save(patch as import("../types.js").SessionRecord);
+        }
+      } else if (options?.immediate) {
+        this.store!.flush();
+      }
+    });
   }
 
   /** Retrieve the persisted SessionRecord for a given session ID. Returns undefined if no store or record not found. */
@@ -203,52 +550,97 @@ export class SessionManager {
     const operation = this.performCancelSession(sessionId);
     this.cancellationOps.set(sessionId, operation);
     try { return await operation; }
-    finally { if (this.cancellationOps.get(sessionId) === operation) this.cancellationOps.delete(sessionId); }
+    finally {
+      if (this.cancellationOps.get(sessionId) === operation) {
+        this.cancellationOps.delete(sessionId);
+        this.cancellingSessionIds.delete(sessionId);
+      }
+    }
   }
 
   private async performCancelSession(sessionId: string): Promise<CancelSessionResult> {
     const session = this.sessions.get(sessionId);
     const recordBefore = this.store?.get(sessionId);
-    const previousStatus = session?.status ?? recordBefore?.status;
+    // An already-durable terminal record is the winner even if an inconsistent
+    // stale live object still exists. Otherwise the synchronous in-memory state wins.
+    let previousStatus = isTerminalStatus(recordBefore?.status)
+      ? recordBefore.status
+      : session?.status ?? recordBefore?.status;
     if (!previousStatus) {
       const error = new Error(`Session "${sessionId}" not found`) as Error & { code?: string };
       error.code = 'SESSION_NOT_FOUND';
       throw error;
     }
-    const alreadyTerminal = previousStatus === 'cancelled' || previousStatus === 'finished';
-    const finalStatus = previousStatus === 'finished' ? 'finished' : 'cancelled';
+    let alreadyTerminal = previousStatus === 'cancelled' || previousStatus === 'finished';
+    let finalStatus: 'cancelled' | 'finished' = previousStatus === 'finished' ? 'finished' : 'cancelled';
 
-    // Durability is the cancellation boundary. Persist and flush the terminal
-    // record before touching an agent or logger that may fail during teardown.
-    if (this.store && finalStatus === 'cancelled') {
-      const record = this.store.get(sessionId)
-      if (record && record.status !== 'cancelled') {
-        await this.store.save({ ...record, status: 'cancelled' })
-        this.store.flush()
-      }
+    this.invalidateSessionRegistrations(sessionId, 'session cancellation started');
+    // Stop all replacement/resume commits before the first durable await. The
+    // remaining cancellation work may block on storage or process cleanup, but
+    // switch factories must already observe the terminal boundary.
+    const terminalDelivery = session?.status === 'finished'
+      ? session.waitForTerminalDelivery()
+      : null;
+    session?.beginTermination();
+    // If completion already won, its recipient snapshot owns bridge cleanup.
+    // A cancellation winner still disconnects synchronously before durable I/O.
+    if (!terminalDelivery) this.cleanupOwnedResources(sessionId);
+
+    // Persist and flush the terminal winner before touching an agent or logger
+    // that may fail during teardown. A terminal record written by an earlier
+    // serialized mutation remains authoritative.
+    if (this.store) {
+      await this.withRecordMutation(sessionId, async () => {
+        const record = this.store!.get(sessionId)
+        if (!record) return;
+        if (isTerminalStatus(record.status)) {
+          previousStatus = record.status;
+          finalStatus = record.status;
+          alreadyTerminal = true;
+          // A terminal working record may still be a debounced mutation while
+          // disk contains an active session. Cancellation cannot tear down until
+          // the accepted terminal generation is durable.
+          this.store!.flush()
+        } else {
+          await this.store!.save(
+            { ...record, status: finalStatus },
+            { immediate: true },
+          )
+        }
+      })
     }
 
     let cleanupPending = false
+    let terminalDeliveryWarning: string | null = null
     if (session) {
-      if (!alreadyTerminal) {
-        session.markCancelled();
-        try {
-          await session.abortPrompt();
-        } catch (error) {
-          log.warn(
-            { sessionId, error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)) },
-            'Session prompt abort failed after cancellation became durable; continuing cleanup',
-          )
-        }
+      if (terminalDelivery) {
+        await terminalDelivery;
+        terminalDeliveryWarning = session.terminalDeliveryFailure;
+        this.cleanupOwnedResources(sessionId);
       }
-      try {
-        await session.destroy();
+      if (!alreadyTerminal && finalStatus === 'cancelled') {
+        session.markCancelled();
+      }
+      // Session.destroy owns prompt cancellation and subprocess teardown as one
+      // shared operation. Awaiting abortPrompt first can deadlock here when an ACP
+      // prompt ignores both cancellation and its local AbortSignal. The manager's
+      // deadline keeps external DELETE/cancel requests bounded while the teardown
+      // promise remains observed and shared for a later retry.
+      const cleanup = await waitForSessionCleanup(session.destroy());
+      if (cleanup.status === 'completed') {
         this.sessions.delete(sessionId);
-      } catch (error) {
+      } else {
         cleanupPending = true
         log.warn(
-          { sessionId, error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)) },
-          'Session is durably cancelled but agent/logger cleanup failed; repeat cancellation to retry cleanup',
+          {
+            sessionId,
+            error: cleanup.status === 'failed'
+              ? redactNetworkSecrets(cleanup.error instanceof Error ? cleanup.error.message : String(cleanup.error))
+              : `cleanup exceeded ${SESSION_CANCEL_CLEANUP_TIMEOUT_MS}ms`,
+          },
+          cleanup.status === 'failed'
+            ? `Session is durably ${finalStatus} but agent/logger cleanup failed; repeat cancellation to retry cleanup`
+            : `Session is durably ${finalStatus} but agent/logger cleanup is still running; repeat cancellation to observe cleanup`,
         )
       }
     }
@@ -263,7 +655,11 @@ export class SessionManager {
       status: finalStatus,
       alreadyTerminal,
       cleanupPending,
-      ...(cleanupPending ? { warning: 'Session state is cancelled and persisted; process cleanup is pending. Repeat cancellation to retry cleanup.' } : {}),
+      ...(cleanupPending
+        ? { warning: `Session state is ${finalStatus} and persisted; process cleanup is pending. Repeat cancellation to retry cleanup.` }
+        : terminalDeliveryWarning
+          ? { warning: `Session state is ${finalStatus} and persisted; final channel delivery did not complete: ${redactNetworkSecrets(terminalDeliveryWarning)}` }
+          : {}),
     };
   }
 
@@ -284,7 +680,9 @@ export class SessionManager {
       if (channelId) records = records.filter((r) => r.channelId === channelId);
       const summaries: SessionSummary[] = records.map((record) => {
         const live = this.sessions.get(record.sessionId);
-        if (live) {
+        // Durable terminal state is authoritative even while bounded process
+        // cleanup leaves a stale in-memory identity behind.
+        if (live && !isTerminalStatus(record.status)) {
           return {
             id: live.id,
             agent: live.agentName,
@@ -382,7 +780,7 @@ export class SessionManager {
   /** Remove a session's stored record and emit a SESSION_DELETED event. */
   async removeRecord(sessionId: string): Promise<void> {
     if (!this.store) return;
-    await this.store.remove(sessionId);
+    await this.withRecordMutation(sessionId, () => this.store!.remove(sessionId));
     this.eventBus?.emit(BusEvent.SESSION_DELETED, { sessionId });
   }
 
@@ -391,12 +789,27 @@ export class SessionManager {
    * Agent processes will exit naturally when the parent process terminates.
    */
   async shutdownAll(): Promise<void> {
+    if (this.closeOperation) return this.closeOperation;
+    this.beginClosing('session manager shutdown started');
+    const operation = this.performShutdownAll();
+    this.closeOperation = operation;
+    try {
+      await operation;
+    } catch (error) {
+      if (!this._shutdownComplete && this.closeOperation === operation) {
+        this.closeOperation = null;
+      }
+      throw error;
+    }
+  }
+
+  private async performShutdownAll(): Promise<void> {
+    const sessions = [...this.sessions.values()];
     if (this.store) {
-      for (const session of this.sessions.values()) {
+      for (const session of sessions) {
         const record = this.store.get(session.id);
         if (record) {
-          await this.store.save({
-            ...record,
+          await this.patchRecord(session.id, {
             status: "finished",
             acpState: session.toAcpStateSnapshot(),
             clientOverrides: session.clientOverrides,
@@ -418,19 +831,34 @@ export class SessionManager {
    * because destroyed sessions are terminal and will not be resumed.
    */
   async destroyAll(): Promise<void> {
+    if (this.closeOperation) return this.closeOperation;
+    this.beginClosing('session manager destruction started');
+    const operation = this.performDestroyAll();
+    this.closeOperation = operation;
+    try {
+      await operation;
+    } catch (error) {
+      if (!this._shutdownComplete && this.closeOperation === operation) {
+        this.closeOperation = null;
+      }
+      throw error;
+    }
+  }
+
+  private async performDestroyAll(): Promise<void> {
+    const sessions = [...this.sessions.values()];
+    const sessionIds = sessions.map((session) => session.id);
     if (this.store) {
-      for (const session of this.sessions.values()) {
+      for (const session of sessions) {
         const record = this.store.get(session.id);
         if (record) {
-          await this.store.save({ ...record, status: "finished" });
+          await this.patchRecord(session.id, { status: "finished" });
         }
       }
       this.store.flush();
     }
-    const sessionIds = [...this.sessions.keys()];
-    for (const session of this.sessions.values()) {
-      await session.destroy();
-    }
+    for (const session of sessions) await session.destroy();
+    this._shutdownComplete = true;
     this.sessions.clear();
     // Hook: session:afterDestroy — read-only, fire-and-forget
     if (this.middlewareChain) {

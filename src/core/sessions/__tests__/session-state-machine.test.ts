@@ -78,12 +78,12 @@ describe("Session state machine", () => {
       expect(session.status).toBe("active");
     });
 
-    it("cancelled → active via activate() (resume)", () => {
+    it("keeps cancelled terminal when activate() is requested", () => {
       const session = createSession();
       session.activate();
       session.markCancelled();
-      session.activate();
-      expect(session.status).toBe("active");
+      expect(session.activate()).toBe(false);
+      expect(session.status).toBe("cancelled");
     });
 
     it("error → cancelled via markCancelled()", () => {
@@ -226,16 +226,17 @@ describe("Session state machine", () => {
     });
   });
 
-  describe("auto-activate on prompt from cancelled/error", () => {
-    it("cancelled → active when processPrompt runs", async () => {
+  describe("auto-activate on prompt from error only", () => {
+    it("rejects prompts after cancellation", async () => {
       const session = createSession();
       session.activate();
       session.markCancelled();
       expect(session.status).toBe("cancelled");
 
-      // Enqueue a prompt — processPrompt should auto-activate
-      await session.enqueuePrompt("hello");
-      expect(session.status).toBe("active");
+      await expect(session.enqueuePrompt("hello")).rejects.toMatchObject({
+        code: 'SESSION_TERMINATING',
+      });
+      expect(session.status).toBe("cancelled");
     });
 
     it("error → active when processPrompt runs", async () => {

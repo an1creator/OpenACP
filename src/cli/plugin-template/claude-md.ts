@@ -61,7 +61,7 @@ src/
   index.ts              — Plugin entry point (exports OpenACPPlugin)
   __tests__/
     index.test.ts       — Tests using @n1creator/openacp-plugin-sdk/testing
-package.json            — engines.openacp declares minimum CLI version
+package.json            — engines.node and engines.openacp declare runtime compatibility
 tsconfig.json           — ES2022, NodeNext, strict mode
 CLAUDE.md               — This file (AI agent context)
 PLUGIN_GUIDE.md         — Human-readable developer guide
@@ -214,6 +214,8 @@ interface InstallContext {
 | \`tunnel\` | \`TunnelServiceInterface\` | Port tunneling and public URL management |
 | \`context\` | \`ContextService\` | Context building for agent sessions |
 
+The runtime speech service uses result-returning \`synthesize()\` and \`transcribe()\`, provider registration, \`unregisterTTSProvider()\`, and availability checks. It has no \`textToSpeech()\`, \`speechToText()\`, or \`unregisterSTTProvider()\` method. STT providers receive an optional \`STTOptions.signal\`; honor it promptly, terminate descendant work, release temporary resources, and reject only after cleanup completes so queued prompts remain serialized.
+
 ## Plugin Permissions
 
 Declare in \`permissions\` array. Only request what you need.
@@ -246,7 +248,7 @@ Register with \`ctx.registerMiddleware(hook, { priority?, handler })\`. Return \
 - \`agent:afterEvent\` — after agent event, before delivery (sessionId, event, outgoingMessage)
 
 ### Turn lifecycle
-- \`turn:start\` — agent turn begins (sessionId, promptText, promptNumber)
+- \`turn:start\` — agent turn begins before local preprocessing (sessionId, pre-STT promptText, promptNumber)
 - \`turn:end\` — agent turn ends (sessionId, stopReason, durationMs)
 
 ### File system
@@ -336,10 +338,12 @@ mockServices.security(overrides?)    // checkAccess, checkSessionLimit, getUserR
 mockServices.fileService(overrides?) // saveFile, resolveFile, readTextFileWithRange
 mockServices.notifications(overrides?) // notify, notifyAll
 mockServices.usage(overrides?)       // trackUsage, checkBudget, getSummary
-mockServices.speech(overrides?)      // textToSpeech, speechToText, register*
+mockServices.speech(overrides?)      // synthesize, transcribe, availability, register*
 mockServices.tunnel(overrides?)      // getPublicUrl, start, stop, getStore, fileUrl, diffUrl
 mockServices.context(overrides?)     // buildContext, registerProvider
 \`\`\`
+
+Only the speech test mock retains deprecated \`textToSpeech()\` and \`speechToText()\` aliases for test-suite compatibility. New plugins and tests use \`synthesize()\` and \`transcribe()\`.
 
 ## Conventions
 
@@ -404,6 +408,6 @@ Requires \`middleware:register\` permission.
 
 ## Version Compatibility
 
-The \`engines.openacp\` field in package.json declares the minimum CLI version. OpenACP checks this on install and warns if incompatible.
+The \`engines.node\` and \`engines.openacp\` fields in package.json declare the minimum Node.js and CLI versions. OpenACP checks the CLI constraint on install; npm checks the Node.js constraint.
 `
 }

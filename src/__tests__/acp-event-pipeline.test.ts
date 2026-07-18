@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { SessionBridge } from '../core/sessions/session-bridge.js'
 import { MessageTransformer } from '../core/message-transformer.js'
 import { TypedEmitter } from '../core/utils/typed-emitter.js'
@@ -17,6 +17,8 @@ function createMockSession() {
     agentSessionId: 'agent-1',
     workingDirectory: '/tmp',
     status: 'active',
+    isTerminating: false,
+    agentGeneration: 0,
     createdAt: new Date(),
     promptCount: 0,
     configOptions: [],
@@ -32,6 +34,8 @@ function createMockSession() {
     setName: vi.fn(),
     finish: vi.fn(),
     fail: vi.fn(),
+    registerBridge: vi.fn(),
+    unregisterBridge: vi.fn(),
     updateConfigOptions: vi.fn().mockResolvedValue(undefined),
     toAcpStateSnapshot: vi.fn().mockReturnValue({}),
   }) as unknown as Session
@@ -67,12 +71,26 @@ describe('ACP Event Pipeline Integration', () => {
     bridge.connect()
   })
 
+  afterEach(() => {
+    bridge.disconnect()
+  })
+
+  it('registers and unregisters the exact adapter owner', () => {
+    expect(session.registerBridge).toHaveBeenCalledOnce()
+    expect(session.registerBridge).toHaveBeenCalledWith('test')
+
+    bridge.disconnect()
+
+    expect(session.unregisterBridge).toHaveBeenCalledOnce()
+    expect(session.unregisterBridge).toHaveBeenCalledWith('test')
+  })
+
   describe('config options flow', () => {
     it('agent config update → session state + adapter message', async () => {
       const options = [{ id: 'model', name: 'Model', type: 'select' as const, currentValue: 'sonnet', options: [] }]
       session.emit('agent_event', { type: 'config_option_update', options } as AgentEvent)
       await vi.waitFor(() => {
-        expect(session.updateConfigOptions).toHaveBeenCalledWith(options)
+        expect(session.updateConfigOptions).toHaveBeenCalledWith(options, 0)
         expect(adapter.sendMessage).toHaveBeenCalledWith('test-session',
           expect.objectContaining({ type: 'config_update' }))
       })

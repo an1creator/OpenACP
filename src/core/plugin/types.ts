@@ -793,19 +793,55 @@ export interface UsageService {
   checkBudget(sessionId: string): Promise<{ ok: boolean; percent: number; warning?: string }>
 }
 
+/** Options passed to a text-to-speech provider for one synthesis request. */
+export interface TTSOptions {
+  language?: string
+  voice?: string
+  model?: string
+}
+
+/** Audio returned by a text-to-speech provider. */
+export interface TTSResult {
+  audioBuffer: Buffer
+  mimeType: string
+}
+
+/** Options passed to a speech-to-text provider for one transcription request. */
+export interface STTOptions {
+  language?: string
+  model?: string
+  /** Abort provider work promptly and release all request-owned resources before rejecting. */
+  signal?: AbortSignal
+}
+
+/** Transcript returned by a speech-to-text provider. */
+export interface STTResult {
+  text: string
+  language?: string
+  duration?: number
+}
+
+/** Provider contract for text-to-speech plugins. */
 export interface TTSProvider {
-  synthesize(text: string, opts?: { language?: string; voice?: string }): Promise<Buffer>
+  readonly name: string
+  synthesize(text: string, options?: TTSOptions): Promise<TTSResult>
 }
 
+/** Provider contract for speech-to-text plugins. */
 export interface STTProvider {
-  transcribe(audio: Buffer, opts?: { language?: string }): Promise<string>
+  readonly name: string
+  transcribe(audioBuffer: Buffer, mimeType: string, options?: STTOptions): Promise<STTResult>
 }
 
+/** Public runtime contract of the built-in `speech` service. */
 export interface SpeechServiceInterface {
-  textToSpeech(text: string, opts?: { language?: string; voice?: string }): Promise<Buffer>
-  speechToText(audio: Buffer, opts?: { language?: string }): Promise<string>
   registerTTSProvider(name: string, provider: TTSProvider): void
+  unregisterTTSProvider(name: string): void
   registerSTTProvider(name: string, provider: STTProvider): void
+  isTTSAvailable(): boolean
+  isSTTAvailable(): boolean
+  synthesize(text: string, options?: TTSOptions): Promise<TTSResult>
+  transcribe(audioBuffer: Buffer, mimeType: string, options?: STTOptions): Promise<STTResult>
 }
 
 export interface ContextProvider {

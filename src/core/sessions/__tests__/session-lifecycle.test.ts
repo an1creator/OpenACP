@@ -189,30 +189,112 @@ describe('Session - Lifecycle & Prompt Processing', () => {
     })
 
     it('clears queued prompts on destroy', async () => {
-      let resolvePrompt!: () => void
       const agent = mockAgentInstance()
-      // Block the first prompt so we can queue a second
-      agent.prompt.mockImplementation(async () => {
-        await new Promise<void>((r) => { resolvePrompt = r })
-      })
-
       const session = createTestSession(agent)
       session.name = 'skip-autoname'
 
-      // Start first prompt (will be blocked)
+      // Destroy in the same tick cancels the scheduled processor before agent I/O begins.
       const p1 = session.enqueuePrompt('first')
-      // Queue a second prompt while first is running
       const p2 = session.enqueuePrompt('second')
 
       expect(session.queueDepth).toBe(1)
 
-      // Destroy clears the queue; both promises should resolve without hanging
       await session.destroy()
-      resolvePrompt()
-
       await expect(Promise.all([p1, p2])).resolves.not.toThrow()
-      // Only the first prompt should have been sent to agent
-      expect(agent.prompt).toHaveBeenCalledTimes(1)
+      expect(agent.prompt).not.toHaveBeenCalled()
+      expect(session.queueDepth).toBe(0)
+    })
+
+    it('destroys an agent whose in-flight prompt and cancellation do not settle', async () => {
+      vi.useFakeTimers()
+      try {
+        let finishPrompt!: () => void
+        const agent = mockAgentInstance()
+        agent.prompt.mockImplementation(() => new Promise<void>((resolve) => { finishPrompt = resolve }))
+        agent.cancel.mockImplementation(() => new Promise<void>(() => {}))
+        agent.destroy.mockImplementation(async () => { finishPrompt() })
+        const session = createTestSession(agent)
+
+        const prompt = session.enqueuePrompt('in flight')
+        await vi.waitFor(() => expect(agent.prompt).toHaveBeenCalledOnce())
+        const destroying = session.destroy()
+        await Promise.resolve()
+
+        expect(agent.cancel).toHaveBeenCalledOnce()
+        expect(agent.destroy).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(5_000)
+        vi.useRealTimers()
+
+        await Promise.all([prompt, destroying])
+        expect(agent.destroy).toHaveBeenCalledOnce()
+        expect(agent.prompt).toHaveBeenCalledOnce()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('destroys an agent whose auto-name prompt and cancellation do not settle', async () => {
+      vi.useFakeTimers()
+      try {
+        let finishAutoName!: () => void
+        const agent = mockAgentInstance()
+        agent.prompt
+          .mockResolvedValueOnce(undefined)
+          .mockImplementationOnce(() => new Promise<void>((resolve) => { finishAutoName = resolve }))
+        agent.cancel.mockImplementation(() => new Promise<void>(() => {}))
+        agent.destroy.mockImplementation(async () => { finishAutoName() })
+        const session = createTestSession(agent)
+
+        const prompt = session.enqueuePrompt('name this session')
+        await vi.waitFor(() => expect(agent.prompt).toHaveBeenCalledTimes(2))
+        const destroying = session.destroy()
+        await Promise.resolve()
+
+        expect(agent.cancel).toHaveBeenCalledOnce()
+        expect(agent.destroy).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(5_000)
+        vi.useRealTimers()
+
+        await Promise.all([prompt, destroying])
+        expect(agent.destroy).toHaveBeenCalledOnce()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('shares terminal teardown and rejects new prompts when prompt and cancel never settle', async () => {
+      vi.useFakeTimers()
+      try {
+        let finishDestroy!: () => void
+        const agent = mockAgentInstance()
+        agent.prompt.mockImplementation(() => new Promise<void>(() => {}))
+        agent.cancel.mockImplementation(() => new Promise<void>(() => {}))
+        agent.destroy.mockImplementation(() => new Promise<void>((resolve) => { finishDestroy = resolve }))
+        const session = createTestSession(agent)
+        session.name = 'skip-autoname'
+
+        const prompt = session.enqueuePrompt('in flight forever')
+        await vi.waitFor(() => expect(agent.prompt).toHaveBeenCalledOnce())
+        const first = session.destroy()
+        const concurrent = session.destroy()
+
+        expect(first).toBe(concurrent)
+        await vi.advanceTimersByTimeAsync(5_000)
+        expect(agent.cancel).toHaveBeenCalledOnce()
+        expect(agent.destroy).toHaveBeenCalledOnce()
+
+        finishDestroy()
+        await vi.advanceTimersByTimeAsync(1_000)
+        await Promise.all([prompt, first, concurrent])
+        await expect(session.enqueuePrompt('must not drain')).rejects.toMatchObject({
+          code: 'SESSION_TERMINATING',
+        })
+        await session.destroy()
+        expect(agent.cancel).toHaveBeenCalledOnce()
+        expect(agent.destroy).toHaveBeenCalledOnce()
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 
@@ -324,14 +406,15 @@ describe("Session - Context Injection", () => {
     expect(agent.prompt.mock.calls[0][0]).toBe("hello");
   });
 
-  it("processPrompt silently returns if session is finished", async () => {
+  it("enqueuePrompt rejects after finish without invoking the agent", async () => {
     const agent = mockAgentInstance();
     const session = createTestSession(agent);
     session.activate();
     session.finish("done");
     const callsBefore = agent.prompt.mock.calls.length;
-    await session.enqueuePrompt("hello after finish");
-    await new Promise((r) => setTimeout(r, 50));
+    await expect(session.enqueuePrompt("hello after finish")).rejects.toMatchObject({
+      code: 'SESSION_TERMINATING',
+    });
     expect(agent.prompt.mock.calls.length).toBe(callsBefore);
   });
 });

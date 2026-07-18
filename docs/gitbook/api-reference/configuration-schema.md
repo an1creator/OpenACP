@@ -199,7 +199,7 @@ The workspace base directory is derived automatically from the instance root par
 | `speech.stt.providers.<name>.apiKey` | string | — | API key for the named provider |
 | `speech.stt.providers.<name>.model` | string | — | Model identifier for the named provider |
 
-The built-in speech plugin persists its editable settings under `@openacp/speech`. Connector-editable native local STT fields are `localWhisperLanguage` (`ru`), `localWhisperModel` (`base`), `localWhisperBeamSize` (`5`), `localWhisperVadFilter` (`false`), `localWhisperDevice` (`cpu`), `localWhisperComputeType` (`int8`), and `localWhisperTimeoutMs` (`120000`). Optional `localWhisperScriptPath` selects an executable and is host-only through a protected settings file or environment variable; connector UI must not expose it.
+The built-in speech plugin persists its editable settings under `@openacp/speech`. Connector-editable native local STT fields are `localWhisperLanguage` (`ru`), `localWhisperModel` (`base`), `localWhisperBeamSize` (`5`), `localWhisperVadFilter` (`false`), `localWhisperDevice` (`cpu`), `localWhisperComputeType` (`int8`), and `localWhisperTimeoutMs` (`600000`, connector range 1,000–600,000 ms). A 1.0.0 setting equal to the former 120,000 ms default is migrated; absent settings and every other value are preserved. The old format cannot distinguish an explicitly chosen 120,000 ms value, so it is migrated too. Protected host configuration can set a larger Node-compatible integer or `0` for no provider timeout. Optional `localWhisperScriptPath` selects an executable and is host-only through a protected settings file or environment variable; connector UI must not expose it.
 
 ### speech.tts.*
 

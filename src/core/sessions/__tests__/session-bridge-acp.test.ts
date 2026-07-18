@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { SessionBridge } from '../session-bridge.js'
 import { MessageTransformer } from '../../message-transformer.js'
 import type { IChannelAdapter } from '../../channel.js'
@@ -17,6 +17,8 @@ function createMockSession() {
     agentSessionId: 'agent-1',
     workingDirectory: '/tmp',
     status: 'active',
+    isTerminating: false,
+    agentGeneration: 0,
     createdAt: new Date(),
     promptCount: 0,
     configOptions: [],
@@ -31,6 +33,8 @@ function createMockSession() {
     setName: vi.fn(),
     finish: vi.fn(),
     fail: vi.fn(),
+    registerBridge: vi.fn(),
+    unregisterBridge: vi.fn(),
     getConfigByCategory: vi.fn(),
     updateConfigOptions: vi.fn().mockResolvedValue(undefined),
     toAcpStateSnapshot: vi.fn().mockReturnValue({}),
@@ -69,6 +73,20 @@ describe('SessionBridge ACP events', () => {
     bridge.connect()
   })
 
+  afterEach(() => {
+    bridge.disconnect()
+  })
+
+  it('registers and unregisters the exact adapter owner', () => {
+    expect(session.registerBridge).toHaveBeenCalledOnce()
+    expect(session.registerBridge).toHaveBeenCalledWith('test')
+
+    bridge.disconnect()
+
+    expect(session.unregisterBridge).toHaveBeenCalledOnce()
+    expect(session.unregisterBridge).toHaveBeenCalledWith('test')
+  })
+
   it('session_info_update with title calls setName and sends message', async () => {
     const event: AgentEvent = { type: 'session_info_update', title: 'New Title' }
     session.emit('agent_event', event)
@@ -94,7 +112,11 @@ describe('SessionBridge ACP events', () => {
     session.emit('agent_event', event)
     await vi.waitFor(() => {
       expect(session.updateConfigOptions).toHaveBeenCalled()
-      expect(mockPatchRecord).toHaveBeenCalledWith('test-session', expect.objectContaining({ acpState: expect.anything() }))
+      expect(mockPatchRecord).toHaveBeenCalledWith(
+        'test-session',
+        expect.objectContaining({ acpState: expect.anything() }),
+        { expectedSession: session },
+      )
       expect(adapter.sendMessage).toHaveBeenCalledWith('test-session', expect.objectContaining({ type: 'config_update' }))
     })
   })

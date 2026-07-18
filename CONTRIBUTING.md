@@ -9,7 +9,7 @@ Please read the [Code of Conduct](CODE_OF_CONDUCT.md) before contributing.
 ## Development Setup
 
 **Prerequisites**
-- Node.js >= 20
+- Node.js >= 22 (Node.js 24 LTS recommended)
 - pnpm 10.5.0+ (`npm install -g pnpm`)
 
 **Getting started**

@@ -73,26 +73,22 @@ describe('PromptQueue - extended edge cases', () => {
   })
 
   it('processes items added after clear', async () => {
-    let resolveFirst!: () => void
-    const firstPromise = new Promise<void>((r) => { resolveFirst = r })
     const calls: string[] = []
 
     const processor = vi.fn().mockImplementation(async (text: string) => {
       calls.push(text)
-      if (text === 'first') await firstPromise
     })
 
     const queue = new PromptQueue(processor)
-    queue.enqueue('first')
-    queue.enqueue('should-be-cleared')
-    queue.clear()
+    const first = queue.enqueue('first')
+    const removed = queue.enqueue('should-be-cleared')
+    const cleared = queue.clear()
 
     const afterClear = queue.enqueue('after-clear')
 
-    resolveFirst()
-    await afterClear
+    await Promise.all([first, removed, cleared, afterClear])
 
-    expect(calls).toContain('first')
+    expect(calls).not.toContain('first')
     expect(calls).toContain('after-clear')
     expect(calls).not.toContain('should-be-cleared')
   })

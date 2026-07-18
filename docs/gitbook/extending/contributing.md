@@ -6,7 +6,7 @@ Contributions are welcome. This page covers how to set up a development environm
 
 ## Dev Setup
 
-**Requirements:** Node.js >= 20, pnpm >= 10.
+**Requirements:** Node.js >= 22, pnpm >= 10. CI verifies Node.js 22 and 24.
 
 ```bash
 # 1. Fork https://github.com/an1creator/OpenACP and clone your fork

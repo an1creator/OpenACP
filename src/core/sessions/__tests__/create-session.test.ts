@@ -76,6 +76,12 @@ function createMockCore(): OpenACPCore {
     getAvailableAgents: vi.fn().mockReturnValue([]),
   } as any;
   core.sessionManager = {
+    reserveSessionAdmission: vi.fn().mockResolvedValue({
+      token: Symbol('admission'),
+      released: false,
+      committed: false,
+    }),
+    releaseSessionAdmission: vi.fn(),
     registerSession: vi.fn(),
     getSession: vi.fn(),
     patchRecord: vi.fn().mockResolvedValue(undefined),
@@ -171,7 +177,11 @@ describe("OpenACPCore.createSession", () => {
       workingDirectory: "/tmp/test",
     });
 
-    expect(core.sessionManager.registerSession).toHaveBeenCalledWith(session);
+    expect(core.sessionManager.registerSession).toHaveBeenCalledWith(
+      session,
+      undefined,
+      expect.objectContaining({ token: expect.any(Symbol) }),
+    );
   });
 
   it("connects SessionBridge — events route to adapter", async () => {

@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { RouteDeps } from './types.js';
 import { BadRequestError, NotFoundError, ServiceUnavailableError } from '../middleware/error-handler.js';
 import { requireScopes } from '../middleware/auth.js';
@@ -14,7 +14,10 @@ import {
   UpdateSessionBodySchema,
   SetConfigOptionBodySchema,
   SetClientOverridesBodySchema,
+  ElicitationResponseBodySchema,
+  ElicitationParamsSchema,
 } from '../schemas/sessions.js';
+import { ElicitationValidationError } from '../../../core/sessions/elicitation-gate.js';
 import {
   apiMessagePrincipal,
   apiPlatformUserId,
@@ -39,6 +42,34 @@ export async function sessionRoutes(
   app: FastifyInstance,
   deps: RouteDeps,
 ): Promise<void> {
+  const publicElicitationRequest = (request: import('../../../core/types.js').ElicitationRequest) => {
+    const result = structuredClone(request) as import('../../../core/types.js').ElicitationRequest & { owner?: unknown };
+    delete result.owner;
+    return result;
+  };
+
+  const protectedTransport = (request: FastifyRequest): boolean => {
+    if (request.protocol === 'https') return true;
+    const address = request.ip.replace(/^::ffff:/, '');
+    return address === '127.0.0.1' || address === '::1';
+  };
+
+  const ownsElicitation = (
+    owner: import('../../../core/types.js').ElicitationOwner | undefined,
+    request: FastifyRequest,
+  ): boolean => {
+    // The master secret is the explicit administrative override.
+    if (request.auth.type === 'secret') return true;
+    if (!owner) return false;
+    if (owner.apiCredential === 'secret') return false;
+    if (owner.apiCredential === 'jwt' && owner.apiTokenId === request.auth.tokenId) return true;
+    return Boolean(
+      owner.canonicalUserId
+      && request.auth.userId
+      && owner.canonicalUserId === request.auth.userId,
+    );
+  };
+
   // GET /sessions — list all sessions (live + historical)
   app.get('/', { preHandler: requireScopes('sessions:read') }, async () => {
     const summaries = deps.core.sessionManager.listAllSessions();
@@ -118,22 +149,75 @@ export async function sessionRoutes(
     },
   );
 
+  app.get<{ Params: { sessionId: string } }>(
+    '/:sessionId/elicitation',
+    { preHandler: requireScopes('sessions:read') },
+    async (request) => {
+      const { sessionId } = SessionIdParamSchema.parse(request.params);
+      const id = decodeURIComponent(sessionId);
+      const session = deps.core.sessionManager.getSession(id);
+      if (!session) throw new NotFoundError('SESSION_NOT_FOUND', `Session "${id}" not found`);
+      return {
+        requests: session.elicitationGate.requests
+          .filter((pending) => ownsElicitation(pending.owner, request))
+          .map(publicElicitationRequest),
+      };
+    },
+  );
+
+  app.post<{ Params: { sessionId: string; requestId: string } }>(
+    '/:sessionId/elicitation/:requestId',
+    { preHandler: requireScopes('sessions:permission'), bodyLimit: 70_000 },
+    async (request, reply) => {
+      const { sessionId, requestId } = ElicitationParamsSchema.parse(request.params);
+      const id = decodeURIComponent(sessionId);
+      const inputId = decodeURIComponent(requestId);
+      const session = deps.core.sessionManager.getSession(id);
+      if (!session) throw new NotFoundError('SESSION_NOT_FOUND', `Session "${id}" not found`);
+      const pending = session.elicitationGate.get(inputId);
+      if (!pending) {
+        const result = session.elicitationGate.resolve(inputId, { action: 'cancel' });
+        return reply.status(result === 'already_resolved' ? 409 : 404).send({
+          error: result === 'already_resolved' ? 'Input request already resolved' : 'Input request not found',
+        });
+      }
+
+      if (!ownsElicitation(pending.owner, request)) {
+        return reply.status(403).send({ error: 'Input request belongs to another principal' });
+      }
+
+      const body = ElicitationResponseBodySchema.parse(request.body);
+      if (pending.sensitiveFields?.length) {
+        if (!protectedTransport(request)) {
+          return reply.status(403).send({ error: 'Protected input requires HTTPS or a loopback connection' });
+        }
+      }
+
+      try {
+        const resolvedBy = request.auth.type === 'secret'
+          ? 'api:master'
+          : request.auth.userId
+            ? `user:${request.auth.userId}`
+            : `token:${request.auth.tokenId}`;
+        const result = session.elicitationGate.resolve(inputId, body, resolvedBy);
+        if (result !== 'resolved') {
+          return reply.status(result === 'already_resolved' ? 409 : 404).send({
+            error: result === 'already_resolved' ? 'Input request already resolved' : 'Input request not found',
+          });
+        }
+      } catch (error) {
+        if (error instanceof ElicitationValidationError) {
+          return reply.status(400).send({ error: error.message });
+        }
+        throw error;
+      }
+      return { ok: true, requestId: inputId, action: body.action };
+    },
+  );
+
   // POST /sessions — create a new session
   app.post('/', { preHandler: requireScopes('sessions:write') }, async (request, reply) => {
     const body = CreateSessionBodySchema.parse(request.body ?? {});
-
-    // Check max concurrent sessions (default 20; security plugin may override via plugin settings)
-    const settingsManager = deps.lifecycleManager?.settingsManager
-    const secSettings = settingsManager ? await settingsManager.loadSettings('@openacp/security') : {}
-    const maxConcurrentSessions = (secSettings.maxConcurrentSessions as number) ?? 20;
-    const activeSessions = deps.core.sessionManager
-      .listSessions()
-      .filter((s) => s.status === 'active' || s.status === 'initializing');
-    if (activeSessions.length >= maxConcurrentSessions) {
-      return reply.status(429).send({
-        error: `Max concurrent sessions (${maxConcurrentSessions}) reached. Cancel a session first.`,
-      });
-    }
 
     // Resolve adapter: use explicit channel if provided, otherwise create a headless API session.
     // Omitting channel is intentional — API callers interact via SSE + POST /prompt.
@@ -233,8 +317,7 @@ export async function sessionRoutes(
 
       if (
         session.status === 'cancelled' ||
-        session.status === 'finished' ||
-        session.status === 'error'
+        session.status === 'finished'
       ) {
         return reply.status(400).send({ error: `Session is ${session.status}` });
       }
@@ -294,17 +377,29 @@ export async function sessionRoutes(
     async (request) => {
       const { sessionId: rawId } = SessionIdParamSchema.parse(request.params);
       const sessionId = decodeURIComponent(rawId);
-      const session = await deps.core.getOrResumeSessionById(sessionId);
-      if (!session) {
+      const session = deps.core.sessionManager.getSession(sessionId);
+      if (session) {
+        return {
+          pending: session.queueItems,
+          processing: session.promptRunning,
+          queueDepth: session.queueDepth,
+          status: session.status,
+          isLive: true,
+        };
+      }
+      const record = deps.core.sessionManager.getSessionRecord(sessionId);
+      if (!record) {
         throw new NotFoundError(
           'SESSION_NOT_FOUND',
           `Session "${sessionId}" not found`,
         );
       }
       return {
-        pending: session.queueItems,
-        processing: session.promptRunning,
-        queueDepth: session.queueDepth,
+        pending: [],
+        processing: false,
+        queueDepth: 0,
+        status: record.status,
+        isLive: false,
       };
     },
   );
@@ -402,8 +497,7 @@ export async function sessionRoutes(
       const changes: Record<string, unknown> = {};
 
       if (body.name !== undefined) {
-        session.setName(body.name);
-        changes.name = body.name;
+        changes.name = session.setName(body.name, "manual");
       }
 
       if (body.agentName !== undefined) {
@@ -501,14 +595,28 @@ export async function sessionRoutes(
 
       const body = SetConfigOptionBodySchema.parse(request.body);
 
-      await session.setConfigOption(configId, { type: 'select', value: body.value });
+      const outcome = await session.setConfigOption(configId, { type: 'select', value: body.value });
+      if (!outcome.acknowledged) {
+        throw new BadRequestError(
+          'CONFIG_CHANGE_REJECTED',
+          outcome.message ?? 'The agent did not apply the configuration change.',
+        );
+      }
 
+      const outcomeConfigOptions = outcome.configOptions ?? structuredClone(session.configOptions);
+      const acpState = session.toAcpStateSnapshot();
+      acpState.configOptions = outcomeConfigOptions.length > 0
+        ? structuredClone(outcomeConfigOptions)
+        : undefined;
       await deps.core.sessionManager.patchRecord(sessionId, {
-        acpState: session.toAcpStateSnapshot(),
+        acpState,
+      }, {
+        expectedSession: session,
+        expectedConfigRevision: outcome.revision ?? session.configRevision,
       });
 
       return {
-        configOptions: session.configOptions,
+        configOptions: outcomeConfigOptions,
         clientOverrides: session.clientOverrides,
       };
     },

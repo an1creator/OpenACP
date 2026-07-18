@@ -70,6 +70,14 @@ After the microkernel refactor, `OpenACPCore` no longer creates services directl
 
 Manages the lifecycle of all sessions. Handles creation, lookup, destruction, and enforces limits.
 
+`SessionManager` owns a one-use admission lease for every create or lazy
+resume. A lease is reserved before ACP startup, committed with live
+registration, and retained as the exact owner of that live slot. It is released
+on rollback, `error`, or a terminal transition. Active sessions admit prompts
+through their existing lease. An `error -> active` retry reacquires capacity
+under the same serialized admission boundary before queue or turn start, so
+concurrent retries and a hot-reloaded limit cannot oversubscribe the process cap.
+
 ```typescript
 class SessionManager {
   create(opts: SessionCreateOpts): Promise<Session>
@@ -107,6 +115,33 @@ class Session {
 ```
 
 Sessions emit events through the EventBus that plugins can subscribe to (e.g., `session:afterDestroy` for cleanup).
+
+Config mutations share one FIFO boundary per session, including agent-reported
+option refreshes and user-initiated changes. Every committed snapshot receives a
+monotonic revision used by persistence. Queue admission waits at most 30 seconds;
+agent replacement and terminal teardown synchronously invalidate queued work and
+prevent late acknowledgements from changing the replacement generation.
+
+Headless sessions use Core fallback listeners only while no `SessionBridge` is
+connected. An event synchronously admitted by the headless owner receives an
+opaque, non-serialized delivery claim and completes through that path even if
+middleware is still running when the first bridge attaches. The ownership
+cutover then sends newer events only through the bridge. Detaching the last
+bridge starts a new headless epoch. SSE relays honor an admitted claim but stand
+down for unclaimed traffic while a real SSE bridge is attached, so ordinary,
+config, title, terminal, and elicitation events are neither lost nor duplicated
+across attach, detach, and reconnect.
+
+Session naming is a core policy rather than adapter behavior. Core normalizes
+new manual names to one line and 200 characters, limits generated titles to 5
+words and 50 characters, rejects ACP title updates that echo the active prompt,
+and preserves manual-name priority. Automatic naming uses a revision-guarded
+single-flight commit, so a manual or restored name selected while its agent
+request is pending cannot be overwritten. Agent replacement invalidates the
+previous agent's pending naming ownership before teardown begins. Stored names
+are restored without rewriting historical formatting or length. Turn provenance
+is captured when the event arrives so a delayed middleware continuation cannot
+overwrite a newer name.
 
 `enqueuePrompt()` rejects with error code `SESSION_TERMINATING` once the session is
 finished, cancelled, or has started teardown; terminal sessions never accept new work.
@@ -152,6 +187,20 @@ entry has a five-minute TTL enforced by a background reaper. Shutdown invalidate
 in-flight prewarm work and joins any concurrent claim or cleanup. The manager
 retains ownership through bounded destroy retries and reports pending or failed
 cleanup instead of exposing the slot as empty while the process may still live.
+
+`AgentInstance.destroy()` completes only after the child has exited (or was
+already exited). SIGTERM is followed by a bounded SIGKILL wait; signal failure
+or a missing exit rejects cleanup. Failed initialization retains cleanup
+ownership for bounded retries. Ownership capacity is reserved before child
+creation and capped; when every retained slot is occupied, another child is not
+started. Exhausted retries become an explicit terminal failure, remain owned,
+and receive a final shutdown attempt. All retained initialization cleanups share
+one four-second daemon-wide shutdown budget and run with bounded concurrency, so
+an `/update` restart is not delayed by a separate TERM/KILL timeout for every
+child. At the deadline OpenACP makes a final best-effort SIGKILL, detaches stream
+and exit listeners, and keeps unconfirmed ownership visible as a terminal failure.
+Authenticated health diagnostics include pending, failed, and terminal-failed
+cleanup in `terminalCleanup`.
 
 ---
 
@@ -277,9 +326,8 @@ type MiddlewareFn<T> = (payload: T, next: () => Promise<T>) => Promise<T | null>
 | `permission:afterResolve` | Read-only | Observe permission decisions |
 | `session:beforeCreate` | Yes | Control session creation |
 | `session:afterDestroy` | Read-only | Observe session cleanup |
-| `mode:beforeChange` | Yes | Control mode changes |
-| `model:beforeChange` | Yes | Control model selection |
-| `config:beforeChange` | Yes | Control config changes |
+| `config:beforeChange` | Yes | Gate config changes before agent RPC or local mutation; null/error/timeout rejects the change |
+| `config:afterChange` | Read-only | Observe acknowledged effective config changes; failures do not roll back state |
 
 ### Execution order
 
@@ -287,7 +335,7 @@ type MiddlewareFn<T> = (payload: T, next: () => Promise<T>) => Promise<T | null>
 2. **Priority override**: reorders within the same dependency level only (priority cannot violate dependency order)
 3. **Same level + same priority**: registration order
 
-Each handler has a 5-second timeout. Timeout or error skips the handler, passes the original payload to the next handler, and increments the plugin's error budget.
+Each handler has a 5-second timeout. By default, timeout or error skips the handler, passes the original payload to the next handler, and increments the plugin's error budget. The policy-critical `config:beforeChange` hook is fail-closed: timeout or error rejects the change before any agent RPC or local mutation. If circuit breaking disables that policy plugin, later fail-closed executions remain blocked until the plugin is healthy or removed; disabling a policy handler never converts it into a bypass.
 
 ---
 

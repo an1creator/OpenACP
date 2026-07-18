@@ -26,17 +26,30 @@ async function createCatalog(instanceRoot: string) {
  * Uses fuzzy matching (suggestMatch) to hint at the correct subcommand on typos.
  */
 export async function cmdAgents(args: string[], instanceRoot?: string): Promise<void> {
-  const subcommand = args[0];
+  const separator = args.indexOf('--')
+  const openacpArgs = separator === -1 ? args : args.slice(0, separator)
+  const passthroughArgs = separator === -1 ? [] : args.slice(separator)
+  const json = isJsonMode(openacpArgs)
+  // `--json` is an output modifier, not a subcommand. Accept it before or after
+  // the subcommand so both `agents --json` and `agents --json info claude` are
+  // parsed consistently with the top-level CLI.
+  const commandArgs = [
+    ...openacpArgs.filter((arg) => arg !== '--json'),
+    ...passthroughArgs,
+  ]
+  const subcommand = commandArgs[0];
 
   if (wantsHelp(args) && (!subcommand || subcommand === '--help' || subcommand === '-h')) {
     console.log(`
 \x1b[1mopenacp agents\x1b[0m — Manage AI coding agents
 
 \x1b[1mUsage:\x1b[0m
-  openacp agents                       Browse all agents (installed + available)
-  openacp agents install <name>        Install an agent from the ACP Registry
-  openacp agents uninstall <name>      Remove an installed agent
-  openacp agents info <name>           Show details, dependencies & setup guide
+  openacp agents [--json]              Browse all agents (installed + available)
+  openacp agents install <name> [--json]
+                                       Install an agent from the ACP Registry
+  openacp agents uninstall <name> [--json]
+                                       Remove an installed agent
+  openacp agents info <name> [--json]  Show details, dependencies & setup guide
   openacp agents run <name> [-- args]  Run agent CLI directly (login, config...)
   openacp agents refresh               Force-refresh agent list from registry
 
@@ -55,13 +68,13 @@ export async function cmdAgents(args: string[], instanceRoot?: string): Promise<
   }
 
   // Extract positional argument (first non-flag after subcommand)
-  const positional = args.slice(1).find(a => !a.startsWith('-'));
+  const positional = commandArgs.slice(1).find(a => !a.startsWith('-'));
 
   switch (subcommand) {
     case "install":
-      return agentsInstall(positional, args.includes("--force"), wantsHelp(args), instanceRoot, isJsonMode(args));
+      return agentsInstall(positional, commandArgs.includes("--force"), wantsHelp(args), instanceRoot, json);
     case "uninstall":
-      return agentsUninstall(positional, wantsHelp(args), instanceRoot, isJsonMode(args));
+      return agentsUninstall(positional, wantsHelp(args), instanceRoot, json);
     case "refresh":
       if (wantsHelp(args)) {
         console.log(`
@@ -75,18 +88,22 @@ bypassing the normal staleness check.
 `)
         return;
       }
-      return agentsRefresh(instanceRoot);
+      return agentsRefresh(instanceRoot, json);
     case "info":
-      return agentsInfo(positional, wantsHelp(args), instanceRoot, isJsonMode(args));
+      return agentsInfo(positional, wantsHelp(args), instanceRoot, json);
     case "run":
-      return agentsRun(args[1], args.slice(2), wantsHelp(args), instanceRoot);
+      return agentsRun(commandArgs[1], commandArgs.slice(2), wantsHelp(args), instanceRoot);
     case "list":
     case undefined:
-      return agentsList(instanceRoot, args.includes("--json"));
+      return agentsList(instanceRoot, json);
     default: {
       const { suggestMatch } = await import('../suggest.js');
       const agentSubcommands = ["install", "uninstall", "refresh", "info", "run", "list"];
       const suggestion = suggestMatch(subcommand, agentSubcommands);
+      if (json) {
+        const hint = suggestion ? ` Did you mean: ${suggestion}?` : ''
+        jsonError(ErrorCodes.UNKNOWN_COMMAND, `Unknown agents command: ${subcommand}.${hint}`)
+      }
       console.error(`Unknown agents command: ${subcommand}`);
       if (suggestion) console.error(`Did you mean: ${suggestion}?`);
       console.error(`\nRun 'openacp agents' to see available agents.`);
@@ -102,6 +119,7 @@ async function agentsList(instanceRoot?: string, json = false): Promise<void> {
   await catalog.refreshRegistryIfStale();
 
   const items = catalog.getAvailable();
+  const catalogStatus = catalog.getRegistryStatus();
 
   if (json) {
     jsonSuccess({
@@ -109,12 +127,15 @@ async function agentsList(instanceRoot?: string, json = false): Promise<void> {
         key: item.key,
         name: item.name,
         version: item.version,
+        availableVersion: item.availableVersion ?? null,
+        updateRequired: item.updateRequired ?? false,
         distribution: item.distribution,
         description: item.description ?? "",
         installed: item.installed,
         available: item.available ?? true,
         missingDeps: item.missingDeps ?? [],
       })),
+      catalog: catalogStatus,
     });
   }
 
@@ -129,7 +150,7 @@ async function agentsList(instanceRoot?: string, json = false): Promise<void> {
         ? `  \x1b[33m(needs: ${item.missingDeps.join(", ")})\x1b[0m`
         : "";
       console.log(
-        `  \x1b[32m✓\x1b[0m ${item.key.padEnd(18)} ${item.name.padEnd(22)} v${item.version.padEnd(10)} ${item.distribution}${deps}`,
+        `  \x1b[32m✓\x1b[0m ${item.key.padEnd(18)} ${item.name.padEnd(22)} v${item.version.padEnd(10)} ${item.distribution}${deps}${item.updateRequired ? `  \x1b[33m(update: v${item.availableVersion ?? "available"})\x1b[0m` : ""}`,
       );
       if (item.description) {
         console.log(`    \x1b[2m${item.description}\x1b[0m`);
@@ -158,6 +179,7 @@ async function agentsList(instanceRoot?: string, json = false): Promise<void> {
   console.log(
     `  \x1b[2mInstall an agent: openacp agents install <name>\x1b[0m`,
   );
+  console.log(`  \x1b[2mCatalog: ${formatCatalogStatus(catalogStatus)}\x1b[0m`);
   console.log("");
 }
 
@@ -243,8 +265,19 @@ Run 'openacp agents' to see available agents.
 
   if (json) {
     const installed = catalog.getInstalledAgent(result.agentKey)
-    jsonSuccess({ key: result.agentKey, version: installed?.version ?? 'unknown', installed: true })
+    jsonSuccess({
+      key: result.agentKey,
+      version: installed?.version ?? 'unknown',
+      installed: true,
+      alreadyInstalled: result.alreadyInstalled ?? false,
+      cleanupPending: result.cleanupPending ?? false,
+      ...(result.cleanupPending ? { cleanupRetryable: result.cleanupRetryable ?? false } : {}),
+      ...(result.cleanupMessage ? { cleanupMessage: result.cleanupMessage } : {}),
+    })
+  } else if (result.cleanupPending) {
+    console.warn(`  \x1b[33m⚠ ${result.cleanupMessage ?? 'Previous runtime cleanup is pending.'}\x1b[0m`)
   }
+  if (result.alreadyInstalled) return
   proxyService.registerScope(`agents.${result.agentKey}`)
 
   // Auto-integrate handoff if agent supports it
@@ -309,7 +342,7 @@ async function agentsUninstall(name: string | undefined, help = false, instanceR
     if (caps.integration) {
       const { uninstallIntegration } = await import("../integrate.js");
       await uninstallIntegration(name, caps.integration);
-      console.log(`  \x1b[32m✓\x1b[0m Handoff integration removed for ${name}`);
+      if (!json) console.log(`  \x1b[32m✓\x1b[0m Handoff integration removed for ${name}`);
     }
     if (json) jsonSuccess({ key: name, uninstalled: true })
     console.log(`\n  \x1b[32m✓ ${name} removed.\x1b[0m\n`);
@@ -326,12 +359,31 @@ async function agentsUninstall(name: string | undefined, help = false, instanceR
   }
 }
 
-async function agentsRefresh(instanceRoot?: string): Promise<void> {
+async function agentsRefresh(instanceRoot?: string, json = false): Promise<void> {
+  if (json) await muteForJson()
   const { catalog } = await createCatalog(instanceRoot!);
   catalog.load();
-  console.log("\n  Updating agent list...");
-  await catalog.fetchRegistry();
-  console.log("  \x1b[32m✓ Agent list updated.\x1b[0m\n");
+  if (!json) console.log("\n  Updating agent list...");
+  const result = await catalog.fetchRegistry();
+  if (!result.ok) {
+    if (json) jsonError(ErrorCodes.AGENT_REGISTRY_REFRESH_FAILED, result.error)
+    console.error(`  \x1b[31m✗ Agent list update failed: ${result.error}.\x1b[0m`);
+    console.error(`  \x1b[2mExisting ${formatCatalogStatus(result.status)} remains available for browsing.\x1b[0m\n`);
+    process.exit(1);
+  }
+  if (json) jsonSuccess({ refreshed: true, count: result.count, catalog: result.status })
+  console.log(`  \x1b[32m✓ Agent list updated (${result.count} agents).\x1b[0m\n`);
+}
+
+function formatCatalogStatus(status: import('../../core/agents/agent-catalog.js').RegistryStatus): string {
+  const source = status.source === 'network'
+    ? 'live registry'
+    : status.source === 'cache'
+      ? 'cached registry'
+      : status.source === 'snapshot'
+        ? 'packaged snapshot'
+        : 'unavailable';
+  return `${source}${status.stale ? ' (stale)' : ''}`;
 }
 
 async function agentsInfo(nameOrId: string | undefined, help = false, instanceRoot?: string, json = false): Promise<void> {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { serializeSSE, serializeOutgoingMessage, serializePermissionRequest } from '../event-serializer.js';
+import { serializeSSE, serializeOutgoingMessage, serializePermissionRequest, serializeElicitationRequest, serializeElicitationResolved } from '../event-serializer.js';
 
 describe('event-serializer', () => {
   it('serializes a basic SSE event', () => {
@@ -28,5 +28,22 @@ describe('event-serializer', () => {
     });
     expect(result).toContain('event: permission_request');
     expect(result).toContain('"id":"perm_1"');
+  });
+
+  it('serializes elicitation request without owner metadata or submitted content', () => {
+    const result = serializeElicitationRequest('sess_1', 'evt_004', {
+      id: 'input-1', sessionId: 'sess_1', mode: 'form', message: 'Choose', expiresAt: 123,
+      owner: { adapterId: 'api', apiCredential: 'jwt', apiTokenId: 'token-1' },
+      requestedSchema: { type: 'object', properties: { answer: { type: 'string' } } },
+    });
+    expect(result).toContain('event: elicitation_request');
+    expect(result).not.toContain('token-1');
+    expect(result).not.toContain('owner');
+
+    const resolved = serializeElicitationResolved('evt_005', {
+      sessionId: 'sess_1', requestId: 'input-1', action: 'accept', reason: 'user',
+    });
+    expect(resolved).toContain('event: elicitation_resolved');
+    expect(resolved).not.toContain('content');
   });
 });

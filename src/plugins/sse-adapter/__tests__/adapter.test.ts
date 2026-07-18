@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SSEAdapter } from '../adapter.js';
 import type { ConnectionManager } from '../connection-manager.js';
 import type { EventBuffer } from '../event-buffer.js';
-import type { OutgoingMessage, PermissionRequest, NotificationMessage } from '../../../core/types.js';
+import type { OutgoingMessage, PermissionRequest, NotificationMessage, ElicitationRequest } from '../../../core/types.js';
 
 function createMockConnectionManager(): ConnectionManager {
   return {
@@ -10,6 +10,7 @@ function createMockConnectionManager(): ConnectionManager {
     removeConnection: vi.fn(),
     getConnectionsBySession: vi.fn().mockReturnValue([]),
     broadcast: vi.fn(),
+    broadcastWhere: vi.fn(),
     disconnectByToken: vi.fn(),
     listConnections: vi.fn().mockReturnValue([]),
     cleanup: vi.fn(),
@@ -53,6 +54,7 @@ describe('SSEAdapter', () => {
         reactions: false,
         fileUpload: false,
         voice: false,
+        elicitation: { form: true, secureInput: 'none' },
       });
     });
   });
@@ -72,6 +74,20 @@ describe('SSEAdapter', () => {
     });
   });
 
+  describe('sendSessionEvent', () => {
+    it('buffers and broadcasts headless core events using their documented event name', async () => {
+      await adapter.sendSessionEvent('sess-1', 'agent:event', {
+        sessionId: 'sess-1', turnId: 'turn-1', event: { type: 'text', text: 'hello' },
+      });
+
+      expect(eventBuf.push).toHaveBeenCalledOnce();
+      expect(connMgr.broadcast).toHaveBeenCalledWith(
+        'sess-1',
+        expect.stringContaining('event: agent:event'),
+      );
+    });
+  });
+
   describe('sendPermissionRequest', () => {
     it('serializes, buffers, and broadcasts permission request', async () => {
       const request: PermissionRequest = {
@@ -87,6 +103,58 @@ describe('SSEAdapter', () => {
       expect(eventBuf.push).toHaveBeenCalledOnce();
       expect(connMgr.broadcast).toHaveBeenCalledOnce();
       expect(connMgr.broadcast).toHaveBeenCalledWith('sess-1', expect.stringContaining('permission_request'));
+    });
+  });
+
+  describe('structured input ownership', () => {
+    it('delivers transient requests only to the owning principal without buffering owner metadata', async () => {
+      const request: ElicitationRequest = {
+        id: 'input-1',
+        sessionId: 'sess-1',
+        mode: 'form',
+        message: 'Enter token',
+        requestedSchema: {
+          type: 'object',
+          properties: { token: { type: 'string' } },
+          required: ['token'],
+        },
+        targetAdapterId: 'sse',
+        sensitiveFields: ['token'],
+        owner: {
+          adapterId: 'api',
+          apiCredential: 'jwt',
+          apiTokenId: 'owner-token',
+          canonicalUserId: 'owner-user',
+        },
+      };
+
+      await adapter.sendElicitationRequest('sess-1', request);
+
+      expect(eventBuf.push).not.toHaveBeenCalled();
+      expect(connMgr.broadcastWhere).toHaveBeenCalledOnce();
+      const [, serialized, mayReceive] = vi.mocked(connMgr.broadcastWhere).mock.calls[0];
+      expect(serialized).toContain('event: elicitation_request');
+      expect(serialized).not.toContain('owner-token');
+      expect(serialized).not.toContain('owner-user');
+      expect(serialized).not.toContain('"owner"');
+      expect(mayReceive({ authType: 'jwt', tokenId: 'attacker', userId: 'attacker' } as any)).toBe(false);
+      expect(mayReceive({ authType: 'jwt', tokenId: 'owner-token' } as any)).toBe(true);
+      expect(mayReceive({ authType: 'jwt', tokenId: 'peer-token', userId: 'owner-user' } as any)).toBe(true);
+      expect(mayReceive({ authType: 'secret', tokenId: 'master-secret' } as any)).toBe(true);
+
+      vi.mocked(connMgr.broadcastWhere).mockClear();
+      await adapter.dismissElicitationRequest('sess-1', {
+        requestId: 'input-1',
+        sessionId: 'sess-1',
+        action: 'accept',
+        resolvedBy: 'user:owner-user',
+      });
+      const [, resolution, mayReceiveResolution] = vi.mocked(connMgr.broadcastWhere).mock.calls[0];
+      expect(eventBuf.push).not.toHaveBeenCalled();
+      expect(resolution).toContain('event: elicitation_resolved');
+      expect(resolution).not.toContain('token');
+      expect(mayReceiveResolution({ authType: 'jwt', tokenId: 'attacker' } as any)).toBe(false);
+      expect(mayReceiveResolution({ authType: 'jwt', tokenId: 'owner-token' } as any)).toBe(true);
     });
   });
 

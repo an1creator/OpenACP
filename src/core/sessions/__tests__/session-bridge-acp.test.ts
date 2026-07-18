@@ -5,6 +5,7 @@ import type { IChannelAdapter } from '../../channel.js'
 import type { Session } from '../session.js'
 import type { AgentEvent } from '../../types.js'
 import { TypedEmitter } from '../../utils/typed-emitter.js'
+import { ElicitationGate } from '../elicitation-gate.js'
 
 function createMockSession() {
   const emitter = new TypedEmitter()
@@ -24,6 +25,7 @@ function createMockSession() {
     configOptions: [],
     clientOverrides: {},
     permissionGate: { setPending: vi.fn() },
+    elicitationGate: new ElicitationGate(),
     agentInstance: Object.assign(new TypedEmitter(), {
       sessionId: 'agent-1',
       on: vi.fn(),
@@ -31,6 +33,10 @@ function createMockSession() {
       onPermissionRequest: vi.fn(),
     }),
     setName: vi.fn(),
+    captureAgentTitleContext: vi.fn().mockReturnValue({
+      turnId: null, userPrompt: '', finalPrompt: '', nameRevision: 0,
+    }),
+    applyAgentTitle: vi.fn((title: string) => ({ status: 'accepted', name: title })),
     finish: vi.fn(),
     fail: vi.fn(),
     registerBridge: vi.fn(),
@@ -87,11 +93,14 @@ describe('SessionBridge ACP events', () => {
     expect(session.unregisterBridge).toHaveBeenCalledWith('test')
   })
 
-  it('session_info_update with title calls setName and sends message', async () => {
+  it('session_info_update with title applies the naming policy and sends message', async () => {
     const event: AgentEvent = { type: 'session_info_update', title: 'New Title' }
     session.emit('agent_event', event)
     await vi.waitFor(() => {
-      expect(session.setName).toHaveBeenCalledWith('New Title')
+      expect(session.applyAgentTitle).toHaveBeenCalledWith(
+        'New Title',
+        expect.objectContaining({ nameRevision: 0 }),
+      )
       expect(adapter.sendMessage).toHaveBeenCalled()
     })
   })
@@ -100,7 +109,7 @@ describe('SessionBridge ACP events', () => {
     const event: AgentEvent = { type: 'session_info_update', updatedAt: '2026-03-26' }
     session.emit('agent_event', event)
     await new Promise(resolve => setTimeout(resolve, 50))
-    expect(session.setName).not.toHaveBeenCalled()
+    expect(session.applyAgentTitle).not.toHaveBeenCalled()
     expect(adapter.sendMessage).not.toHaveBeenCalled()
   })
 
@@ -162,5 +171,64 @@ describe('SessionBridge ACP events', () => {
     await vi.waitFor(() => {
       expect(adapter.sendMessage).toHaveBeenCalledWith('test-session', expect.objectContaining({ type: 'resource_link' }))
     })
+  })
+
+  it('fails closed for connector protected input without an initiating user', async () => {
+    adapter.capabilities.elicitation = { form: true, secureInput: 'delete-after-capture' }
+    adapter.sendElicitationRequest = vi.fn().mockResolvedValue(undefined)
+    const response = session.elicitationGate.request({
+      id: 'secret-no-owner',
+      sessionId: session.id,
+      targetAdapterId: 'test',
+      mode: 'form',
+      message: 'Credential',
+      sensitiveFields: ['token'],
+      owner: { adapterId: 'test' },
+      requestedSchema: {
+        type: 'object',
+        properties: { token: { type: 'string' } },
+        required: ['token'],
+      },
+    })
+
+    session.emit('elicitation_request', session.elicitationGate.get('secret-no-owner'))
+
+    await expect(response).resolves.toEqual({ action: 'cancel' })
+    expect(adapter.sendElicitationRequest).not.toHaveBeenCalled()
+    expect(adapter.sendMessage).toHaveBeenCalledWith(
+      session.id,
+      expect.objectContaining({ text: expect.stringContaining('cannot capture it safely') }),
+    )
+  })
+
+  it('routes API-owned protected input to REST instead of a connector capture flow', async () => {
+    adapter.capabilities.elicitation = { form: true, secureInput: 'delete-after-capture' }
+    adapter.sendElicitationRequest = vi.fn().mockResolvedValue(undefined)
+    const response = session.elicitationGate.request({
+      id: 'secret-api',
+      sessionId: session.id,
+      targetAdapterId: 'test',
+      mode: 'form',
+      message: 'Credential',
+      sensitiveFields: ['token'],
+      owner: { adapterId: 'sse', apiCredential: 'jwt', apiTokenId: 'jwt-1' },
+      requestedSchema: {
+        type: 'object',
+        properties: { token: { type: 'string' } },
+        required: ['token'],
+      },
+    })
+
+    session.emit('elicitation_request', session.elicitationGate.get('secret-api'))
+
+    await vi.waitFor(() => {
+      expect(adapter.sendMessage).toHaveBeenCalledWith(
+        session.id,
+        expect.objectContaining({ text: expect.stringContaining('authenticated REST endpoint') }),
+      )
+    })
+    expect(adapter.sendElicitationRequest).not.toHaveBeenCalled()
+    session.elicitationGate.cancel('secret-api')
+    await expect(response).resolves.toEqual({ action: 'cancel' })
   })
 })

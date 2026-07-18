@@ -27,9 +27,25 @@ export {
 export { AgentInstance } from "./agents/agent-instance.js";
 export { AgentManager, type WarmPoolResourceStatus } from "./agents/agent-manager.js";
 export { Session, type SessionEvents } from "./sessions/session.js";
+export {
+  SESSION_NAME_MAX_LENGTH,
+  GENERATED_SESSION_NAME_MAX_LENGTH,
+  GENERATED_SESSION_NAME_MAX_WORDS,
+  normalizeSessionName,
+  type SessionNameSource,
+  type AgentTitleContext,
+  type AgentTitleDecision,
+} from "./sessions/session-naming.js";
 export { TypedEmitter } from "./utils/typed-emitter.js";
 export { PromptQueue } from "./sessions/prompt-queue.js";
 export { PermissionGate } from "./sessions/permission-gate.js";
+export {
+  ElicitationGate,
+  ElicitationValidationError,
+  validateElicitationRequest,
+  validateElicitationContent,
+  type ElicitationResolveResult,
+} from "./sessions/elicitation-gate.js";
 export { MessageTransformer } from "./message-transformer.js";
 export type { FileServiceInterface } from "./plugin/types.js";
 export {

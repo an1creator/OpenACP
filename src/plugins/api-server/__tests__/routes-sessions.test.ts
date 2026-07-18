@@ -3,8 +3,9 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { sessionRoutes } from '../routes/sessions.js';
 import { globalErrorHandler } from '../middleware/error-handler.js';
 import type { RouteDeps } from '../routes/types.js';
-import { SessionManager } from '../../../core/sessions/session-manager.js';
+import { SessionLimitError, SessionManager } from '../../../core/sessions/session-manager.js';
 import { Session } from '../../../core/sessions/session.js';
+import { ElicitationGate } from '../../../core/sessions/elicitation-gate.js';
 import { TypedEmitter } from '../../../core/utils/typed-emitter.js';
 import { apiMessagePrincipal, apiPlatformUserId } from '../routes/prompt-response.js';
 
@@ -18,6 +19,7 @@ function createMockSession(overrides: Record<string, unknown> = {}) {
     createdAt: new Date('2026-01-01T00:00:00Z'),
     clientOverrides: { bypassPermissions: false },
     queueDepth: 0,
+    queueItems: [],
     promptRunning: false,
     threadId: 'thread-1',
     channelId: 'api',
@@ -32,8 +34,10 @@ function createMockSession(overrides: Record<string, unknown> = {}) {
       requestId: null,
       resolve: vi.fn(),
     },
+    elicitationGate: new ElicitationGate(),
     enqueuePrompt: vi.fn().mockResolvedValue(undefined),
     abortPrompt: vi.fn().mockResolvedValue(undefined),
+    setName: vi.fn((name: string) => name.replace(/\s+/g, ' ').trim().slice(0, 200)),
     ...overrides,
   };
 }
@@ -121,7 +125,11 @@ describe('session routes', () => {
     // Mock auth: decorate request with admin-level auth so scope checks pass
     app.decorateRequest('auth', null, []);
     app.addHook('onRequest', async (request) => {
-      request.auth = { type: 'secret', role: 'admin', scopes: ['*'] };
+      const testAuth = request.headers['x-test-auth'];
+      const jwt = typeof testAuth === 'string' ? /^jwt:([^:]+)(?::(.+))?$/.exec(testAuth) : null;
+      request.auth = jwt
+        ? { type: 'jwt', tokenId: jwt[1], userId: jwt[2], role: 'admin', scopes: ['*'] }
+        : { type: 'secret', role: 'admin', scopes: ['*'] };
     });
     deps = createMockDeps();
     await app.register(
@@ -230,13 +238,7 @@ describe('session routes', () => {
     });
 
     it('returns 429 when max sessions reached', async () => {
-      // Override lifecycleManager with settingsManager returning maxConcurrentSessions=0
-      // so that any active session triggers the limit
-      deps.lifecycleManager = {
-        settingsManager: {
-          loadSettings: vi.fn().mockResolvedValue({ maxConcurrentSessions: 0 }),
-        },
-      } as any;
+      (deps.core.createSession as any).mockRejectedValueOnce(new SessionLimitError(1));
 
       const response = await app.inject({
         method: 'POST',
@@ -245,6 +247,13 @@ describe('session routes', () => {
       });
 
       expect(response.statusCode).toBe(429);
+      expect(response.json()).toEqual({
+        error: {
+          code: 'SESSION_LIMIT',
+          message: 'Maximum concurrent sessions reached (1)',
+          statusCode: 429,
+        },
+      });
     });
 
     it('returns 400 for invalid adapter', async () => {
@@ -287,6 +296,68 @@ describe('session routes', () => {
       expect(deps.core.createSession).toHaveBeenCalledWith(
         expect.objectContaining({ channelId: 'telegram', createThread: true }),
       );
+    });
+  });
+
+  describe('GET /api/v1/sessions/:sessionId/queue', () => {
+    it('reads a live queue without invoking lazy resume', async () => {
+      const session = createMockSession({
+        queueItems: [{ userPrompt: 'second', turnId: 'turn-2' }],
+        queueDepth: 1,
+        promptRunning: true,
+      });
+      (deps.core.sessionManager.getSession as any).mockReturnValue(session);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/sessions/sess-1/queue',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        pending: [{ userPrompt: 'second', turnId: 'turn-2' }],
+        processing: true,
+        queueDepth: 1,
+        status: 'active',
+        isLive: true,
+      });
+      expect(deps.core.getOrResumeSessionById).not.toHaveBeenCalled();
+    });
+
+    it('returns a truthful empty terminal snapshot without spawning ACP', async () => {
+      (deps.core.sessionManager.getSession as any).mockReturnValue(undefined);
+      (deps.core.sessionManager.getSessionRecord as any).mockReturnValue({
+        sessionId: 'finished-session',
+        status: 'finished',
+      });
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/sessions/finished-session/queue',
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        pending: [],
+        processing: false,
+        queueDepth: 0,
+        status: 'finished',
+        isLive: false,
+      });
+      expect(deps.core.getOrResumeSessionById).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 for an unknown durable and live session', async () => {
+      (deps.core.sessionManager.getSession as any).mockReturnValue(undefined);
+      (deps.core.sessionManager.getSessionRecord as any).mockReturnValue(undefined);
+
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/v1/sessions/missing/queue',
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(deps.core.getOrResumeSessionById).not.toHaveBeenCalled();
     });
   });
 
@@ -399,6 +470,29 @@ describe('session routes', () => {
 
       expect(response.statusCode).toBe(400);
     });
+
+    it('lets a live error session reacquire capacity and returns standard SESSION_LIMIT at the cap', async () => {
+      (deps.core.sessionManager.getSession as any).mockReturnValue(
+        createMockSession({ status: 'error' }),
+      );
+      (deps.core.handleMessageInSession as any).mockRejectedValueOnce(new SessionLimitError(1));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/sessions/sess-1/prompt',
+        payload: { prompt: 'Retry the failed turn' },
+      });
+
+      expect(response.statusCode).toBe(429);
+      expect(response.json()).toEqual({
+        error: {
+          code: 'SESSION_LIMIT',
+          message: 'Maximum concurrent sessions reached (1)',
+          statusCode: 429,
+        },
+      });
+      expect(deps.core.handleMessageInSession).toHaveBeenCalledOnce();
+    });
   });
 
   describe('POST /api/v1/sessions/:sessionId/permission', () => {
@@ -486,6 +580,56 @@ describe('session routes', () => {
       expect(response.statusCode).toBe(200);
       expect(mockAbortPrompt).not.toHaveBeenCalled();
       expect(mockEnqueuePrompt).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('PATCH /api/v1/sessions/:sessionId', () => {
+    it('returns the normalized manual name selected by core', async () => {
+      const setName = vi.fn().mockReturnValue('Normalized Manual Name');
+      (deps.core.sessionManager.getSession as any).mockReturnValue(createMockSession({ setName }));
+
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/sessions/sess-1',
+        payload: { name: '  Normalized\nManual Name  ' },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(setName).toHaveBeenCalledWith('  Normalized\nManual Name  ', 'manual');
+      expect(JSON.parse(response.body)).toMatchObject({
+        ok: true,
+        name: 'Normalized Manual Name',
+      });
+    });
+
+    it.each([51, 200])('accepts a manual name containing %i characters', async (length) => {
+      const name = 'M'.repeat(length);
+      const setName = vi.fn().mockReturnValue(name);
+      (deps.core.sessionManager.getSession as any).mockReturnValue(createMockSession({ setName }));
+
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/sessions/sess-1',
+        payload: { name },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(setName).toHaveBeenCalledWith(name, 'manual');
+      expect(JSON.parse(response.body)).toMatchObject({ ok: true, name });
+    });
+
+    it('rejects a manual name exceeding 200 characters', async () => {
+      const setName = vi.fn();
+      (deps.core.sessionManager.getSession as any).mockReturnValue(createMockSession({ setName }));
+
+      const response = await app.inject({
+        method: 'PATCH',
+        url: '/api/v1/sessions/sess-1',
+        payload: { name: 'M'.repeat(201) },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(setName).not.toHaveBeenCalled();
     });
   });
 
@@ -583,7 +727,11 @@ describe('session routes', () => {
           options: [{ value: 'code', label: 'Code' }, { value: 'architect', label: 'Architect' }],
         },
       ];
-      const mockSessionSetConfigOption = vi.fn().mockResolvedValue(undefined);
+      const mockSessionSetConfigOption = vi.fn().mockResolvedValue({
+        acknowledged: true,
+        authoritative: true,
+        effective: updatedConfigOptions[0],
+      });
       const session = createMockSession({
         configOptions: updatedConfigOptions,
         clientOverrides: { bypassPermissions: false },
@@ -593,6 +741,13 @@ describe('session routes', () => {
       // Make setConfigOption update configOptions on the session
       mockSessionSetConfigOption.mockImplementation(async () => {
         session.configOptions = updatedConfigOptions;
+        return {
+          acknowledged: true,
+          authoritative: true,
+          effective: updatedConfigOptions[0],
+          revision: 1,
+          configOptions: structuredClone(updatedConfigOptions),
+        };
       });
       (deps.core.sessionManager.getSession as any).mockReturnValue(session);
 
@@ -608,6 +763,91 @@ describe('session routes', () => {
       expect(body.clientOverrides).toEqual({ bypassPermissions: false });
       expect(mockSessionSetConfigOption).toHaveBeenCalledWith('mode', { type: 'select', value: 'architect' });
       expect(deps.core.sessionManager.patchRecord).toHaveBeenCalled();
+    });
+
+    it('returns and persists each concurrent mutation by its FIFO revision', async () => {
+      const original = {
+        id: 'mode', name: 'Mode', category: 'mode', type: 'select' as const, currentValue: 'code',
+        options: [{ value: 'code', name: 'Code' }, { value: 'architect', name: 'Architect' }],
+      };
+      const architect = { ...original, currentValue: 'architect' };
+      const code = { ...original, currentValue: 'code' };
+      let resolveFirst!: (value: { configOptions: Array<typeof architect> }) => void;
+      const agent = Object.assign(new TypedEmitter(), {
+        sessionId: 'agent-config-fifo',
+        prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+        cancel: vi.fn().mockResolvedValue(undefined),
+        destroy: vi.fn().mockResolvedValue(undefined),
+        setConfigOption: vi.fn()
+          .mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve; }))
+          .mockResolvedValueOnce({ configOptions: [code] }),
+        onPermissionRequest: vi.fn(),
+      }) as any;
+      const session = new Session({
+        id: 'sess-1', channelId: 'api', agentName: 'claude', workingDirectory: '/tmp/test', agentInstance: agent,
+      });
+      session.setInitialConfigOptions([original]);
+      session.clientOverrides = { bypassPermissions: false };
+      (deps.core.sessionManager.getSession as any).mockReturnValue(session);
+      let persisted: unknown = undefined;
+      (deps.core.sessionManager.patchRecord as any).mockImplementation(async (_id: string, patch: any, options: any) => {
+        if (options.expectedConfigRevision === session.configRevision) persisted = patch.acpState?.configOptions;
+      });
+
+      const first = app.inject({
+        method: 'PUT', url: '/api/v1/sessions/sess-1/config/mode', payload: { value: 'architect' },
+      });
+      const second = app.inject({
+        method: 'PUT', url: '/api/v1/sessions/sess-1/config/mode', payload: { value: 'code' },
+      });
+      await vi.waitFor(() => expect(agent.setConfigOption).toHaveBeenCalledOnce());
+      resolveFirst({ configOptions: [architect] });
+      const [firstResponse, secondResponse] = await Promise.all([first, second]);
+
+      expect(firstResponse.statusCode).toBe(200);
+      expect(secondResponse.statusCode).toBe(200);
+      expect(firstResponse.json().configOptions[0]).toMatchObject({ currentValue: 'architect' });
+      expect(secondResponse.json().configOptions[0]).toMatchObject({ currentValue: 'code' });
+      expect(session.getConfigValue('mode')).toBe('code');
+      expect(persisted).toEqual([code]);
+      const patchCalls = (deps.core.sessionManager.patchRecord as any).mock.calls;
+      expect(patchCalls[0][2].expectedConfigRevision).toBeLessThan(patchCalls[1][2].expectedConfigRevision);
+    });
+
+    it('returns a bounded rejection and does not persist when the agent did not acknowledge the change', async () => {
+      const originalConfigOptions = [
+        {
+          id: 'mode',
+          name: 'Mode',
+          type: 'select',
+          currentValue: 'code',
+          options: [{ value: 'code', label: 'Code' }, { value: 'architect', label: 'Architect' }],
+        },
+      ];
+      const session = createMockSession({
+        configOptions: originalConfigOptions,
+        setConfigOption: vi.fn().mockResolvedValue({
+          acknowledged: false,
+          authoritative: false,
+          effective: originalConfigOptions[0],
+          reason: 'blocked',
+          message: 'Configuration change was blocked by policy.',
+        }),
+      });
+      (deps.core.sessionManager.getSession as any).mockReturnValue(session);
+
+      const response = await app.inject({
+        method: 'PUT',
+        url: '/api/v1/sessions/sess-1/config/mode',
+        payload: { value: 'architect' },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body)).toMatchObject({
+        error: { code: 'CONFIG_CHANGE_REJECTED', message: 'Configuration change was blocked by policy.' },
+      });
+      expect(session.configOptions).toEqual(originalConfigOptions);
+      expect(deps.core.sessionManager.patchRecord).not.toHaveBeenCalled();
     });
 
     it('returns 404 for unknown session', async () => {
@@ -699,6 +939,206 @@ describe('session routes', () => {
       });
 
       expect(response.statusCode).toBe(404);
+    });
+  });
+
+  describe('ACP form elicitation routes', () => {
+    const formRequest = {
+      id: 'input-1',
+      sessionId: 'sess-1',
+      turnId: 'turn-1',
+      mode: 'form' as const,
+      message: 'Choose',
+      requestedSchema: {
+        type: 'object' as const,
+        properties: { answer: { type: 'string' as const, enum: ['yes', 'no'] } },
+        required: ['answer'],
+      },
+      owner: { adapterId: 'api', userId: 'api-master', apiCredential: 'secret' as const },
+    };
+
+    it('lists sanitized pending requests and accepts a valid response without echoing content', async () => {
+      const session = deps.core.sessionManager.getSession('sess-1') as any;
+      const pending = session.elicitationGate.request(formRequest);
+
+      const list = await app.inject({ method: 'GET', url: '/api/v1/sessions/sess-1/elicitation' });
+      expect(list.statusCode).toBe(200);
+      expect(list.json().requests).toEqual([
+        expect.objectContaining({ id: 'input-1', message: 'Choose' }),
+      ]);
+      expect(list.json().requests[0].owner).toBeUndefined();
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/sessions/sess-1/elicitation/input-1',
+        payload: { action: 'accept', content: { answer: 'yes' } },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({ ok: true, requestId: 'input-1', action: 'accept' });
+      expect(response.body).not.toContain('yes');
+      await expect(pending).resolves.toEqual({ action: 'accept', content: { answer: 'yes' } });
+    });
+
+    it('polls only requests owned by the authenticated principal', async () => {
+      const session = deps.core.sessionManager.getSession('sess-1') as any;
+      const pending = session.elicitationGate.request({
+        ...formRequest,
+        id: 'owned-poll',
+        owner: {
+          adapterId: 'api',
+          userId: 'owner-token',
+          canonicalUserId: 'owner-user',
+          apiCredential: 'jwt' as const,
+          apiTokenId: 'owner-token',
+        },
+      });
+
+      const attacker = await app.inject({
+        method: 'GET',
+        url: '/api/v1/sessions/sess-1/elicitation',
+        headers: { 'x-test-auth': 'jwt:attacker-token:attacker-user' },
+      });
+      expect(attacker.statusCode).toBe(200);
+      expect(attacker.json()).toEqual({ requests: [] });
+
+      const owner = await app.inject({
+        method: 'GET',
+        url: '/api/v1/sessions/sess-1/elicitation',
+        headers: { 'x-test-auth': 'jwt:peer-token:owner-user' },
+      });
+      expect(owner.statusCode).toBe(200);
+      expect(owner.json().requests).toEqual([
+        expect.objectContaining({ id: 'owned-poll', message: 'Choose' }),
+      ]);
+      expect(owner.json().requests[0].owner).toBeUndefined();
+      session.elicitationGate.cancel('owned-poll');
+      await expect(pending).resolves.toEqual({ action: 'cancel' });
+    });
+
+    it('keeps the request pending after invalid content and rejects a duplicate response', async () => {
+      const session = deps.core.sessionManager.getSession('sess-1') as any;
+      const pending = session.elicitationGate.request({ ...formRequest, id: 'input-2' });
+
+      const invalid = await app.inject({
+        method: 'POST',
+        url: '/api/v1/sessions/sess-1/elicitation/input-2',
+        payload: { action: 'accept', content: { answer: 'invalid' } },
+      });
+      expect(invalid.statusCode).toBe(400);
+      expect(session.elicitationGate.get('input-2')).toBeDefined();
+
+      const decline = await app.inject({
+        method: 'POST', url: '/api/v1/sessions/sess-1/elicitation/input-2', payload: { action: 'decline' },
+      });
+      expect(decline.statusCode).toBe(200);
+      await expect(pending).resolves.toEqual({ action: 'decline' });
+
+      const duplicate = await app.inject({
+        method: 'POST', url: '/api/v1/sessions/sess-1/elicitation/input-2', payload: { action: 'cancel' },
+      });
+      expect(duplicate.statusCode).toBe(409);
+    });
+
+    it.each(['accept', 'decline', 'cancel'] as const)(
+      'rejects a different JWT before the %s action can settle the request',
+      async (action) => {
+        const session = deps.core.sessionManager.getSession('sess-1') as any;
+        const id = `owned-${action}`;
+        const pending = session.elicitationGate.request({
+          ...formRequest,
+          id,
+          owner: {
+            adapterId: 'api',
+            userId: 'token-owner',
+            canonicalUserId: 'user-owner',
+            apiCredential: 'jwt' as const,
+            apiTokenId: 'token-owner',
+          },
+        });
+        const payload = action === 'accept'
+          ? { action, content: { answer: 'yes' } }
+          : { action };
+
+        const rejected = await app.inject({
+          method: 'POST',
+          url: `/api/v1/sessions/sess-1/elicitation/${id}`,
+          headers: { 'x-test-auth': 'jwt:token-attacker:user-attacker' },
+          payload,
+        });
+        expect(rejected.statusCode).toBe(403);
+        expect(session.elicitationGate.get(id)).toBeDefined();
+
+        const accepted = await app.inject({
+          method: 'POST',
+          url: `/api/v1/sessions/sess-1/elicitation/${id}`,
+          headers: { 'x-test-auth': 'jwt:token-peer:user-owner' },
+          payload,
+        });
+        expect(accepted.statusCode).toBe(200);
+        expect(accepted.body).not.toContain('yes');
+        await expect(pending).resolves.toEqual(payload);
+      },
+    );
+
+    it('allows only the same token for an unlinked JWT, with master secret as explicit override', async () => {
+      const session = deps.core.sessionManager.getSession('sess-1') as any;
+      const sameTokenPending = session.elicitationGate.request({
+        ...formRequest,
+        id: 'unlinked-same-token',
+        owner: { adapterId: 'api', userId: 'token-owner', apiCredential: 'jwt' as const, apiTokenId: 'token-owner' },
+      });
+      const wrongToken = await app.inject({
+        method: 'POST', url: '/api/v1/sessions/sess-1/elicitation/unlinked-same-token',
+        headers: { 'x-test-auth': 'jwt:token-other' }, payload: { action: 'cancel' },
+      });
+      expect(wrongToken.statusCode).toBe(403);
+      const sameToken = await app.inject({
+        method: 'POST', url: '/api/v1/sessions/sess-1/elicitation/unlinked-same-token',
+        headers: { 'x-test-auth': 'jwt:token-owner' }, payload: { action: 'cancel' },
+      });
+      expect(sameToken.statusCode).toBe(200);
+      await expect(sameTokenPending).resolves.toEqual({ action: 'cancel' });
+
+      const masterPending = session.elicitationGate.request({
+        ...formRequest,
+        id: 'master-override',
+        owner: { adapterId: 'api', userId: 'token-owner', apiCredential: 'jwt' as const, apiTokenId: 'token-owner' },
+      });
+      const master = await app.inject({
+        method: 'POST', url: '/api/v1/sessions/sess-1/elicitation/master-override',
+        payload: { action: 'decline' },
+      });
+      expect(master.statusCode).toBe(200);
+      await expect(masterPending).resolves.toEqual({ action: 'decline' });
+    });
+
+    it('does not let an unrelated JWT win a concurrent response race', async () => {
+      const session = deps.core.sessionManager.getSession('sess-1') as any;
+      const pending = session.elicitationGate.request({
+        ...formRequest,
+        id: 'owned-race',
+        owner: {
+          adapterId: 'api',
+          userId: 'token-owner',
+          canonicalUserId: 'user-owner',
+          apiCredential: 'jwt' as const,
+          apiTokenId: 'token-owner',
+        },
+      });
+      const [attacker, owner] = await Promise.all([
+        app.inject({
+          method: 'POST', url: '/api/v1/sessions/sess-1/elicitation/owned-race',
+          headers: { 'x-test-auth': 'jwt:token-attacker:user-attacker' }, payload: { action: 'cancel' },
+        }),
+        app.inject({
+          method: 'POST', url: '/api/v1/sessions/sess-1/elicitation/owned-race',
+          headers: { 'x-test-auth': 'jwt:token-owner:user-owner' },
+          payload: { action: 'accept', content: { answer: 'yes' } },
+        }),
+      ]);
+      expect(attacker.statusCode).toBe(403);
+      expect(owner.statusCode).toBe(200);
+      await expect(pending).resolves.toEqual({ action: 'accept', content: { answer: 'yes' } });
     });
   });
 

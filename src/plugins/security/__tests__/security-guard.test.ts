@@ -49,7 +49,7 @@ describe('SecurityGuard', () => {
       });
       const sessions = [{ status: 'active' }, { status: 'active' }];
       const guard = new SecurityGuard(getConfig, mockSessionManager(sessions));
-      const result = await guard.checkAccess({ userId: '1' });
+      const result = await guard.checkSessionLimit();
       expect(result).toEqual({
         allowed: false,
         code: 'SESSION_LIMIT',
@@ -63,7 +63,7 @@ describe('SecurityGuard', () => {
         maxConcurrentSessions: 2,
       });
       const guard = new SecurityGuard(getConfig, mockSessionManager([{ status: 'active' }]));
-      const result = await guard.checkAccess({ userId: '1' });
+      const result = await guard.checkSessionLimit();
       expect(result).toEqual({ allowed: true });
     });
 
@@ -74,7 +74,7 @@ describe('SecurityGuard', () => {
       });
       const sessions = [{ status: 'finished' }, { status: 'error' }, { status: 'cancelled' }];
       const guard = new SecurityGuard(getConfig, mockSessionManager(sessions));
-      const result = await guard.checkAccess({ userId: '1' });
+      const result = await guard.checkSessionLimit();
       expect(result).toEqual({ allowed: true });
     });
 
@@ -84,7 +84,7 @@ describe('SecurityGuard', () => {
         maxConcurrentSessions: 1,
       });
       const guard = new SecurityGuard(getConfig, mockSessionManager([{ status: 'initializing' }]));
-      const result = await guard.checkAccess({ userId: '1' });
+      const result = await guard.checkSessionLimit();
       expect(result).toEqual({
         allowed: false,
         code: 'SESSION_LIMIT',
@@ -92,7 +92,7 @@ describe('SecurityGuard', () => {
       });
     });
 
-    it('can skip the connector allowlist without skipping the global session cap', async () => {
+    it('does not block prompts in an admitted API session when the global cap is full', async () => {
       const getConfig = vi.fn<() => Promise<SecurityConfig>>().mockResolvedValue({
         allowedUserIds: ['telegram-owner'],
         maxConcurrentSessions: 1,
@@ -109,7 +109,8 @@ describe('SecurityGuard', () => {
       );
       await expect(
         capped.checkAccess({ userId: 'api-master' }, { skipUserAllowlist: true }),
-      ).resolves.toEqual({
+      ).resolves.toEqual({ allowed: true });
+      await expect(capped.checkSessionLimit()).resolves.toEqual({
         allowed: false,
         code: 'SESSION_LIMIT',
         reason: 'Session limit reached (1)',

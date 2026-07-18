@@ -43,7 +43,8 @@ export type {
 // --- Adapter types ---
 export type {
   IChannelAdapter, AdapterCapabilities, OutgoingMessage, PermissionRequest,
-  PermissionOption, NotificationMessage, AgentCommand,
+  PermissionOption, NotificationMessage, AgentCommand, ElicitationRequest,
+  ElicitationResponse, ElicitationContentValue, ElicitationResolvedEvent,
   MessagingAdapterConfig, IRenderer, RenderedMessage,
 } from '@n1creator/openacp-cli'
 
@@ -64,6 +65,7 @@ export type {
   UsageRecord, InstallProgress,
   DisplayVerbosity, ToolCallMeta, ToolUpdateMeta, ViewerLinks,
   TelegramPlatformData,
+  SessionNameSource, AgentTitleContext, AgentTitleDecision,
   TurnMeta, MessagePrincipal, MessageIngressBlockCode, MessageIngressControl,
   MessageDispatchOutcome, WarmPoolResourceStatus, SessionServiceResourceStatus,
 } from '@n1creator/openacp-cli'

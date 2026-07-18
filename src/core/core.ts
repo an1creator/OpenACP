@@ -3,11 +3,11 @@ import { nanoid } from "nanoid";
 import type { SettingsManager } from "./plugin/settings-manager.js";
 import { ConfigManager } from "./config/config.js";
 import { AgentManager } from "./agents/agent-manager.js";
-import { SessionManager } from "./sessions/session-manager.js";
+import { SessionLimitError, SessionManager } from "./sessions/session-manager.js";
 import { SessionBridge } from "./sessions/session-bridge.js";
 import type { NotificationManager } from "../plugins/notifications/notification.js";
 import type { IChannelAdapter } from "./channel.js";
-import { PromptBlockedError, Session } from "./sessions/session.js";
+import { markHeadlessDelivery, PromptBlockedError, Session } from "./sessions/session.js";
 import { MessageTransformer } from "./message-transformer.js";
 import type { FileServiceInterface } from "./plugin/types.js";
 import { JsonFileSessionStore, type SessionStore } from "./sessions/session-store.js";
@@ -44,6 +44,7 @@ import type { ContextManager } from "../plugins/context/context-manager.js";
 import type { InstanceContext } from "./instance/instance-context.js";
 import { Hook, BusEvent, SessionEv } from "./events.js";
 import { extractSender, type TurnContext, type TurnRouting } from "./sessions/turn-context.js";
+import type { SessionNameSource } from "./sessions/session-naming.js";
 import { ProxyService } from './network/proxy-service.js';
 const log = createChildLogger({ module: "core" });
 const FAILED_THREAD_CLEANUP_TIMEOUT_MS = 5_000;
@@ -448,7 +449,15 @@ export class OpenACPCore {
     // Adapters may inject channel-specific context (e.g. display name, username) via initialMeta
     // so plugins can read it without needing adapter-specific fields on IncomingMessage.
     const turnId = nanoid(8);
-    const meta: TurnMeta = { turnId, ...initialMeta };
+    const meta: TurnMeta = {
+      turnId,
+      ...initialMeta,
+      principal: {
+        type: 'connector',
+        channelId: message.channelId,
+        userId: message.userId,
+      } satisfies MessagePrincipal,
+    };
 
     // Hook: message:incoming — modifiable, can block
     if (this.lifecycleManager?.middlewareChain) {
@@ -519,10 +528,21 @@ export class OpenACPCore {
     // Carry enriched meta from middleware result (plugins may have attached sender info etc.)
     const enrichedMeta = (message as any).meta as TurnMeta | undefined ?? meta;
 
-    await this._dispatchToSession(session, text, message.attachments, {
-      sourceAdapterId: message.routing?.sourceAdapterId ?? message.channelId,
-      responseAdapterId: message.routing?.responseAdapterId,
-    }, turnId, enrichedMeta);
+    try {
+      await this._dispatchToSession(session, text, message.attachments, {
+        sourceAdapterId: message.routing?.sourceAdapterId ?? message.channelId,
+        responseAdapterId: message.routing?.responseAdapterId,
+      }, turnId, enrichedMeta);
+    } catch (error) {
+      if (!(error instanceof SessionLimitError)) throw error;
+      const adapter = this.adapters.get(message.channelId);
+      if (adapter) {
+        await adapter.sendMessage(message.threadId, {
+          type: 'error',
+          text: `⚠️ ${error.message}. Finish or cancel another session, then retry.`,
+        });
+      }
+    }
   }
 
   /**
@@ -597,7 +617,11 @@ export class OpenACPCore {
     },
   ): Promise<MessageDispatchOutcome> {
     const turnId = options?.externalTurnId ?? nanoid(8);
-    const meta: TurnMeta = { turnId, ...initialMeta };
+    const meta: TurnMeta = {
+      turnId,
+      ...initialMeta,
+      ...(options?.principal ? { principal: options.principal } : {}),
+    };
 
     // Run message:incoming middleware so plugins can enrich meta (sender identity, @mentions, etc.)
     let text = message.text;
@@ -659,6 +683,7 @@ export class OpenACPCore {
     existingSessionId?: string;
     createThread?: boolean;
     initialName?: string;
+    initialNameSource?: SessionNameSource;
     // threadTitle sets the adapter thread display name without populating session.name.
     // Use this when you want a placeholder thread title (e.g. "Adopted session") but
     // still need auto-naming to run after the first prompt.
@@ -678,16 +703,18 @@ export class OpenACPCore {
       ? this.sessionManager.beginSessionRegistration?.(params.existingSessionId)
       : undefined;
 
+    let admissionLease: import('./sessions/session-manager.js').SessionAdmissionLease | undefined;
     let preCreatedThreadId: string | undefined;
     let session!: Session;
     try {
+      admissionLease = await this.sessionManager.reserveSessionAdmission();
       // Connector side effects happen only after exclusive ownership is known,
       // but before agent startup so the user sees setup progress immediately.
       if (params.createThread && adapter) {
         const name = params.threadTitle ?? params.initialName ?? `🔄 ${params.agentName} — New Session`;
         preCreatedThreadId = await adapter.createSessionThread("", name);
       }
-      session = await this.sessionFactory.create(params, registrationLease);
+      session = await this.sessionFactory.create(params, registrationLease, admissionLease);
     } catch (error) {
       if (preCreatedThreadId && adapter) {
         await this.cleanupFailedSessionThread(adapter, preCreatedThreadId, session?.id);
@@ -695,6 +722,8 @@ export class OpenACPCore {
       if (session) await this.sessionManager.discardSession(session);
       if (registrationLease) this.sessionManager.releaseSessionRegistration?.(registrationLease);
       throw error;
+    } finally {
+      if (admissionLease) this.sessionManager.releaseSessionAdmission(admissionLease);
     }
     try {
       this.sessionManager.assertCurrentLiveSession?.(session);
@@ -742,6 +771,7 @@ export class OpenACPCore {
           createdAt: session.createdAt.toISOString(),
           lastActiveAt: new Date().toISOString(),
           name: session.name,
+          nameSource: session.nameSource,
           isAssistant: params.isAssistant,
           platform,
           platforms,
@@ -798,7 +828,7 @@ export class OpenACPCore {
     if (!adapter) {
       // Auto-approve safe permissions so agents don't hang.
       // Permissions without an explicit allow option are NOT auto-approved — they will time out.
-      session.agentInstance.onPermissionRequest = async (permRequest) => {
+      session.setHeadlessPermissionHandler(async (permRequest) => {
         const allowOption = permRequest.options.find((o) => o.isAllow);
         if (!allowOption) {
           log.warn(
@@ -812,7 +842,7 @@ export class OpenACPCore {
           `Auto-approving permission "${permRequest.description}" for headless session — no adapter connected`,
         );
         return allowOption.id;
-      };
+      });
 
       // Persist session name and notify SSE clients when autoName fires.
       // For bridged sessions this is handled by SessionBridge's "named" listener;
@@ -820,14 +850,15 @@ export class OpenACPCore {
       session.on(SessionEv.NAMED, (name: string) => {
         const task = async () => {
           const agentGeneration = session.agentGeneration;
-          if (!this.sessionManager.isCurrentLiveSession(session)) return;
+          if (session.hasConnectedBridges || !this.sessionManager.isCurrentLiveSession(session)) return;
           await this.sessionManager.patchRecord(
             session.id,
-            { name },
+            { name, nameSource: session.nameSource },
             { expectedSession: session },
           );
           if (
             !this.sessionManager.isCurrentLiveSession(session) ||
+            session.hasConnectedBridges ||
             session.agentGeneration !== agentGeneration
           ) return;
           this.eventBus.emit(BusEvent.SESSION_UPDATED, { sessionId: session.id, name });
@@ -842,9 +873,22 @@ export class OpenACPCore {
       // and fires agent:beforeEvent middleware — all normally handled by SessionBridge.
       const mw = () => this.lifecycleManager?.middlewareChain;
       session.on(SessionEv.AGENT_EVENT, (event: AgentEvent) => {
+        const claimKind = event.type === "config_option_update"
+          ? "agent:config"
+          : event.type === "session_info_update" && event.title
+            ? "agent:title"
+            : event.type === "session_end" || event.type === "error"
+              ? "agent:terminal"
+              : "agent:event";
+        const deliveryClaim = session.claimHeadlessDelivery(claimKind);
+        if (!deliveryClaim) return;
+        const titleContext = event.type === "session_info_update" && event.title
+          ? session.captureAgentTitleContext()
+          : undefined;
         const task = async () => {
         const agentGeneration = session.agentGeneration;
         const isCurrentGeneration = (allowFinished = false) => (
+          session.isHeadlessDeliveryClaimActive(deliveryClaim) &&
           this.sessionManager.isCurrentSession(session) &&
           session.agentGeneration === agentGeneration &&
           (allowFinished
@@ -863,26 +907,42 @@ export class OpenACPCore {
         }
         if (processedEvent.type === "session_end") {
           if (!session.finish((processedEvent as { reason?: string }).reason)) return;
-          await this.sessionManager.patchRecord(session.id, {
-            status: 'finished',
-            lastActiveAt: new Date().toISOString(),
-          }, { immediate: true, expectedSession: session });
+          if (!session.hasConnectedBridges) {
+            await this.sessionManager.patchRecord(session.id, {
+              status: 'finished',
+              lastActiveAt: new Date().toISOString(),
+            }, { immediate: true, expectedSession: session });
+          }
           if (!isCurrentGeneration(true)) return;
         } else if (processedEvent.type === "error") {
           if (!isCurrentGeneration()) return;
           if (!session.fail((processedEvent as { message: string }).message)) return;
         } else if (processedEvent.type === "session_info_update" && processedEvent.title) {
           if (!isCurrentGeneration()) return;
-          session.setName(processedEvent.title);
+          const decision = session.applyAgentTitle(
+            processedEvent.title,
+            titleContext ?? session.captureAgentTitleContext(),
+          );
+          if (decision.status === "ignored") return;
+          processedEvent = { ...processedEvent, title: decision.name };
         } else if (processedEvent.type === "config_option_update") {
-          await session.updateConfigOptions(processedEvent.options, agentGeneration);
+          const applied = await session.updateConfigOptions(
+            processedEvent.options,
+            agentGeneration,
+            () => session.isHeadlessDeliveryClaimActive(deliveryClaim),
+          );
+          if (applied === false) return;
           if (!isCurrentGeneration()) return;
           await this.sessionManager.patchRecord(session.id, {
             acpState: session.toAcpStateSnapshot(),
           }, { expectedSession: session });
         }
         if (!isCurrentGeneration(processedEvent.type === 'session_end')) return;
-        this.eventBus.emit(BusEvent.AGENT_EVENT, { sessionId: session.id, turnId: session.activeTurnContext?.turnId ?? '', event: processedEvent });
+        this.eventBus.emit(BusEvent.AGENT_EVENT, markHeadlessDelivery({
+          sessionId: session.id,
+          turnId: session.activeTurnContext?.turnId ?? '',
+          event: processedEvent,
+        }, deliveryClaim));
         if (processedEvent.type === 'session_end') {
           void this.sessionManager.finalizeFinishedSession(session).catch((cleanupError) => {
             log.error(
@@ -894,11 +954,14 @@ export class OpenACPCore {
         };
         void task().catch((err) => {
           log.error({ err, sessionId: session.id }, "Headless agent event handling failed");
+        }).finally(() => {
+          session.releaseHeadlessDelivery(deliveryClaim);
         });
       });
 
       // Persist status changes and notify SSE clients — normally wired by SessionBridge.
       session.on(SessionEv.STATUS_CHANGE, (_from: SessionStatus, to: SessionStatus) => {
+        if (session.hasConnectedBridges) return;
         this.sessionManager.patchRecord(session.id, {
           status: to,
           lastActiveAt: new Date().toISOString(),
@@ -910,6 +973,7 @@ export class OpenACPCore {
 
       // Persist prompt count after each prompt — normally wired by SessionBridge.
       session.on(SessionEv.PROMPT_COUNT_CHANGED, (count: number) => {
+        if (session.hasConnectedBridges) return;
         this.sessionManager.patchRecord(
           session.id,
           { currentPromptCount: count },
@@ -922,6 +986,7 @@ export class OpenACPCore {
       // Emit message:processing so SSE clients (App) can transition pending → conversation.
       // Normally handled by SessionBridge; headless sessions have no bridge.
       session.on(SessionEv.TURN_STARTED, (ctx: TurnContext) => {
+        if (session.hasConnectedBridges) return;
         this.eventBus.emit(BusEvent.MESSAGE_PROCESSING, {
           sessionId: session.id,
           turnId: ctx.turnId,
@@ -1041,19 +1106,7 @@ export class OpenACPCore {
       };
     }
 
-    // 3. Hard cap for the adoptSession path (CLI-initiated session adoption).
-    // This is separate from the per-user limits enforced by securityGuard.checkAccess
-    // during handleMessage. The security plugin cannot override this value.
-    const maxSessions = 20;
-    if (this.sessionManager.listSessions().length >= maxSessions) {
-      return {
-        ok: false,
-        error: "session_limit",
-        message: "Maximum concurrent sessions reached",
-      };
-    }
-
-    // 4. Check if session already exists on the same channel
+    // 3. Check if session already exists on the same channel
     const existingRecord =
       this.sessionManager.getRecordByAgentSessionId(agentSessionId);
     if (existingRecord) {
@@ -1116,12 +1169,20 @@ export class OpenACPCore {
         resumeAgentSessionId: agentSessionId,
         createThread: true,
         // initialName shows a placeholder in the app immediately after adopt.
-        // auto-naming checks for this placeholder value and overwrites it on first
-        // user message, so the name is still updated automatically.
+        // Placeholder provenance lets auto-naming replace it after the first user
+        // message without treating restored names with the same text as disposable.
         initialName: "Adopted session",
+        initialNameSource: "placeholder",
         threadTitle: "Adopted session",
       });
     } catch (err) {
+      if (err instanceof SessionLimitError) {
+        return {
+          ok: false,
+          error: "session_limit",
+          message: err.message,
+        };
+      }
       return {
         ok: false,
         error: "resume_failed",

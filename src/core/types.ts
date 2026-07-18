@@ -1,5 +1,7 @@
 import type { OutputMode } from "./adapter-primitives/format-types.js";
 import type { TurnRouting } from "./sessions/turn-context.js";
+import type { SessionNameSource } from "./sessions/session-naming.js";
+import type { ElicitationSchema } from "@agentclientprotocol/sdk";
 
 export type { TurnRouting };
 
@@ -137,6 +139,51 @@ export interface PermissionOption {
   isAllow: boolean;
 }
 
+/** Primitive values allowed by ACP form elicitation. */
+export type ElicitationContentValue = string | number | boolean | string[];
+
+/** Authenticated owner of the turn that caused an elicitation request. */
+export interface ElicitationOwner {
+  adapterId: string;
+  userId?: string;
+  /** Canonical identity user, used to authorize linked API credentials. */
+  canonicalUserId?: string;
+  conversationId?: string;
+  apiCredential?: "secret" | "jwt";
+  apiTokenId?: string;
+}
+
+/** Transient, connector-neutral form request presented by OpenACP. */
+export interface ElicitationRequest {
+  id: string;
+  sessionId: string;
+  turnId?: string;
+  targetAdapterId?: string;
+  toolCallId?: string;
+  mode: "form";
+  message: string;
+  requestedSchema: ElicitationSchema;
+  expiresAt: number;
+  owner?: ElicitationOwner;
+  /** Codex vendor extension; standard ACP forms must not request secrets. */
+  sensitiveFields?: string[];
+}
+
+/** ACP-compatible response returned to the requesting agent. */
+export type ElicitationResponse =
+  | { action: "accept"; content: Record<string, ElicitationContentValue> }
+  | { action: "decline" }
+  | { action: "cancel" };
+
+/** Safe resolution metadata. Submitted content is intentionally absent. */
+export interface ElicitationResolvedEvent {
+  sessionId: string;
+  requestId: string;
+  action: ElicitationResponse["action"];
+  reason: "user" | "timeout" | "cancelled" | "delivery_failed" | "session_end";
+  resolvedBy?: string;
+}
+
 /**
  * A notification pushed to the user outside of the normal message flow.
  *
@@ -157,6 +204,8 @@ export interface AgentCommand {
   name: string;
   description: string;
   input?: unknown;
+  /** Opaque ACP extension metadata; adapters must preserve it without interpretation. */
+  _meta?: Record<string, unknown> | null;
 }
 
 /**
@@ -281,6 +330,8 @@ export interface RegistryBinaryTarget {
   cmd: string;
   args?: string[];
   env?: Record<string, string>;
+  /** Expected SHA-256 digest of the downloaded archive or raw executable. */
+  sha256?: string;
 }
 
 /** Distribution methods available for a registry agent. */
@@ -311,9 +362,13 @@ export interface AgentListItem {
   registryId: string;
   name: string;
   version: string;
+  /** Newer registry version available without changing the installed runtime. */
+  availableVersion?: string;
   description?: string;
   distribution: AgentDistribution;
   installed: boolean;
+  /** The registry describes a different version or distribution that needs installation. */
+  updateRequired?: boolean;
   available: boolean;
   /** Runtime dependencies that are missing on this machine. */
   missingDeps?: string[];
@@ -339,9 +394,16 @@ export interface InstallProgress {
 export interface InstallResult {
   ok: boolean;
   agentKey: string;
+  /** The requested registry version was already active, so no runtime or metadata changed. */
+  alreadyInstalled?: boolean;
   error?: string;
   hint?: string;
   setupSteps?: string[];
+  /** Installation committed, but deletion of the replaced runtime must be retried. */
+  cleanupPending?: boolean;
+  /** Whether OpenACP has a durable marker that makes automatic retry safe. */
+  cleanupRetryable?: boolean;
+  cleanupMessage?: string;
 }
 
 /**
@@ -386,6 +448,8 @@ export interface SessionRecord<P = Record<string, unknown>> {
   createdAt: string;
   lastActiveAt: string;
   name?: string;
+  /** Origin of the display name; absent legacy records are treated as persisted names. */
+  nameSource?: SessionNameSource;
   isAssistant?: boolean;
   dangerousMode?: boolean;
   clientOverrides?: { bypassPermissions?: boolean };
@@ -418,7 +482,14 @@ export interface SessionRecord<P = Record<string, unknown>> {
 /** Telegram-specific data stored per session in the session record. */
 export interface TelegramPlatformData {
   topicId: number;
+  /** First command-list message retained for backward compatibility. */
   skillMsgId?: number;
+  /** Complete ordered command-list message set. */
+  skillMsgIds?: number[];
+  /** Digest of the rendered command-list content and controls. */
+  skillMsgDigest?: string;
+  /** Superseded managed messages awaiting bounded cleanup after an interrupted update. */
+  skillStaleMsgIds?: number[];
   controlMsgId?: number;
 }
 

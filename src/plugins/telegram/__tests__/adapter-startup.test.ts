@@ -120,6 +120,7 @@ function makeMockCore(instanceId = 'adapter-test') {
   const eventBus = { on: vi.fn(), off: vi.fn(), emit: vi.fn() }
   const sessionManager = {
     getSession: vi.fn().mockReturnValue(null),
+    getSessionByThread: vi.fn().mockReturnValue(null),
     getSessionRecord: vi.fn().mockReturnValue(null),
     patchRecord: vi.fn().mockResolvedValue(undefined),
     listRecords: vi.fn().mockReturnValue([]),
@@ -761,5 +762,190 @@ describe('TelegramAdapter startup sequence', () => {
     const callbacks = markup.flat().map((button: any) => button.callback_data)
     expect(callbacks.every((value: string) => Buffer.byteLength(value, 'utf8') <= 64)).toBe(true)
     expect(callbacks.slice(0, 2).every((value: string) => value.startsWith('c/#'))).toBe(true)
+  })
+
+  it('keeps typed system precedence while agent buttons forward the exact slash command', async () => {
+    const { CommandRegistry } = await import('../../../core/command-registry.js')
+    const { encodeAgentCommandCallback } = await import('../commands/menu.js')
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    const registry = new CommandRegistry()
+    registry.register({
+      name: 'status', description: 'System status', category: 'system',
+      handler: async () => ({ type: 'text', text: 'SYSTEM_STATUS' }),
+    })
+    const commands = [
+      { name: 'status', description: 'Agent status', _meta: { owner: 'agent' } },
+      { name: '/review', description: 'Review', input: { hint: 'Scope' }, _meta: { owner: 'agent' } },
+    ]
+    const session = { id: 'session-1', latestCommands: commands }
+    const security = { checkAccess: vi.fn().mockResolvedValue({ allowed: true }) }
+    core.sessionManager.getSessionByThread = vi.fn().mockReturnValue(session)
+    core.getOrResumeSession = vi.fn().mockResolvedValue(session)
+    core.handleMessage = vi.fn().mockResolvedValue(undefined)
+    core.lifecycleManager.serviceRegistry.get = vi.fn(
+      (name: string) => name === 'command-registry' ? registry : name === 'security' ? security : null,
+    )
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+    await adapter.start()
+    const bot = MockBot.instances.at(-1)!
+    const textHandler = bot.onHandlers.find(({ filter, handler }) =>
+      filter === 'message:text' && handler.toString().includes('pendingCommandInputs'))!.handler
+    const baseContext = {
+      chat: { id: makeTelegramConfig().chatId },
+      from: { id: 77, first_name: 'Agent', username: 'agent_user' },
+      me: { username: 'testbot' },
+      reply: vi.fn().mockResolvedValue(undefined),
+      replyWithChatAction: vi.fn().mockResolvedValue(undefined),
+    }
+
+    await textHandler({
+      ...baseContext,
+      message: { text: '/status', message_thread_id: 321 },
+    }, vi.fn().mockResolvedValue(undefined))
+    expect(core.handleMessage).not.toHaveBeenCalled()
+
+    await textHandler({
+      ...baseContext,
+      message: { text: '/review current branch', message_thread_id: 321 },
+    }, vi.fn().mockResolvedValue(undefined))
+    expect(core.handleMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ text: '/review current branch' }),
+      expect.objectContaining({
+        agentCommand: expect.objectContaining({ name: 'review', source: 'typed', _meta: { owner: 'agent' } }),
+      }),
+    )
+
+    const agentCallback = bot.callbackHandlers.find(({ filter }) => String(filter) === '/^a\\//')!.handler
+    await agentCallback({
+      ...baseContext,
+      callbackQuery: {
+        data: encodeAgentCommandCallback('status'),
+        message: { message_thread_id: 321 },
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+    })
+    expect(core.handleMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ text: '/status' }),
+      expect.objectContaining({
+        agentCommand: expect.objectContaining({ name: 'status', source: 'button', _meta: { owner: 'agent' } }),
+      }),
+    )
+
+    await agentCallback({
+      ...baseContext,
+      callbackQuery: {
+        data: encodeAgentCommandCallback('review'),
+        message: { message_thread_id: 321 },
+      },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+    })
+    expect(bot.api.sendMessage).toHaveBeenLastCalledWith(
+      makeTelegramConfig().chatId,
+      'Scope',
+      expect.objectContaining({ message_thread_id: 321, reply_markup: expect.objectContaining({ force_reply: true }) }),
+    )
+
+    const callsBeforeUnrelatedSystemCommand = core.handleMessage.mock.calls.length
+    await textHandler({
+      ...baseContext,
+      message: { text: '/status', message_thread_id: 321 },
+    }, vi.fn().mockResolvedValue(undefined))
+    expect(core.handleMessage).toHaveBeenCalledTimes(callsBeforeUnrelatedSystemCommand)
+
+    await textHandler({
+      ...baseContext,
+      message: {
+        text: '/home/project', message_thread_id: 321,
+        reply_to_message: { message_id: 1 },
+      },
+    }, vi.fn().mockResolvedValue(undefined))
+    expect(core.handleMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ text: '/review /home/project' }),
+      expect.objectContaining({
+        agentCommand: expect.objectContaining({
+          name: 'review', source: 'button', input: { hint: 'Scope' }, _meta: { owner: 'agent' },
+        }),
+      }),
+    )
+    expect((adapter as any).pendingAgentCommandInputs.size).toBe(0)
+  })
+
+  it('authorizes agent-command callbacks before session resume or command metadata rendering', async () => {
+    const { encodeAgentCommandCallback } = await import('../commands/menu.js')
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    const security = { checkAccess: vi.fn().mockResolvedValue({
+      allowed: false, code: 'UNAUTHORIZED_USER', reason: 'Unauthorized user',
+    }) }
+    core.getOrResumeSession = vi.fn().mockResolvedValue({
+      id: 'must-not-resume',
+      latestCommands: [{ name: 'review', input: { hint: 'Private agent hint' } }],
+    })
+    core.handleMessage = vi.fn()
+    core.lifecycleManager.serviceRegistry.get = vi.fn(
+      (name: string) => name === 'security' ? security : null,
+    )
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+    await adapter.start()
+    const bot = MockBot.instances.at(-1)!
+    const agentCallback = bot.callbackHandlers.find(({ filter }) => String(filter) === '/^a\\//')!.handler
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined)
+
+    await agentCallback({
+      chat: { id: makeTelegramConfig().chatId },
+      from: { id: 999 },
+      callbackQuery: {
+        data: encodeAgentCommandCallback('review'),
+        message: { message_thread_id: 321 },
+      },
+      answerCallbackQuery,
+    })
+
+    expect(security.checkAccess).toHaveBeenCalledWith({ userId: '999' })
+    expect(core.getOrResumeSession).not.toHaveBeenCalled()
+    expect(core.handleMessage).not.toHaveBeenCalled()
+    expect(bot.api.sendMessage).not.toHaveBeenCalledWith(
+      makeTelegramConfig().chatId,
+      'Private agent hint',
+      expect.anything(),
+    )
+    expect(answerCallbackQuery).toHaveBeenCalledWith({ text: 'Access denied.' })
+  })
+
+  it('rejects a stale agent-command button without lazy-resuming or spawning its ACP session', async () => {
+    const { encodeAgentCommandCallback } = await import('../commands/menu.js')
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    const security = { checkAccess: vi.fn().mockResolvedValue({ allowed: true }) }
+    core.getOrResumeSession = vi.fn()
+    core.handleMessage = vi.fn()
+    core.lifecycleManager.serviceRegistry.get = vi.fn(
+      (name: string) => name === 'security' ? security : null,
+    )
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+    await adapter.start()
+    const bot = MockBot.instances.at(-1)!
+    const agentCallback = bot.callbackHandlers.find(({ filter }) => String(filter) === '/^a\\//')!.handler
+    const answerCallbackQuery = vi.fn().mockResolvedValue(undefined)
+
+    await agentCallback({
+      chat: { id: makeTelegramConfig().chatId },
+      from: { id: 77 },
+      callbackQuery: {
+        data: encodeAgentCommandCallback('review'),
+        message: { message_thread_id: 321 },
+      },
+      answerCallbackQuery,
+    })
+
+    expect(security.checkAccess.mock.invocationCallOrder[0])
+      .toBeLessThan(answerCallbackQuery.mock.invocationCallOrder[0])
+    expect(core.sessionManager.getSessionByThread).toHaveBeenCalledWith('telegram', '321')
+    expect(core.getOrResumeSession).not.toHaveBeenCalled()
+    expect(core.handleMessage).not.toHaveBeenCalled()
+    expect(answerCallbackQuery).toHaveBeenCalledWith({
+      text: 'This agent command is no longer available.',
+    })
   })
 })

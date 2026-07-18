@@ -400,6 +400,131 @@ async function assertPackagedProxyContract(): Promise<void> {
     for (const fragment of proxyHelpRequired) {
       if (!normalizedProxyHelp.includes(fragment)) throw new Error(`Packaged proxy help is missing: ${fragment}`)
     }
+
+    // Exercise the published CLI rather than only the command function. A live
+    // PID guards against the historical failure where a leading --json was
+    // dispatched to the default command and printed the already-running menu.
+    const instanceWorkspace = path.join(workspace, 'daemon-workspace')
+    const instanceRoot = path.join(instanceWorkspace, '.openacp')
+    fs.mkdirSync(instanceRoot, { recursive: true })
+    fs.writeFileSync(path.join(instanceRoot, 'config.json'), JSON.stringify({
+      defaultAgent: 'claude',
+      runMode: 'daemon',
+    }))
+    fs.writeFileSync(path.join(instanceRoot, 'openacp.pid'), String(process.pid))
+    fs.writeFileSync(path.join(instanceRoot, 'agents.json'), JSON.stringify({
+      version: 1,
+      revision: 0,
+      installed: {},
+    }))
+    const registrySnapshot = JSON.parse(fs.readFileSync(
+      path.join(root, 'dist-publish', 'dist', 'data', 'registry-snapshot.json'),
+      'utf8',
+    )) as { agents: unknown[] }
+    fs.writeFileSync(path.join(instanceRoot, 'registry-cache.json'), JSON.stringify({
+      fetchedAt: new Date().toISOString(),
+      ttlHours: 24,
+      data: registrySnapshot,
+    }))
+
+    const runJsonCli = (label: string, cliArgs: string[]): unknown => {
+      const result = spawnSync(process.execPath, [cli, ...cliArgs], {
+        cwd: workspace, env, encoding: 'utf8',
+      })
+      if (result.status !== 0) throw new Error(`Packaged ${label} exited ${result.status}: ${result.stderr}`)
+      const stdout = result.stdout.trimEnd()
+      if (stdout.split(/\r?\n/).length !== 1 || result.stderr.trim() !== '') {
+        throw new Error(`Packaged ${label} did not keep JSON output to one stdout line`)
+      }
+      if (/OpenACP is already running|Install an agent:|\x1B\[/.test(stdout)) {
+        throw new Error(`Packaged ${label} mixed interactive output into JSON mode`)
+      }
+      let parsed: unknown
+      try { parsed = JSON.parse(stdout) }
+      catch { throw new Error(`Packaged ${label} did not emit valid JSON`) }
+      if (!parsed || typeof parsed !== 'object' || (parsed as { success?: boolean }).success !== true) {
+        throw new Error(`Packaged ${label} did not emit a success envelope`)
+      }
+      return parsed
+    }
+
+    for (const [label, cliArgs] of [
+      ['agents command-first JSON', ['--dir', instanceWorkspace, 'agents', '--json']],
+      ['agents leading JSON', ['--json', '--dir', instanceWorkspace, 'agents']],
+      ['agents JSON after workspace flag', ['--dir', instanceWorkspace, '--json', 'agents']],
+    ] as const) {
+      const parsed = runJsonCli(label, [...cliArgs]) as { data?: { agents?: unknown[]; catalog?: unknown } }
+      if (!Array.isArray(parsed.data?.agents) || !parsed.data?.catalog) {
+        throw new Error(`Packaged ${label} returned the wrong catalog shape`)
+      }
+    }
+
+    // Closely related documented list commands share the top-level output-flag
+    // normalization and must remain callable in either flag order.
+    runJsonCli('plugins leading JSON', ['--json', '--dir', instanceWorkspace, 'plugins'])
+    runJsonCli('instances leading JSON', ['--json', 'instances', 'list'])
+
+    // Reading agent info must not turn a stable installed runner into a
+    // same-core prerelease merely because that record is present in cache.
+    const reviewWorkspace = path.join(workspace, 'reconciliation-workspace')
+    const reviewRoot = path.join(reviewWorkspace, '.openacp')
+    fs.mkdirSync(reviewRoot, { recursive: true })
+    const reviewStorePath = path.join(reviewRoot, 'agents.json')
+    const reviewStore = `${JSON.stringify({
+      version: 1,
+      revision: 0,
+      installed: {
+        review: {
+          registryId: 'review-agent',
+          name: 'Installed Stable Review Agent',
+          version: '1.2.3',
+          distribution: 'npx',
+          command: 'npx',
+          args: ['review-agent@1.2.3'],
+          env: {},
+          installedAt: '2026-07-18T00:00:00.000Z',
+          binaryPath: null,
+        },
+      },
+    }, null, 2)}\n`
+    fs.writeFileSync(reviewStorePath, reviewStore)
+    fs.writeFileSync(path.join(reviewRoot, 'registry-cache.json'), JSON.stringify({
+      fetchedAt: new Date().toISOString(),
+      ttlHours: 24,
+      data: {
+        agents: [{
+          id: 'review-agent',
+          name: 'Registry Prerelease Review Agent',
+          version: '1.2.3-beta.1',
+          description: 'Artifact reconciliation fixture',
+          distribution: { npx: { package: 'review-agent@1.2.3-beta.1' } },
+        }],
+      },
+    }))
+    const reviewInfo = runJsonCli('agents info stable-vs-prerelease', [
+      '--dir', reviewWorkspace, 'agents', 'info', 'review', '--json',
+    ]) as { data?: { name?: string; version?: string; command?: string } }
+    if (reviewInfo.data?.name !== 'Installed Stable Review Agent'
+      || reviewInfo.data.version !== '1.2.3'
+      || reviewInfo.data.command !== 'npx') {
+      throw new Error('Packaged agents info presented cached prerelease metadata as installed')
+    }
+    if (fs.readFileSync(reviewStorePath, 'utf8') !== reviewStore) {
+      throw new Error('Packaged agents info mutated a stable installed runner from prerelease cache metadata')
+    }
+
+    // A pending legacy-instance migration is an early CLI side effect. It must
+    // also stay silent so it cannot prepend human text to the JSON envelope.
+    const legacyGlobalRoot = path.join(workspace, '.openacp')
+    fs.mkdirSync(legacyGlobalRoot, { recursive: true })
+    fs.writeFileSync(path.join(legacyGlobalRoot, 'config.json'), JSON.stringify({
+      defaultAgent: 'claude',
+      workspace: { baseDir: path.join(workspace, 'migrated-workspace') },
+    }))
+    runJsonCli('agents JSON during legacy migration', [
+      '--json', '--dir', instanceWorkspace, 'agents',
+    ])
+
     const packagedReadme = fs.readFileSync(path.join(root, 'dist-publish', 'README.md'), 'utf8')
     for (const fragment of ['Quick URL', 'proxyUrl', 'mode-0600']) {
       if (!packagedReadme.includes(fragment)) throw new Error(`Packaged README is missing the protected Quick URL contract: ${fragment}`)

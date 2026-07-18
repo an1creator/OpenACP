@@ -678,6 +678,15 @@ export interface MiddlewarePayloadMap {
     oldValue: unknown
     newValue: unknown
   }
+  'config:afterChange': {
+    sessionId: string
+    configId: string
+    oldValue: unknown
+    requestedValue: unknown
+    newValue: unknown
+    acknowledged: true
+    authoritative: boolean
+  }
   'agent:beforeCancel': {
     sessionId: string
     reason?: string

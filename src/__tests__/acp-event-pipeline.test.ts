@@ -32,6 +32,10 @@ function createMockSession() {
       onPermissionRequest: vi.fn(),
     }),
     setName: vi.fn(),
+    captureAgentTitleContext: vi.fn().mockReturnValue({
+      turnId: null, userPrompt: '', finalPrompt: '', nameRevision: 0,
+    }),
+    applyAgentTitle: vi.fn((title: string) => ({ status: 'accepted', name: title })),
     finish: vi.fn(),
     fail: vi.fn(),
     registerBridge: vi.fn(),
@@ -98,10 +102,13 @@ describe('ACP Event Pipeline Integration', () => {
   })
 
   describe('session info flow', () => {
-    it('agent session_info_update with title → setName + adapter message', async () => {
+    it('agent session_info_update with title → naming policy + adapter message', async () => {
       session.emit('agent_event', { type: 'session_info_update', title: 'New Title' } as AgentEvent)
       await vi.waitFor(() => {
-        expect(session.setName).toHaveBeenCalledWith('New Title')
+        expect(session.applyAgentTitle).toHaveBeenCalledWith(
+          'New Title',
+          expect.objectContaining({ nameRevision: 0 }),
+        )
         expect(adapter.sendMessage).toHaveBeenCalled()
       })
     })
@@ -109,7 +116,7 @@ describe('ACP Event Pipeline Integration', () => {
     it('agent session_info_update without title → no adapter message', async () => {
       session.emit('agent_event', { type: 'session_info_update', updatedAt: '2026-03-26' } as AgentEvent)
       await new Promise(resolve => setTimeout(resolve, 50))
-      expect(session.setName).not.toHaveBeenCalled()
+      expect(session.applyAgentTitle).not.toHaveBeenCalled()
       expect(adapter.sendMessage).not.toHaveBeenCalled()
     })
   })

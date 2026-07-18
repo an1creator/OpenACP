@@ -104,6 +104,20 @@ startup or the initial durable session write fails. The method is optional for
 backward compatibility; when a session exists, Core can still fall back to
 \`deleteSessionThread(sessionId)\`.
 
+To render ACP forms, declare \`capabilities.elicitation.form\` and implement
+\`sendElicitationRequest?(sessionId, request)\`. Implement
+\`dismissElicitationRequest?(sessionId, event)\` to remove stale UI after a
+response, timeout, cancellation, or session end. Bind replies to the initiating
+user and conversation, and never persist, log, or echo submitted values.
+Match the exact form prompt before command routing: slash-prefixed form values
+belong to the form, while unrelated ForceReply messages belong to their command
+owner. Do not compile agent-supplied string \`pattern\` constraints; Core
+rejects them.
+
+Only declare \`secureInput: 'private'\` or \`'delete-after-capture'\` when the
+platform actually provides that guarantee. Protected fields are a Codex ACP
+extension; standard ACP form fields are not secrets.
+
 When implementing an \`STTProvider\`, pass request options through to external calls and honor \`options.signal\`. Abort promptly, terminate descendant work, release temporary resources, and reject only after cleanup completes. OpenACP waits for the provider promise before it drains the next queued prompt.
 
 The runtime speech service exposes result-returning \`synthesize()\`, \`transcribe()\`, provider registration, TTS provider teardown, and availability checks. It does not expose \`textToSpeech()\`, \`speechToText()\`, or \`unregisterSTTProvider()\`. Only the SDK speech test mock retains the two deprecated conversion aliases for test-suite compatibility until the next major version.

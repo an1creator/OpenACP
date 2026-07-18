@@ -133,7 +133,10 @@ function registerCategoryCommand(
       }
 
       try {
-        await session.setConfigOption(configOption.id, { type: 'select', value: raw })
+        const outcome = await session.setConfigOption(configOption.id, { type: 'select', value: raw })
+        if (outcome && !outcome.acknowledged) {
+          return { type: 'error', message: outcome.message ?? 'The agent did not apply the configuration change.' } satisfies CommandResponse
+        }
         core.eventBus.emit(BusEvent.SESSION_CONFIG_CHANGED, { sessionId: session.id })
         return { type: 'text', text: labels.successMsg(match.name, configOption.name) } satisfies CommandResponse
       } catch (err) {
@@ -227,7 +230,10 @@ function registerDangerousCommand(registry: CommandRegistry, core: OpenACPCore):
       if (bypassValue && modeConfig) {
         try {
           const targetValue = wantOn ? bypassValue : nonBypassDefault!
-          await session.setConfigOption(modeConfig.id, { type: 'select', value: targetValue })
+          const outcome = await session.setConfigOption(modeConfig.id, { type: 'select', value: targetValue })
+          if (outcome && !outcome.acknowledged) {
+            return { type: 'error', message: outcome.message ?? 'The agent did not apply the configuration change.' } satisfies CommandResponse
+          }
           core.eventBus.emit(BusEvent.SESSION_CONFIG_CHANGED, { sessionId: session.id })
           return {
             type: 'text',

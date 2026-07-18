@@ -1,6 +1,6 @@
 import type { IChannelAdapter, AdapterCapabilities } from '../../core/channel.js';
-import type { OutgoingMessage, PermissionRequest, NotificationMessage } from '../../core/types.js';
-import type { ConnectionManager } from './connection-manager.js';
+import type { OutgoingMessage, PermissionRequest, NotificationMessage, ElicitationRequest, ElicitationResolvedEvent, ElicitationOwner } from '../../core/types.js';
+import type { ConnectionManager, SSEConnection } from './connection-manager.js';
 import type { EventBuffer } from './event-buffer.js';
 import {
   generateEventId,
@@ -8,6 +8,8 @@ import {
   serializePermissionRequest,
   serializeHeartbeat,
   serializeSSE,
+  serializeElicitationRequest,
+  serializeElicitationResolved,
 } from './event-serializer.js';
 
 // Keep idle connections alive through proxy timeout windows (typically 60–90 s).
@@ -40,9 +42,11 @@ export class SSEAdapter implements IChannelAdapter {
     reactions: false,
     fileUpload: false,
     voice: false,
+    elicitation: { form: true, secureInput: 'none' },
   };
 
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  private readonly elicitationOwners = new Map<string, ElicitationOwner | undefined>();
 
   constructor(
     private readonly connectionManager: ConnectionManager,
@@ -76,6 +80,7 @@ export class SSEAdapter implements IChannelAdapter {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
     }
+    this.elicitationOwners.clear();
     this.connectionManager.cleanup();
   }
 
@@ -93,12 +98,58 @@ export class SSEAdapter implements IChannelAdapter {
     this.connectionManager.broadcast(sessionId, serialized);
   }
 
+  /** Relay an already-sanitized core bus event for a headless session. */
+  async sendSessionEvent(sessionId: string, event: string, data: unknown): Promise<void> {
+    const eventId = generateEventId();
+    const serialized = serializeSSE(event, eventId, data);
+    this.eventBuffer.push(sessionId, { id: eventId, data: serialized });
+    this.connectionManager.broadcast(sessionId, serialized);
+  }
+
   /** Serializes and delivers a permission request UI to the session's SSE clients. */
   async sendPermissionRequest(sessionId: string, request: PermissionRequest): Promise<void> {
     const eventId = generateEventId();
     const serialized = serializePermissionRequest(sessionId, eventId, request);
     this.eventBuffer.push(sessionId, { id: eventId, data: serialized });
     this.connectionManager.broadcast(sessionId, serialized);
+  }
+
+  async sendElicitationRequest(sessionId: string, request: ElicitationRequest): Promise<void> {
+    const serialized = serializeElicitationRequest(sessionId, undefined, request);
+    this.elicitationOwners.set(`${sessionId}:${request.id}`, request.owner);
+    this.connectionManager.broadcastWhere(
+      sessionId,
+      serialized,
+      (connection) => this.mayObserveElicitation(connection, request.owner),
+    );
+  }
+
+  async dismissElicitationRequest(sessionId: string, event: ElicitationResolvedEvent): Promise<void> {
+    const serialized = serializeElicitationResolved(undefined, event);
+    const key = `${sessionId}:${event.requestId}`;
+    const owner = this.elicitationOwners.get(key);
+    this.connectionManager.broadcastWhere(
+      sessionId,
+      serialized,
+      (connection) => this.mayObserveElicitation(connection, owner),
+    );
+    this.elicitationOwners.delete(key);
+  }
+
+  /** Remove transient ownership metadata when a session reaches a terminal lifecycle state. */
+  clearSessionElicitations(sessionId: string): void {
+    const prefix = `${sessionId}:`;
+    for (const key of this.elicitationOwners.keys()) {
+      if (key.startsWith(prefix)) this.elicitationOwners.delete(key);
+    }
+  }
+
+  private mayObserveElicitation(connection: SSEConnection, owner: ElicitationOwner | undefined): boolean {
+    if (connection.authType === 'secret') return true;
+    if (!owner || connection.authType !== 'jwt') return false;
+    if (owner.apiCredential === 'secret') return false;
+    if (owner.apiCredential === 'jwt' && owner.apiTokenId === connection.tokenId) return true;
+    return Boolean(owner.canonicalUserId && connection.userId === owner.canonicalUserId);
   }
 
   /**

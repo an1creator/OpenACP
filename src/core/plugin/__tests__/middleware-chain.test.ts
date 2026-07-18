@@ -200,6 +200,32 @@ describe('MiddlewareChain', () => {
     expect(coreHandler).toHaveBeenCalled()
   })
 
+  it('keeps disabled policy middleware fail-closed on later block-mode calls', async () => {
+    const tracker = new ErrorTracker({ maxErrors: 1, windowMs: 60000 })
+    chain.setErrorTracker(tracker)
+    chain.setErrorHandler(() => {})
+    const handler = vi.fn().mockRejectedValue(new Error('policy unavailable'))
+    chain.add('config:beforeChange', 'policy-plugin', { handler })
+    const coreHandler = vi.fn().mockImplementation((payload: unknown) => payload)
+
+    await expect(chain.execute(
+      'config:beforeChange',
+      { sessionId: 's1', newValue: 'architect' },
+      coreHandler,
+      { onError: 'block' },
+    )).resolves.toBeNull()
+    expect(tracker.isDisabled('policy-plugin')).toBe(true)
+
+    await expect(chain.execute(
+      'config:beforeChange',
+      { sessionId: 's1', newValue: 'code' },
+      coreHandler,
+      { onError: 'block' },
+    )).resolves.toBeNull()
+    expect(handler).toHaveBeenCalledOnce()
+    expect(coreHandler).not.toHaveBeenCalled()
+  })
+
   it('increments error tracker when middleware throws', async () => {
     const tracker = new ErrorTracker({ maxErrors: 5, windowMs: 60000 })
     chain.setErrorTracker(tracker)

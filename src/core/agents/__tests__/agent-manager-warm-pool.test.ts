@@ -15,6 +15,8 @@ vi.mock('../agent-instance.js', () => {
       spawnSubprocess: vi.fn(),
       spawn: vi.fn(),
       resume: vi.fn(),
+      getInitializationCleanupResourceStatus: vi.fn().mockReturnValue({ pending: 0, failed: 0 }),
+      shutdownInitializationCleanups: vi.fn().mockResolvedValue(undefined),
     },
   }
 })

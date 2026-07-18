@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import * as net from "node:net";
 import { EventBus } from "../core/event-bus.js";
+import { SessionLimitError } from "../core/sessions/session-manager.js";
 import type { ApiServerInstance } from "../plugins/api-server/server.js";
 
 describe("ApiServer", () => {
@@ -39,6 +40,7 @@ describe("ApiServer", () => {
     },
     agentManager: {
       getAvailableAgents: vi.fn(() => []),
+      getInitializationCleanupResourceStatus: vi.fn(() => ({ pending: 0, failed: 0 })),
       getWarmPoolResourceStatus: vi.fn(() => ({ state: 'empty', capacity: 1 })),
     },
     agentCatalog: {
@@ -320,25 +322,17 @@ describe("ApiServer", () => {
   });
 
   it("POST /api/sessions returns 429 when max sessions reached", async () => {
-    mockCore.sessionManager.listSessions.mockReturnValueOnce([
-      { status: "active" },
-      { status: "active" },
-      { status: "active" },
-      { status: "active" },
-      { status: "initializing" },
-    ]);
-    // Provide lifecycleManager with settingsManager returning maxConcurrentSessions=5
-    const mockLifecycleManager = {
-      settingsManager: {
-        loadSettings: vi.fn().mockResolvedValue({ maxConcurrentSessions: 5 }),
-      },
-    };
-    const port = await startServer(undefined, mockLifecycleManager);
+    mockCore.createSession.mockRejectedValueOnce(new SessionLimitError(5));
+    const port = await startServer();
 
     const res = await apiFetch(port, "/api/v1/sessions", { method: "POST" });
     expect(res.status).toBe(429);
     const data = await res.json();
-    expect(data.error).toContain("concurrent sessions");
+    expect(data.error).toEqual({
+      code: 'SESSION_LIMIT',
+      message: 'Maximum concurrent sessions reached (5)',
+      statusCode: 429,
+    });
   });
 
   it("DELETE /api/sessions/:id cancels a session", async () => {

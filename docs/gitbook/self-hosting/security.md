@@ -37,7 +37,14 @@ To find your user ID:
 }
 ```
 
-This is a hard cap on the number of sessions with status `active` or `initializing` across all channels at any given moment. When the limit is reached, new incoming messages are rejected with a "Session limit reached" response until an existing session completes.
+This is a hard cap on the number of sessions with status `active` or
+`initializing` across all channels at any given moment. OpenACP reserves a slot
+before starting an ACP process, so concurrent creates and lazy resumes cannot
+race past the limit. When the limit is reached, new session creation is rejected
+until an existing session completes or is cancelled. Prompts sent to an already
+admitted session continue to use its existing slot. An errored live session no
+longer owns capacity: its next prompt must atomically reacquire a slot using the
+current hot-reloaded limit before any agent work starts.
 
 The default of 20 is generous for personal use. Reduce it if you are on a machine with limited resources or want to prevent accidental runaway usage.
 
@@ -136,6 +143,27 @@ preserves the original, creates a mode-0600 `.corrupt.*` quarantine, and refuses
 network transport resolution. Do not delete the broken file merely to make the
 daemon start: inspect it and `proxy-lkg.json`, restore a reviewed consistent
 metadata+secret pair, then run `openacp doctor`.
+
+## Structured input
+
+ACP form answers are transient. OpenACP validates them in memory, returns them
+to the requesting agent, and omits them from session history, logs, persisted
+state, and resolution events. Requests are bound to the initiating turn and
+accept only the first response. REST accept, decline, and cancel actions all
+require the initiating JWT, a JWT linked to the same canonical user, or the
+master secret. An unlinked JWT cannot transfer ownership to a different token.
+
+Standard ACP form fields are never treated as secret input. OpenACP recognizes
+protected fields only from the Codex ACP `isSecret` extension. In Telegram, a
+protected reply is accepted only after the bot deletes the message; deletion
+failure cancels the request and discards the value. REST submission requires
+HTTPS or loopback transport and the initiating JWT or linked user; the master
+API secret remains an administrative override. A connector without a matching
+secure-input capability cannot receive protected fields.
+
+OpenACP rejects every agent-supplied string `pattern` constraint. It does not
+compile or run untrusted JavaScript regular expressions on the daemon event
+loop. Use supported formats, length bounds, or explicit select values.
 
 ## Bypass Permissions
 

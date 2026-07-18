@@ -16,7 +16,7 @@ import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { Transform } from "node:stream";
 import fs from "node:fs";
 import path from "node:path";
-import { ClientSideConnection, ndJsonStream } from "@agentclientprotocol/sdk";
+import { ClientSideConnection, ndJsonStream, RequestError } from "@agentclientprotocol/sdk";
 import { PathGuard } from "../security/path-guard.js";
 import { filterEnv } from "../security/env-filter.js";
 import type {
@@ -24,6 +24,8 @@ import type {
   Client,
   PromptResponse,
   PermissionOption as SdkPermissionOption,
+  CreateElicitationRequest,
+  CreateElicitationResponse,
 } from "@agentclientprotocol/sdk";
 import { nodeToWebWritable, nodeToWebReadable } from "../utils/streams.js";
 import { StderrCapture } from "../utils/stderr-capture.js";
@@ -54,6 +56,11 @@ import { createChildLogger } from "../utils/log.js";
 import { redactNetworkSecrets } from "../security/network-redaction.js";
 import { Hook, SessionEv } from "../events.js";
 const log = createChildLogger({ module: "agent-instance" });
+
+/** Internal acknowledgement marker for successful legacy config RPC fallbacks. */
+export type ConfigOptionRpcResponse = SetSessionConfigOptionResponse & {
+  legacyAcknowledged?: true;
+};
 
 /**
  * Find the nearest ancestor directory containing package.json.
@@ -254,6 +261,30 @@ export interface AgentInstanceEvents {
   agent_event: (event: AgentEvent) => void;
 }
 
+const AGENT_DESTROY_GRACE_MS = 10_000;
+const AGENT_DESTROY_FORCE_WAIT_MS = 5_000;
+const INITIALIZATION_CLEANUP_MAX_ATTEMPTS = 3;
+const INITIALIZATION_CLEANUP_RETRY_BASE_MS = 250;
+const INITIALIZATION_CLEANUP_CAPACITY = 32;
+export const INITIALIZATION_SHUTDOWN_CLEANUP_BUDGET_MS = 4_000;
+const INITIALIZATION_SHUTDOWN_CLEANUP_CONCURRENCY = 8;
+
+interface InitializationCleanupEntry {
+  instance: AgentInstance;
+  state: "pending" | "failed" | "terminal-failed";
+  attempts: number;
+  operation: Promise<boolean> | null;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  lastError?: string;
+}
+
+export interface InitializationCleanupResourceStatus {
+  pending: number;
+  failed: number;
+  terminalFailed: number;
+  capacity: number;
+}
+
 /**
  * Manages an ACP agent subprocess and implements the ACP Client interface.
  *
@@ -268,6 +299,10 @@ export interface AgentInstanceEvents {
  * Session wraps this class to add prompt queuing and lifecycle management.
  */
 export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
+  /** Failed initialization still owns its child until a bounded destroy succeeds. */
+  private static initializationCleanups = new Set<InitializationCleanupEntry>();
+  private static initializationCleanupCapacityUsed = 0;
+  private static initializationCleanupShutdownOperation: Promise<void> | null = null;
   private connection!: ClientSideConnection;
   private child!: ChildProcess;
   private stderrCapture!: StderrCapture;
@@ -279,6 +314,8 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
   private _destroying = false;
   /** All teardown callers share one exact subprocess cleanup operation. */
   private _destroyOperation: Promise<void> | null = null;
+  private _destroyAbortController: AbortController | null = null;
+  private _initializationCleanupCapacityOwned = false;
   /** Restricts agent file I/O to the workspace directory and explicitly allowed paths. */
   private pathGuard!: PathGuard;
 
@@ -305,30 +342,214 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
   // permission option ID. Default no-op auto-selects the first option.
   onPermissionRequest: (request: PermissionRequest) => Promise<string> =
     async () => "";
+  /** Session-owned handler for the unstable ACP form elicitation request. */
+  onElicitationRequest: (request: CreateElicitationRequest) => Promise<CreateElicitationResponse> =
+    async () => ({ action: "cancel" });
 
   private constructor(agentName: string) {
     super();
     this.agentName = agentName;
   }
 
+  private static reserveInitializationCleanupCapacity(instance: AgentInstance): void {
+    if (AgentInstance.initializationCleanupCapacityUsed >= INITIALIZATION_CLEANUP_CAPACITY) {
+      throw new Error(
+        `Agent initialization is temporarily unavailable: ${INITIALIZATION_CLEANUP_CAPACITY} initialization or cleanup subprocesses are still owned`,
+      );
+    }
+    AgentInstance.initializationCleanupCapacityUsed += 1;
+    instance._initializationCleanupCapacityOwned = true;
+  }
+
+  private static releaseInitializationCleanupCapacity(instance: AgentInstance): void {
+    if (!instance._initializationCleanupCapacityOwned) return;
+    instance._initializationCleanupCapacityOwned = false;
+    AgentInstance.initializationCleanupCapacityUsed = Math.max(
+      0,
+      AgentInstance.initializationCleanupCapacityUsed - 1,
+    );
+  }
+
   private static async cleanupFailedInitialization(
     instance: AgentInstance,
     originalError: unknown,
   ): Promise<never> {
+    if (!instance._initializationCleanupCapacityOwned) {
+      AgentInstance.reserveInitializationCleanupCapacity(instance);
+    }
+    const cleanup: InitializationCleanupEntry = {
+      instance,
+      state: "pending",
+      attempts: 0,
+      operation: null,
+      retryTimer: null,
+    };
+    AgentInstance.initializationCleanups.add(cleanup);
+    await AgentInstance.runInitializationCleanup(cleanup);
+    throw originalError;
+  }
+
+  private static runInitializationCleanup(
+    cleanup: InitializationCleanupEntry,
+    options: { scheduleRetry?: boolean; terminalOnFailure?: boolean } = {},
+  ): Promise<boolean> {
+    if (cleanup.operation) return cleanup.operation;
+    cleanup.state = "pending";
+    cleanup.attempts += 1;
+    cleanup.lastError = undefined;
+    const operation = Promise.resolve().then(() => cleanup.instance.destroy()).then(
+      () => {
+        if (cleanup.retryTimer) clearTimeout(cleanup.retryTimer);
+        cleanup.retryTimer = null;
+        AgentInstance.initializationCleanups.delete(cleanup);
+        AgentInstance.releaseInitializationCleanupCapacity(cleanup.instance);
+        return true;
+      },
+      (cleanupError: unknown) => {
+        cleanup.state = options.terminalOnFailure || cleanup.attempts >= INITIALIZATION_CLEANUP_MAX_ATTEMPTS
+          ? "terminal-failed"
+          : "failed";
+        cleanup.lastError = redactNetworkSecrets(
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        );
+        log.warn(
+          {
+            agentName: cleanup.instance.agentName,
+            attempts: cleanup.attempts,
+            error: cleanup.lastError,
+          },
+          "Failed agent initialization cleanup retained for retry",
+        );
+        if (cleanup.state === "failed" && options.scheduleRetry !== false) {
+          const delay = INITIALIZATION_CLEANUP_RETRY_BASE_MS * (2 ** (cleanup.attempts - 1));
+          cleanup.retryTimer = setTimeout(() => {
+            cleanup.retryTimer = null;
+            if (!AgentInstance.initializationCleanups.has(cleanup) || cleanup.state !== "failed") return;
+            void AgentInstance.runInitializationCleanup(cleanup);
+          }, delay);
+          cleanup.retryTimer.unref?.();
+        }
+        return false;
+      },
+    ).finally(() => {
+      cleanup.operation = null;
+    });
+    cleanup.operation = operation;
+    return operation;
+  }
+
+  /** Operational diagnostics for failed ACP initialization resources. */
+  static getInitializationCleanupResourceStatus(): InitializationCleanupResourceStatus {
+    const entries = [...AgentInstance.initializationCleanups];
+    return {
+      pending: entries.filter((entry) => entry.state === "pending").length,
+      failed: entries.filter((entry) => entry.state === "failed" || entry.state === "terminal-failed").length,
+      terminalFailed: entries.filter((entry) => entry.state === "terminal-failed").length,
+      capacity: INITIALIZATION_CLEANUP_CAPACITY,
+    };
+  }
+
+  private static markInitializationCleanupTerminal(
+    cleanup: InitializationCleanupEntry,
+    reason: string,
+  ): void {
+    if (!AgentInstance.initializationCleanups.has(cleanup)) return;
+    if (cleanup.retryTimer) clearTimeout(cleanup.retryTimer);
+    cleanup.retryTimer = null;
+    cleanup.state = "terminal-failed";
+    cleanup.lastError ??= reason;
+  }
+
+  /**
+   * Join retained cleanup under one daemon-wide deadline.
+   *
+   * Work is concurrency-limited so a large retained set cannot serialize every
+   * child-specific TERM/KILL deadline. At the global deadline each active wait
+   * is aborted, SIGKILL is attempted, listeners are detached, and unconfirmed
+   * children remain truthfully owned as terminal failures.
+   */
+  static async shutdownInitializationCleanups(): Promise<void> {
+    if (AgentInstance.initializationCleanupShutdownOperation) {
+      return AgentInstance.initializationCleanupShutdownOperation;
+    }
+    const operation = AgentInstance.performShutdownInitializationCleanups();
+    AgentInstance.initializationCleanupShutdownOperation = operation;
     try {
-      await instance.destroy();
-    } catch (cleanupError) {
+      await operation;
+    } finally {
+      if (AgentInstance.initializationCleanupShutdownOperation === operation) {
+        AgentInstance.initializationCleanupShutdownOperation = null;
+      }
+    }
+  }
+
+  private static async performShutdownInitializationCleanups(): Promise<void> {
+    const entries = [...AgentInstance.initializationCleanups];
+    if (entries.length === 0) return;
+    for (const cleanup of entries) {
+      if (cleanup.retryTimer) clearTimeout(cleanup.retryTimer);
+      cleanup.retryTimer = null;
+    }
+
+    const deadline = Date.now() + INITIALIZATION_SHUTDOWN_CLEANUP_BUDGET_MS;
+    let cursor = 0;
+    const worker = async () => {
+      while (Date.now() < deadline) {
+        const cleanup = entries[cursor++];
+        if (!cleanup) return;
+        if (!AgentInstance.initializationCleanups.has(cleanup)) continue;
+        if (cleanup.operation) await cleanup.operation;
+        if (!AgentInstance.initializationCleanups.has(cleanup)) continue;
+        if (Date.now() >= deadline) return;
+        if (cleanup.retryTimer) clearTimeout(cleanup.retryTimer);
+        cleanup.retryTimer = null;
+        await AgentInstance.runInitializationCleanup(cleanup, {
+          scheduleRetry: false,
+          terminalOnFailure: true,
+        });
+      }
+    };
+    const workers = Array.from(
+      { length: Math.min(INITIALIZATION_SHUTDOWN_CLEANUP_CONCURRENCY, entries.length) },
+      () => worker(),
+    );
+
+    let budgetTimer: ReturnType<typeof setTimeout> | undefined;
+    const completedWithinBudget = await Promise.race([
+      Promise.all(workers).then(() => true),
+      new Promise<boolean>((resolve) => {
+        budgetTimer = setTimeout(() => resolve(false), INITIALIZATION_SHUTDOWN_CLEANUP_BUDGET_MS);
+      }),
+    ]);
+    if (budgetTimer) clearTimeout(budgetTimer);
+
+    if (!completedWithinBudget) {
+      for (const cleanup of entries) cleanup.instance.abortDestroyWait();
+      await Promise.allSettled(workers);
+    }
+
+    let terminalFailures = 0;
+    for (const cleanup of entries) {
+      if (!AgentInstance.initializationCleanups.has(cleanup)) continue;
+      cleanup.instance.detachUnconfirmedChild();
+      AgentInstance.markInitializationCleanupTerminal(
+        cleanup,
+        completedWithinBudget
+          ? "Final shutdown cleanup failed before child exit was confirmed"
+          : `Global shutdown cleanup budget exhausted after ${INITIALIZATION_SHUTDOWN_CLEANUP_BUDGET_MS}ms`,
+      );
+      terminalFailures += 1;
+    }
+    if (terminalFailures > 0) {
       log.warn(
         {
-          agentName: instance.agentName,
-          error: redactNetworkSecrets(
-            cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-          ),
+          terminalFailures,
+          retained: AgentInstance.initializationCleanups.size,
+          budgetMs: INITIALIZATION_SHUTDOWN_CLEANUP_BUDGET_MS,
         },
-        "Failed agent initialization cleanup did not complete",
+        "Agent initialization cleanup shutdown budget ended with unconfirmed children",
       );
     }
-    throw originalError;
   }
 
   /**
@@ -350,8 +571,11 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     workingDirectory: string,
     allowedPaths: string[] = [],
     environment?: Record<string, string>,
+    retainInitializationCleanupCapacity = false,
   ): Promise<AgentInstance> {
     const instance = new AgentInstance(agentDef.name);
+    AgentInstance.reserveInitializationCleanupCapacity(instance);
+    try {
     const resolved = resolveAgentCommand(agentDef.command);
     log.debug(
       {
@@ -381,16 +605,21 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
       },
     );
 
-    try {
     await new Promise<void>((resolve, reject) => {
-      instance.child.on("error", (err) => {
+      const onError = (err: Error) => {
+        instance.child.removeListener("spawn", onSpawn);
         reject(
           new Error(
             `Failed to spawn agent "${agentDef.name}": ${err.message}. Is "${agentDef.command}" installed?`,
           ),
         );
-      });
-      instance.child.on("spawn", () => resolve());
+      };
+      const onSpawn = () => {
+        instance.child.removeListener("error", onError);
+        resolve();
+      };
+      instance.child.once("error", onError);
+      instance.child.once("spawn", onSpawn);
     });
 
     // Capture last 50 stderr lines for crash diagnostics — stderr is NOT part of
@@ -454,6 +683,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
       clientCapabilities: {
         fs: { readTextFile: true, writeTextFile: true },
         terminal: true,
+        elicitation: { form: {} },
       },
     });
 
@@ -475,6 +705,9 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
       "Agent prompt capabilities",
     );
 
+    if (!retainInitializationCleanupCapacity) {
+      AgentInstance.releaseInitializationCleanupCapacity(instance);
+    }
     return instance;
     } catch (error) {
       return AgentInstance.cleanupFailedInitialization(instance, error);
@@ -515,7 +748,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
 
   /** True if the subprocess has exited or been killed. */
   get isDead(): boolean {
-    return this.child.killed || this.child.exitCode !== null;
+    return this.child.exitCode != null || this.child.signalCode != null;
   }
 
   /**
@@ -582,12 +815,19 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     log.debug({ agentName: agentDef.name, command: agentDef.command }, "Spawning agent");
     const spawnStart = Date.now();
 
-    const instance = await AgentInstance.spawnSubprocess(agentDef, workingDirectory, allowedPaths, environment);
+    const instance = await AgentInstance.spawnSubprocess(
+      agentDef,
+      workingDirectory,
+      allowedPaths,
+      environment,
+      true,
+    );
     try {
       await instance.claimForSession(workingDirectory, mcpServers, agentDef.initTimeoutMs);
     } catch (error) {
       return AgentInstance.cleanupFailedInitialization(instance, error);
     }
+    AgentInstance.releaseInitializationCleanupCapacity(instance);
 
     log.info(
       {
@@ -626,6 +866,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
       workingDirectory,
       allowedPaths,
       environment,
+      true,
     );
 
     const resolvedMcp = AgentInstance.mcpManager.resolve(mcpServers);
@@ -691,6 +932,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     }
 
     instance.setupCrashDetection();
+    AgentInstance.releaseInitializationCleanupCapacity(instance);
     return instance;
     } catch (error) {
       return AgentInstance.cleanupFailedInitialization(instance, error);
@@ -890,6 +1132,19 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
         };
       },
 
+      async unstable_createElicitation(params) {
+        if (params.mode !== "form") {
+          throw RequestError.invalidParams(undefined, "OpenACP supports form elicitation only");
+        }
+        if (!("sessionId" in params)) {
+          throw RequestError.invalidParams(undefined, "Request-scoped elicitation is not supported");
+        }
+        if (params.sessionId !== self.sessionId) {
+          throw RequestError.invalidParams(undefined, "Elicitation session does not match the active session");
+        }
+        return self.onElicitationRequest(params);
+      },
+
       // ── File operations ──────────────────────────────────────────────────
       // The agent reads/writes files through these callbacks rather than
       // accessing the filesystem directly. This allows PathGuard to enforce
@@ -982,7 +1237,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
   async setConfigOption(
     configId: string,
     value: SetConfigOptionValue,
-  ): Promise<SetSessionConfigOptionResponse> {
+  ): Promise<ConfigOptionRpcResponse> {
     try {
       return await this.connection.setSessionConfigOption({
         sessionId: this.sessionId,
@@ -999,14 +1254,14 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
             sessionId: this.sessionId,
             modeId: value.value as string,
           });
-          return { configOptions: [] };
+          return { configOptions: [], legacyAcknowledged: true };
         }
         if (configId === 'model' && value.type === 'select') {
           await this.connection.request("session/set_model", {
             sessionId: this.sessionId,
             modelId: value.value as string,
           });
-          return { configOptions: [] };
+          return { configOptions: [], legacyAcknowledged: true };
         }
       }
       throw err;
@@ -1141,45 +1396,117 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
   async destroy(): Promise<void> {
     if (this._destroyOperation) return this._destroyOperation;
     this._destroying = true;
-    const operation = this.performDestroy().catch((error) => {
+    const abortController = new AbortController();
+    this._destroyAbortController = abortController;
+    const operation = this.performDestroy(abortController.signal).catch((error) => {
       // Keep concurrent callers joined, but allow an owner that retained this
       // instance after failed cleanup to make a later bounded retry.
       if (this._destroyOperation === operation) this._destroyOperation = null;
       throw error;
+    }).finally(() => {
+      if (this._destroyAbortController === abortController) {
+        this._destroyAbortController = null;
+      }
     });
     this._destroyOperation = operation;
     return operation;
   }
 
-  private async performDestroy(): Promise<void> {
+  private abortDestroyWait(): void {
+    this._destroyAbortController?.abort();
+  }
+
+  private detachUnconfirmedChild(): void {
+    const child = this.child;
+    if (!child || AgentInstance.hasExited(child)) return;
+    try {
+      child.kill("SIGKILL");
+    } catch (error) {
+      log.warn(
+        {
+          agentName: this.agentName,
+          error: redactNetworkSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        "Failed final best-effort SIGKILL before detaching unconfirmed agent child",
+      );
+    }
+    child.stdin?.destroy();
+    child.stdout?.unpipe();
+    child.stdout?.destroy();
+    child.stderr?.removeAllListeners("data");
+    child.stderr?.destroy();
+    child.unref?.();
+  }
+
+  private async performDestroy(signal: AbortSignal): Promise<void> {
     this.terminalManager.destroyAll();
 
-    if (!this.child || this.child.exitCode !== null) return;
+    const child = this.child;
+    if (!child || AgentInstance.hasExited(child)) return;
 
-    await new Promise<void>((resolve) => {
-      let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
-      // Register exit listener BEFORE sending signal to avoid race
-      this.child.on("exit", () => {
-        if (forceKillTimer) clearTimeout(forceKillTimer);
-        resolve();
-      });
+    let termSent: boolean;
+    try {
+      termSent = child.kill("SIGTERM");
+    } catch (error) {
+      if (AgentInstance.hasExited(child)) return;
+      throw new Error(`Failed to send SIGTERM to agent process: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!termSent && !AgentInstance.hasExited(child)) {
+      throw new Error("Failed to send SIGTERM to agent process");
+    }
+    const gracefulExit = await AgentInstance.waitForExit(child, AGENT_DESTROY_GRACE_MS, signal);
+    if (gracefulExit === "exited") return;
 
-      try {
-        this.child.kill("SIGTERM");
-      } catch {
-        resolve();
-        return;
-      }
+    let forceSent: boolean;
+    try {
+      forceSent = child.kill("SIGKILL");
+    } catch (error) {
+      if (AgentInstance.hasExited(child)) return;
+      throw new Error(`Failed to send SIGKILL to agent process: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!forceSent && !AgentInstance.hasExited(child)) {
+      throw new Error("Failed to send SIGKILL to agent process");
+    }
+    if (gracefulExit === "aborted") {
+      throw new Error("Agent cleanup wait aborted by the global shutdown budget after SIGKILL");
+    }
+    const forcedExit = await AgentInstance.waitForExit(child, AGENT_DESTROY_FORCE_WAIT_MS, signal);
+    if (forcedExit === "exited") return;
+    if (forcedExit === "aborted") {
+      throw new Error("Agent cleanup wait aborted by the global shutdown budget after SIGKILL");
+    }
+    throw new Error(`Agent process did not exit within ${AGENT_DESTROY_FORCE_WAIT_MS}ms after SIGKILL`);
+  }
 
-      forceKillTimer = setTimeout(() => {
-        // Use exitCode check — child.killed is true after ANY kill() call,
-        // even if the process hasn't actually exited yet
-        if (this.child.exitCode === null) this.child.kill("SIGKILL");
-        resolve();
-      }, 10_000);
-      if (typeof forceKillTimer === 'object' && forceKillTimer !== null && 'unref' in forceKillTimer) {
-        (forceKillTimer as NodeJS.Timeout).unref();
-      }
+  private static hasExited(child: ChildProcess): boolean {
+    return child.exitCode != null || child.signalCode != null;
+  }
+
+  private static waitForExit(
+    child: ChildProcess,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<"exited" | "timeout" | "aborted"> {
+    if (AgentInstance.hasExited(child)) return Promise.resolve("exited");
+    if (signal?.aborted) return Promise.resolve("aborted");
+    return new Promise<"exited" | "timeout" | "aborted">((resolve) => {
+      let settled = false;
+      const finish = (result: "exited" | "timeout" | "aborted") => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.removeListener("exit", onExit);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(AgentInstance.hasExited(child) ? "exited" : result);
+      };
+      const onExit = () => finish("exited");
+      const onAbort = () => finish("aborted");
+      child.once("exit", onExit);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const timer = setTimeout(() => finish("timeout"), timeoutMs);
+      timer.unref?.();
+      // The process may have exited between the initial check and listener setup.
+      if (AgentInstance.hasExited(child)) finish("exited");
     });
   }
 }

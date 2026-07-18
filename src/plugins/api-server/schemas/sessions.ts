@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { normalizeSessionName } from '../../../core/sessions/session-naming.js';
 
 // Zod schemas for session API requests. Security-relevant size limits are documented inline.
 
@@ -63,12 +64,40 @@ export const PermissionResponseBodySchema = z.object({
   feedback: z.string().max(100_000).optional(),
 });
 
+const ElicitationContentValueSchema = z.union([
+  z.string().max(32_000),
+  z.number().finite(),
+  z.boolean(),
+  z.array(z.string().max(32_000)).max(100),
+]);
+
+export const ElicitationResponseBodySchema = z.discriminatedUnion('action', [
+  z.object({
+    action: z.literal('accept'),
+    content: z.record(z.string().min(1).max(200), ElicitationContentValueSchema).refine(
+      (content) => Object.keys(content).length <= 20,
+      'content exceeds 20 fields',
+    ),
+  }).strict(),
+  z.object({ action: z.literal('decline') }).strict(),
+  z.object({ action: z.literal('cancel') }).strict(),
+]);
+
+export const ElicitationParamsSchema = z.object({
+  sessionId: z.string().min(1).max(200),
+  requestId: z.string().min(1).max(200),
+});
+
 export const DangerousModeBodySchema = z.object({
   enabled: z.boolean(),
 });
 
 export const UpdateSessionBodySchema = z.object({
-  name: z.string().min(1).max(200).optional(),
+  name: z.string().min(1).max(200)
+    .refine((name) => normalizeSessionName(name).length > 0, {
+      message: 'Session name must contain visible text',
+    })
+    .optional(),
   agentName: z.string().min(1).max(200).optional(),
   voiceMode: z.enum(['off', 'next', 'on']).optional(),
   dangerousMode: z.boolean().optional(),

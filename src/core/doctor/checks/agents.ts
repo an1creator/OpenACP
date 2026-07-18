@@ -8,6 +8,8 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { DoctorCheck, CheckResult } from "../types.js";
+import { AgentStore } from "../../agents/agent-store.js";
+import { inspectAgentTransactions, recoverAgentTransactions } from "../../agents/agent-installer.js";
 
 /** Checks PATH first, then walks up the directory tree looking for node_modules/.bin. */
 function commandExists(cmd: string): boolean {
@@ -33,6 +35,32 @@ export const agentsCheck: DoctorCheck = {
   order: 2,
   async run(ctx) {
     const results: CheckResult[] = [];
+    const agentsDir = path.join(ctx.dataDir, "agents");
+    const transactionState = inspectAgentTransactions(agentsDir);
+    if (transactionState.pending > 0) {
+      results.push({
+        status: "fail",
+        message: `${transactionState.pending} interrupted agent transaction(s) require recovery`,
+        fixable: true,
+        fixRisk: "safe",
+        async fix() {
+          const recovery = recoverAgentTransactions(
+            new AgentStore(path.join(ctx.dataDir, "agents.json")),
+            agentsDir,
+          );
+          return {
+            success: recovery.errors.length === 0 && recovery.pending === 0,
+            message: recovery.errors[0]
+              ?? (recovery.pending > 0
+                ? `${recovery.pending} transaction cleanup operation(s) remain pending`
+                : `recovered ${recovery.recovered} agent transaction(s)`),
+          };
+        },
+      });
+      // Command paths may be temporarily detached until the safe fix runs.
+      // Avoid reporting derivative missing-command failures from stale state.
+      return results;
+    }
     if (!ctx.config) {
       results.push({ status: "fail", message: "Cannot check agents — config not loaded" });
       return results;

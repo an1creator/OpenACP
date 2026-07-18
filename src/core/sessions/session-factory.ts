@@ -2,6 +2,7 @@ import type { AgentManager } from "../agents/agent-manager.js";
 import {
   SessionRegistrationSupersededError,
   type SessionManager,
+  type SessionAdmissionLease,
   type SessionRegistrationLease,
 } from "./session-manager.js";
 import type { SpeechService } from "../../plugins/speech/exports.js";
@@ -16,10 +17,11 @@ import type { ConfigManager } from "../config/config.js";
 import type { AgentCatalog } from "../agents/agent-catalog.js";
 import type { ContextManager } from "../../plugins/context/context-manager.js";
 import type { ContextQuery, ContextOptions, ContextResult } from "../../plugins/context/context-provider.js";
-import { Session } from "./session.js";
+import { markHeadlessDelivery, Session } from "./session.js";
 import { createChildLogger } from "../utils/log.js";
 import { Hook, BusEvent, SessionEv } from "../events.js";
 import { redactNetworkSecrets } from "../security/network-redaction.js";
+import type { SessionNameSource } from "./session-naming.js";
 
 const log = createChildLogger({ module: "session-factory" });
 
@@ -37,6 +39,7 @@ export interface SessionCreateParams {
   resumeAgentSessionId?: string;
   existingSessionId?: string;
   initialName?: string;
+  initialNameSource?: SessionNameSource;
   isAssistant?: boolean;
   /** User ID from identity system — who is creating this session. */
   userId?: string;
@@ -205,32 +208,51 @@ export class SessionFactory {
     record: SessionRecord,
     lease?: SessionRegistrationLease,
   ): Promise<void> {
+    const failedOptionIds: string[] = [];
+    const agentGeneration = session.agentGeneration;
     for (const persisted of record.acpState?.configOptions ?? []) {
       const live = session.getConfigOption(persisted.id);
       if (!live || live.currentValue === persisted.currentValue) continue;
+      if (live.type !== persisted.type) {
+        failedOptionIds.push(persisted.id);
+        continue;
+      }
       try {
-        await this.awaitRegistrationBoundary(
+        const outcome = await this.awaitRegistrationBoundary(
           session.setConfigOption(persisted.id, toSetConfigOptionValue(persisted)),
           lease,
         );
+        if (
+          !outcome.acknowledged
+          || session.agentGeneration !== agentGeneration
+          || session.isTerminating
+          || session.getConfigOption(persisted.id)?.type !== persisted.type
+          || session.getConfigOption(persisted.id)?.currentValue !== persisted.currentValue
+        ) {
+          failedOptionIds.push(persisted.id);
+        }
       } catch (error) {
         if (error instanceof SessionRegistrationSupersededError) throw error;
-        // Keep resume available when an older agent cannot restore one option.
+        failedOptionIds.push(persisted.id);
       }
-      if (!this.isRegisteredSessionLive(session)) {
+      if (
+        !this.isRegisteredSessionLive(session)
+        || session.agentGeneration !== agentGeneration
+        || session.isTerminating
+      ) {
         throw new SessionRegistrationSupersededError(session.id);
       }
     }
 
-    // A best-effort ACP restore may be rejected or blocked. Preserve the user's
-    // durable preference in the record rather than replacing it with a fresh
-    // agent default during the initial resume commit.
-    if (record.acpState?.configOptions) {
-      const persistedById = new Map(record.acpState.configOptions.map((option) => [option.id, option]));
-      session.setInitialConfigOptions(session.configOptions.map((option) => {
-        const persisted = persistedById.get(option.id);
-        return persisted ? { ...option, currentValue: persisted.currentValue } as ConfigOption : option;
-      }));
+    if (failedOptionIds.length > 0) {
+      log.warn(
+        {
+          sessionId: session.id,
+          optionIds: failedOptionIds.slice(0, 5),
+          failedCount: failedOptionIds.length,
+        },
+        "Some persisted agent settings were rejected; live agent values remain effective",
+      );
     }
   }
 
@@ -241,24 +263,30 @@ export class SessionFactory {
   async create(
     params: SessionCreateParams,
     registrationLease?: SessionRegistrationLease,
+    admissionLease?: SessionAdmissionLease,
   ): Promise<Session> {
     const ownsLease = registrationLease === undefined && params.existingSessionId !== undefined;
     const lease = registrationLease ?? (params.existingSessionId
       ? this.sessionManager.beginSessionRegistration?.(params.existingSessionId)
       : undefined);
+    const ownsAdmission = admissionLease === undefined;
+    let admission = admissionLease;
     try {
-      return await this.createWithRegistration(params, lease);
+      admission ??= await this.sessionManager.reserveSessionAdmission();
+      return await this.createWithRegistration(params, lease, admission);
     } finally {
       // A caller-provided lease belongs to the wider create pipeline and remains
       // current through its initial durable write. Direct factory callers own and
       // release the lease they acquire here.
       if (ownsLease && lease) this.sessionManager.releaseSessionRegistration?.(lease);
+      if (ownsAdmission && admission) this.sessionManager.releaseSessionAdmission(admission);
     }
   }
 
   private async createWithRegistration(
     params: SessionCreateParams,
     lease?: SessionRegistrationLease,
+    admissionLease?: SessionAdmissionLease,
   ): Promise<Session> {
     // Hook: session:beforeCreate — modifiable, can block
     let createParams = params;
@@ -400,7 +428,15 @@ export class SessionFactory {
     session.agentSessionId = agentInstance.sessionId;
     session.middlewareChain = this.middlewareChain;
     if (createParams.initialName) {
-      session.name = createParams.initialName;
+      session.initializeName(
+        createParams.initialName,
+        createParams.initialNameSource
+          ?? (createParams.initialName === "Adopted session"
+            ? "placeholder"
+            : createParams.existingSessionId
+              ? "persisted"
+              : "system"),
+      );
     }
 
     // 3. Propagate ACP state from agent session response
@@ -412,8 +448,8 @@ export class SessionFactory {
 
     // 4. Register in SessionManager
     try {
-      if (lease) this.sessionManager.registerSession(session, lease);
-      else this.sessionManager.registerSession(session);
+      if (lease) this.sessionManager.registerSession(session, lease, admissionLease);
+      else this.sessionManager.registerSession(session, undefined, admissionLease);
     } catch (error) {
       this.observeSessionCleanup(session);
       throw error;
@@ -475,6 +511,7 @@ export class SessionFactory {
           resumeAgentSessionId: record.agentSessionId,
           existingSessionId: record.sessionId,
           initialName: record.name,
+          initialNameSource: record.nameSource ?? "persisted",
           threadId: existingThreadId,
         });
         if (!this.isRegisteredSessionLive(session)) {
@@ -506,24 +543,6 @@ export class SessionFactory {
           }
           if (record.acpState.agentCapabilities && !session.agentCapabilities) {
             session.setAgentCapabilities(record.acpState.agentCapabilities);
-          }
-        }
-
-        // Re-apply persisted configOptions that differ from what the live agent reports.
-        // Agents spawn with default values; without this step the persisted user preference
-        // (e.g. mode=bypassPermissions) silently diverges from the agent's actual state.
-        if (record.acpState?.configOptions) {
-          for (const persisted of record.acpState.configOptions) {
-            const live = session.getConfigOption(persisted.id);
-            if (live && live.currentValue !== persisted.currentValue) {
-              try {
-                await session.setConfigOption(persisted.id, toSetConfigOptionValue(persisted));
-              } catch { /* best-effort — don't fail resume if one option sync fails */ }
-              if (!this.isRegisteredSessionLive(session)) {
-                this.observeSessionCleanup(session);
-                return null;
-              }
-            }
           }
         }
 
@@ -595,6 +614,7 @@ export class SessionFactory {
           resumeAgentSessionId: record.agentSessionId,
           existingSessionId: record.sessionId,
           initialName: record.name,
+          initialNameSource: record.nameSource ?? "persisted",
           threadId,
         });
         if (!this.isRegisteredSessionLive(session)) {
@@ -633,24 +653,6 @@ export class SessionFactory {
           }
           if (record.acpState.agentCapabilities && !session.agentCapabilities) {
             session.setAgentCapabilities(record.acpState.agentCapabilities);
-          }
-        }
-
-        // Re-apply persisted configOptions that differ from what the live agent reports.
-        // Agents spawn with default values; without this step the persisted user preference
-        // (e.g. mode=bypassPermissions) silently diverges from the agent's actual state.
-        if (record.acpState?.configOptions) {
-          for (const persisted of record.acpState.configOptions) {
-            const live = session.getConfigOption(persisted.id);
-            if (live && live.currentValue !== persisted.currentValue) {
-              try {
-                await session.setConfigOption(persisted.id, toSetConfigOptionValue(persisted));
-              } catch { /* best-effort — don't fail resume if one option sync fails */ }
-              if (!this.isRegisteredSessionLive(session)) {
-                this.observeSessionCleanup(session);
-                return null;
-              }
-            }
           }
         }
 
@@ -816,6 +818,36 @@ export class SessionFactory {
 
   /** Wire session-level side effects: usage tracking (via EventBus) and tunnel cleanup on session end. */
   wireSideEffects(session: Session, deps: SideEffectDeps): void {
+    session.on(SessionEv.ELICITATION_REQUEST, (request) => {
+      const deliveryClaim = session.claimHeadlessDelivery("elicitation:request");
+      const publicRequest = structuredClone(request) as typeof request & { owner?: unknown };
+      delete publicRequest.owner;
+      const payload = {
+        sessionId: session.id,
+        request: publicRequest,
+      };
+      try {
+        deps.eventBus.emit(
+          BusEvent.ELICITATION_REQUEST,
+          deliveryClaim ? markHeadlessDelivery(payload, deliveryClaim) : payload,
+        );
+      } finally {
+        if (deliveryClaim) session.releaseHeadlessDelivery(deliveryClaim);
+      }
+    });
+    session.on(SessionEv.ELICITATION_RESOLVED, (event) => {
+      const deliveryClaim = session.claimHeadlessDelivery("elicitation:resolved");
+      const payload = structuredClone(event);
+      try {
+        deps.eventBus.emit(
+          BusEvent.ELICITATION_RESOLVED,
+          deliveryClaim ? markHeadlessDelivery(payload, deliveryClaim) : payload,
+        );
+      } finally {
+        if (deliveryClaim) session.releaseHeadlessDelivery(deliveryClaim);
+      }
+    });
+
     // Wire usage tracking via event bus (consumed by usage plugin)
     session.on(SessionEv.AGENT_EVENT, (event: AgentEvent) => {
       if (event.type !== "usage") return;

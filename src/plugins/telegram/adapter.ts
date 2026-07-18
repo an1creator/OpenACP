@@ -1,4 +1,4 @@
-import { Bot, InputFile, InlineKeyboard } from "grammy";
+import { Bot, InputFile, InlineKeyboard, type Context } from "grammy";
 import path from "node:path";
 import { BusEvent } from "../../core/events.js";
 import type {
@@ -8,11 +8,14 @@ import type {
   NotificationMessage,
   AgentCommand,
   FileServiceInterface,
+  ElicitationRequest,
+  ElicitationResolvedEvent,
 } from "../../core/index.js";
 import { createChildLogger } from "../../core/utils/log.js";
 import type { DebugTracer } from "../../core/utils/debug-tracer.js";
 const log = createChildLogger({ module: "telegram" });
 import type { TelegramChannelConfig } from "./types.js";
+import { TelegramElicitationHandler } from "./elicitation.js";
 import type { CommandRegistry } from "../../core/command-registry.js";
 import type { CommandResponse } from "../../core/plugin/types.js";
 import {
@@ -28,6 +31,9 @@ import {
   setupVerbosityCallbacks,
   setupIntegrateCallbacks,
   buildMenuKeyboard,
+  formatAgentCommandText,
+  normalizeAgentCommandName,
+  resolveAgentCommandCallback,
   STATIC_COMMANDS,
 } from "./commands/index.js";
 import { TELEGRAM_OVERRIDES } from './commands/telegram-overrides.js'
@@ -60,6 +66,7 @@ import { OutputModeResolver } from "../../core/adapter-primitives/output-mode-re
 import type { TunnelServiceInterface } from "../../core/plugin/types.js";
 import { clearProxyDraftsForChannel } from "../../core/commands/proxy.js";
 import { redactNetworkSecrets } from "../../core/security/network-redaction.js";
+import type { SecurityGuard } from "../security/security-guard.js";
 import {
   prepareTelegramCommandBoundary,
   synchronizeTelegramCommands,
@@ -162,6 +169,7 @@ export class TelegramAdapter extends MessagingAdapter {
     reactions: true,
     fileUpload: true,
     voice: true,
+    elicitation: { form: true, secureInput: 'delete-after-capture' },
   };
 
   private core: OpenACPCore;
@@ -169,6 +177,7 @@ export class TelegramAdapter extends MessagingAdapter {
   private telegramConfig: TelegramChannelConfig;
   private saveTopicIds?: (updates: { notificationTopicId?: number; assistantTopicId?: number }) => Promise<void>;
   private permissionHandler!: PermissionHandler;
+  private elicitationHandler!: TelegramElicitationHandler;
   private notificationTopicId!: number;
   private assistantTopicId!: number;
   private sendQueue = new SendQueue({ minInterval: 3000 });
@@ -189,6 +198,11 @@ export class TelegramAdapter extends MessagingAdapter {
     expiresAt: number;
     promptMessageId: number;
     returnTarget?: TelegramReturnTarget;
+  }>();
+  private pendingAgentCommandInputs = new Map<string, {
+    command: AgentCommand;
+    expiresAt: number;
+    promptMessageId: number;
   }>();
   /** Pending skill commands queued when session.threadId was not yet set */
   private _pendingSkillCommands = new Map<string, AgentCommand[]>();
@@ -474,6 +488,12 @@ export class TelegramAdapter extends MessagingAdapter {
       (sessionId) => this.core.sessionManager.getSession(sessionId),
       (notification) => this.sendNotification(notification),
     );
+    this.elicitationHandler = new TelegramElicitationHandler(
+      this.bot,
+      this.telegramConfig.chatId,
+      (sessionId) => this.core.sessionManager.getSession(sessionId),
+    );
+    this.elicitationHandler.setupHandlers();
 
     // Generic CommandRegistry dispatch — handles any command registered via plugin system.
     // Must be early so registry commands run before legacy bot.command() handlers.
@@ -485,6 +505,38 @@ export class TelegramAdapter extends MessagingAdapter {
       const topicIdForInput = ctx.message.message_thread_id;
       const inputKey = `${ctx.chat.id}:${ctx.from?.id ?? 0}:${topicIdForInput ?? 0}`;
       const pending = this.pendingCommandInputs.get(inputKey);
+      const pendingAgentCommand = this.pendingAgentCommandInputs.get(inputKey);
+      if (
+        pendingAgentCommand
+        && ctx.message.reply_to_message?.message_id === pendingAgentCommand.promptMessageId
+      ) {
+        if (!await this.authorizeAgentCommandPrincipal(ctx)) {
+          this.pendingAgentCommandInputs.delete(inputKey);
+          return;
+        }
+        this.pendingAgentCommandInputs.delete(inputKey);
+        if (pendingAgentCommand.expiresAt <= Date.now()) {
+          await ctx.reply('This agent command input request expired. Tap the command again.').catch(() => {});
+          return;
+        }
+        const session = topicIdForInput != null
+          ? this.core.sessionManager.getSessionByThread('telegram', String(topicIdForInput))
+          : undefined;
+        if (!session) {
+          await ctx.reply('This session is no longer available.').catch(() => {});
+          return;
+        }
+        const currentCommand = session.latestCommands?.find(
+          (command) => normalizeAgentCommandName(command.name)
+            === normalizeAgentCommandName(pendingAgentCommand.command.name),
+        );
+        if (!currentCommand) {
+          await ctx.reply('This agent command is no longer available.').catch(() => {});
+          return;
+        }
+        await this.forwardAgentCommand(ctx, session.id, currentCommand, text, 'button');
+        return;
+      }
       if (!text.startsWith("/") && pending) {
         if (pending.promptMessageId !== undefined && ctx.message.reply_to_message?.message_id !== pending.promptMessageId) {
           return next();
@@ -564,7 +616,21 @@ export class TelegramAdapter extends MessagingAdapter {
       const commandName =
         atIdx === -1 ? rawCommand : rawCommand.slice(0, atIdx);
       const def = registry.get(commandName);
-      if (!def) return next(); // not in registry, fall through to existing handlers
+      if (!def) {
+        if (!await this.authorizeAgentCommandPrincipal(ctx)) return;
+        const topicId = ctx.message.message_thread_id;
+        const session = topicId != null
+          ? await this.core.getOrResumeSession('telegram', String(topicId))
+          : undefined;
+        const agentCommand = session?.latestCommands?.find(
+          (command) => normalizeAgentCommandName(command.name) === normalizeAgentCommandName(commandName),
+        );
+        if (!session || !agentCommand) return next();
+        const firstSpace = text.indexOf(' ');
+        const input = firstSpace === -1 ? undefined : text.slice(firstSpace + 1);
+        await this.forwardAgentCommand(ctx, session.id, agentCommand, input, 'typed');
+        return;
+      }
 
       // Telegram-specific override — use rich handler instead of core CommandRegistry
       const telegramOverride = TELEGRAM_OVERRIDES[commandName]
@@ -726,6 +792,55 @@ export class TelegramAdapter extends MessagingAdapter {
       } catch {
         await ctx.answerCallbackQuery({ text: "Command failed" });
       }
+    });
+
+    // Agent-advertised ACP commands use their own namespace so `/status` can be
+    // both a system command when typed and an agent action when its button is tapped.
+    this.bot.callbackQuery(/^a\//, async (ctx) => {
+      if (!await this.authorizeAgentCommandPrincipal(ctx)) {
+        await ctx.answerCallbackQuery({ text: 'Access denied.' }).catch(() => {});
+        return;
+      }
+      if (!this._topicsInitialized) {
+        await ctx.answerCallbackQuery().catch(() => {});
+        return;
+      }
+      const topicId = ctx.callbackQuery.message?.message_thread_id;
+      const session = topicId != null
+        ? this.core.sessionManager.getSessionByThread('telegram', String(topicId))
+        : undefined;
+      const command = session
+        ? resolveAgentCommandCallback(ctx.callbackQuery.data, session.latestCommands ?? [])
+        : undefined;
+      if (!session || !command) {
+        await ctx.answerCallbackQuery({ text: 'This agent command is no longer available.' }).catch(() => {});
+        return;
+      }
+
+      const input = command.input as { hint?: unknown } | null | undefined;
+      const hint = typeof input?.hint === 'string' ? input.hint.trim().slice(0, 3500) : '';
+      if (hint) {
+        const prompt = await this.bot.api.sendMessage(ctx.chat!.id, hint, {
+          message_thread_id: topicId,
+          reply_markup: { force_reply: true, selective: true },
+        });
+        const key = `${ctx.chat!.id}:${ctx.from.id}:${topicId ?? 0}`;
+        while (this.pendingAgentCommandInputs.size >= 1000) {
+          const oldest = this.pendingAgentCommandInputs.keys().next().value;
+          if (!oldest) break;
+          this.pendingAgentCommandInputs.delete(oldest);
+        }
+        this.pendingAgentCommandInputs.set(key, {
+          command,
+          expiresAt: Date.now() + 10 * 60_000,
+          promptMessageId: prompt.message_id,
+        });
+        await ctx.answerCallbackQuery({ text: 'Enter the command input.' }).catch(() => {});
+        return;
+      }
+
+      await ctx.answerCallbackQuery().catch(() => {});
+      await this.forwardAgentCommand(ctx, session.id, command, undefined, 'button');
     });
 
     // Callback query handler for queue management buttons (q: prefix).
@@ -1388,6 +1503,8 @@ export class TelegramAdapter extends MessagingAdapter {
     // Clear send queue
     this.sendQueue.clear();
     this.pendingCommandInputs.clear();
+    this.pendingAgentCommandInputs.clear();
+    this.elicitationHandler?.clear();
     this.callbackCache.clear();
     clearProxyDraftsForChannel('telegram');
 
@@ -1566,6 +1683,83 @@ export class TelegramAdapter extends MessagingAdapter {
     returnTarget?: TelegramReturnTarget,
   ): void {
     if (returnTarget) keyboard.push([returnButton(returnTarget)]);
+  }
+
+  private async forwardAgentCommand(
+    ctx: Context,
+    sessionId: string,
+    command: AgentCommand,
+    input: string | undefined,
+    source: 'typed' | 'button',
+  ): Promise<void> {
+    const threadId = ctx.message?.message_thread_id
+      ?? ctx.callbackQuery?.message?.message_thread_id;
+    const userId = ctx.from?.id;
+    if (threadId == null || userId == null) return;
+
+    const text = formatAgentCommandText(command.name, input);
+    this.getTracer(sessionId)?.log('telegram', {
+      action: 'incoming:agent-command',
+      sessionId,
+      userId: String(userId),
+      command: normalizeAgentCommandName(command.name),
+      source,
+    });
+    await this.draftManager.finalize(
+      sessionId,
+      this.core.assistantManager?.get('telegram')?.id,
+    );
+    await this.drainAndResetTracker(sessionId);
+    ctx.replyWithChatAction('typing').catch(() => {});
+    const fromName = ctx.from
+      ? [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || undefined
+      : undefined;
+    await this.core.handleMessage(
+      {
+        channelId: 'telegram',
+        threadId: String(threadId),
+        userId: String(userId),
+        text,
+      },
+      {
+        channelUser: {
+          channelId: 'telegram',
+          userId: String(userId),
+          displayName: fromName,
+          username: ctx.from?.username,
+        },
+        agentCommand: {
+          ...command,
+          name: normalizeAgentCommandName(command.name),
+          source,
+        },
+      },
+    );
+  }
+
+  /**
+   * Preflight agent-command UI actions through the same swappable security
+   * service used by core ingress. This must run before lazy session resume or
+   * rendering command metadata because either operation can have side effects.
+   */
+  private async authorizeAgentCommandPrincipal(ctx: Context): Promise<boolean> {
+    const userId = ctx.from?.id;
+    if (userId == null) return false;
+    try {
+      const guard = this.core.lifecycleManager?.serviceRegistry?.get<SecurityGuard>('security');
+      if (!guard) {
+        log.warn({ userId: String(userId) }, 'Security service unavailable for agent command');
+        return false;
+      }
+      const access = await guard.checkAccess({ userId: String(userId) });
+      if (!access.allowed) {
+        log.warn({ userId: String(userId), reason: access.reason }, 'Agent command access denied');
+      }
+      return access.allowed;
+    } catch (error) {
+      log.warn({ error, userId: String(userId) }, 'Agent command access check failed');
+      return false;
+    }
   }
 
   private setupRoutes(): void {
@@ -2172,6 +2366,16 @@ export class TelegramAdapter extends MessagingAdapter {
     );
   }
 
+  async sendElicitationRequest(sessionId: string, request: ElicitationRequest): Promise<void> {
+    const session = this.core.sessionManager.getSession(sessionId);
+    if (!session) throw new Error(`Session "${sessionId}" is not available`);
+    await this.elicitationHandler.send(session, request);
+  }
+
+  async dismissElicitationRequest(_sessionId: string, event: ElicitationResolvedEvent): Promise<void> {
+    await this.elicitationHandler.dismiss(event);
+  }
+
   /**
    * Post a notification to the Notifications topic.
    * Assistant session notifications are suppressed — the assistant topic is
@@ -2458,6 +2662,12 @@ export class TelegramAdapter extends MessagingAdapter {
    */
   async cleanupSessionState(sessionId: string): Promise<void> {
     this._pendingSkillCommands.delete(sessionId);
+    const topicId = this.core.sessionManager.getSession(sessionId)?.threadId;
+    if (topicId) {
+      for (const key of this.pendingAgentCommandInputs.keys()) {
+        if (key.endsWith(`:${topicId}`)) this.pendingAgentCommandInputs.delete(key);
+      }
+    }
     // Finalize and clean up draft state
     await this.draftManager.finalize(sessionId, this.core.assistantManager?.get('telegram')?.id);
     this.draftManager.cleanup(sessionId);

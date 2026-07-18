@@ -7,7 +7,9 @@ import { Hook } from '../../core/events.js'
 // Structural type for the core fields SecurityGuard needs, avoiding
 // a direct dependency on OpenACPCore's full interface.
 interface SecurityCoreAccess {
-  sessionManager: ConstructorParameters<typeof SecurityGuard>[1]
+  sessionManager: ConstructorParameters<typeof SecurityGuard>[1] & {
+    setSessionLimitProvider?(provider: () => number | Promise<number>): void
+  }
   lifecycleManager?: { settingsManager?: import('../../core/plugin/settings-manager.js').SettingsManager }
 }
 
@@ -117,6 +119,10 @@ function createSecurityPlugin(): OpenACPPlugin {
       }
 
       const guard = new SecurityGuard(getSecurityConfig, core.sessionManager)
+      core.sessionManager.setSessionLimitProvider?.(async () => {
+        const config = await getSecurityConfig()
+        return config.maxConcurrentSessions
+      })
 
       // Register middleware for message:incoming — block unauthorized users
       ctx.registerMiddleware(Hook.MESSAGE_INCOMING, {

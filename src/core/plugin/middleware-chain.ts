@@ -17,7 +17,8 @@ type HandlerEntry = {
  * - Each handler receives the current payload and a `next()` function.
  * - Calling `next()` passes control to the next handler in the chain.
  * - Returning `null` short-circuits: the operation is blocked and no further handlers run.
- * - If a handler throws or times out, it is skipped and the error is tracked.
+ * - If a handler throws or times out, it is skipped and the error is tracked by default.
+ *   Policy-critical callers can opt into fail-closed execution instead.
  *   After enough errors (see ErrorTracker), the plugin's middleware is auto-disabled.
  */
 export class MiddlewareChain {
@@ -52,12 +53,14 @@ export class MiddlewareChain {
    * next handler, with the core handler at the end. If no middleware is registered,
    * the core handler runs directly.
    *
-   * @returns The final payload, or `null` if any handler short-circuited.
+   * @param options onError='block' makes handler errors/timeouts fail closed.
+   * @returns The final payload, or `null` if any handler short-circuited or fail-closed.
    */
   async execute<T>(
     hook: string,
     payload: T,
     coreHandler: (p: T) => T | Promise<T>,
+    options: { onError?: 'continue' | 'block' } = {},
   ): Promise<T | null> {
     const handlers = this.chains.get(hook)
     if (!handlers || handlers.length === 0) {
@@ -70,6 +73,7 @@ export class MiddlewareChain {
     // Build the chain as a recursive series of `next()` closures.
     // cachedResult prevents double-execution if a handler calls next() more than once.
     let cachedResult: { value: T | null } | undefined = undefined
+    let chainBlocked = false
 
     const buildNext = (index: number, currentPayload: T): (() => Promise<T | null>) => {
       return async () => {
@@ -87,8 +91,14 @@ export class MiddlewareChain {
 
         const entry = sorted[index]
 
-        // Skip disabled plugins
+        // Disabled middleware remains fail-closed for policy-critical callers.
+        // Circuit breaking may isolate an unhealthy plugin, but it must never turn
+        // an enforced policy hook into an authorization bypass.
         if (this.errorTracker?.isDisabled(entry.pluginName)) {
+          if (options.onError === 'block') {
+            chainBlocked = true
+            return null
+          }
           const skipFn = buildNext(index + 1, currentPayload)
           return skipFn()
         }
@@ -133,6 +143,10 @@ export class MiddlewareChain {
           }
           // Track error for circuit-breaking
           this.errorTracker?.increment(entry.pluginName)
+          if (options.onError === 'block') {
+            chainBlocked = true
+            return null
+          }
           // Skip this handler — pass ORIGINAL payload to next
           return nextFn()
         } finally {
@@ -141,6 +155,7 @@ export class MiddlewareChain {
 
         // Handler returned null — block
         if (handlerResult === null) {
+          chainBlocked = true
           return null
         }
 
@@ -149,7 +164,8 @@ export class MiddlewareChain {
     }
 
     const start = buildNext(0, payload)
-    return start()
+    const result = await start()
+    return chainBlocked ? null : result
   }
 
   /** Remove all middleware handlers registered by a specific plugin. */

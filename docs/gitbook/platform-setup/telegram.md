@@ -188,7 +188,8 @@ Each `/new` command creates a dedicated forum topic for that coding session:
 - **Auto-naming** — after the first prompt, the topic is renamed to a short 5-word summary of the task (e.g., `Add login form to app`).
 - **Prompt queue** — send multiple messages while the agent is processing; they are queued and processed in order.
 - **Permission buttons** — when the agent needs approval to run a command or modify a file, inline **Allow / Always Allow / Reject** buttons appear in the topic.
-- **Skill commands** — the agent publishes available skills as inline buttons, pinned at the top of the topic.
+- **Structured input** — ACP form requests render as buttons or ForceReply prompts. Replies are bound to the exact prompt, session, field step, and initiating user, so concurrent forms in one topic remain separate and duplicate button deliveries are harmless. If Telegram cannot send or update a form step, OpenACP cancels only that request and discards partial answers.
+- **Agent commands** — the agent publishes available ACP commands as inline buttons pinned at the top of the topic. Long lists are split across a managed message set; OpenACP replaces the complete set before removing the previous one and resumes interrupted cleanup after restart. Button actions are authorized before the session is resumed and routed to the current agent with a leading `/`. If an action requests input, reply to its prompt; paths and other values beginning with `/` are accepted in that reply. Unrelated typed OpenACP commands such as `/status` keep their system meaning even if an agent advertises the same name.
 - **Viewer links** — if the tunnel feature is enabled, tool calls include clickable links to an in-browser file or diff viewer.
 
 When the session ends, the topic stays open for reference. Use `/cancel` to cancel a running session.

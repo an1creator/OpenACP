@@ -2,6 +2,8 @@
 
 OpenACP responds to commands sent in supported chat platforms. This page covers the built-in Telegram and Discord command surfaces; external adapters can expose a smaller set.
 
+Agents may also advertise their own ACP commands at runtime. Telegram displays these as pinned agent-action buttons and routes a tap directly to the current agent with exactly one leading `/`. These actions use a separate namespace from built-in commands, so typing `/status` still invokes OpenACP even when the current agent advertises a command named `status`.
+
 ## Platform comparison
 
 | Command | Telegram | Discord | Notes |

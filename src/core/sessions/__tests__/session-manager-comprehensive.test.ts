@@ -221,6 +221,39 @@ describe("SessionManager — Comprehensive Tests", () => {
       expect(store.save).not.toHaveBeenCalled();
     });
 
+    it("skips a config patch whose live revision has already been superseded", async () => {
+      const store = createMockStore();
+      const mgr = new SessionManager(store);
+      const session = createSession({ id: "config-revision" });
+      mgr.registerSession(session);
+      await store.save({
+        sessionId: session.id,
+        agentSessionId: "a1",
+        agentName: "claude",
+        workingDir: "/w",
+        channelId: "telegram",
+        status: "active",
+        createdAt: "2024-01-01",
+        lastActiveAt: "2024-01-01",
+        platform: {},
+      });
+      vi.mocked(store.save).mockClear();
+      session.setInitialConfigOptions([{ id: "mode", name: "Mode", type: "select", currentValue: "architect", options: [] }]);
+      const staleRevision = session.configRevision;
+      session.setInitialConfigOptions([{ id: "mode", name: "Mode", type: "select", currentValue: "code", options: [] }]);
+
+      await mgr.patchRecord(session.id, {
+        acpState: { configOptions: [{ id: "mode", name: "Mode", type: "select", currentValue: "architect", options: [] }] },
+      }, { expectedSession: session, expectedConfigRevision: staleRevision });
+      expect(store.save).not.toHaveBeenCalled();
+
+      await mgr.patchRecord(session.id, {
+        acpState: session.toAcpStateSnapshot(),
+      }, { expectedSession: session, expectedConfigRevision: session.configRevision });
+      expect(store.save).toHaveBeenCalledOnce();
+      expect(store.get(session.id)?.acpState?.configOptions?.[0]).toMatchObject({ currentValue: "code" });
+    });
+
     it("is a no-op when store is null", async () => {
       const mgr = new SessionManager(null);
       // Should not throw

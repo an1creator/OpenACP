@@ -1,6 +1,7 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from 'fastify';
 import { ZodError } from 'zod';
 import { ConfigValidationError } from '../../../core/config/config-registry.js';
+import { SessionLimitError } from '../../../core/sessions/session-manager.js';
 
 /** Standard error envelope returned by all API error responses. */
 export interface ApiErrorResponse {
@@ -152,6 +153,17 @@ export function globalErrorHandler(
   }
 
   if (error instanceof RateLimitError) {
+    reply.status(429).send({
+      error: {
+        code: error.code,
+        message: error.message,
+        statusCode: 429,
+      },
+    });
+    return;
+  }
+
+  if (error instanceof SessionLimitError) {
     reply.status(429).send({
       error: {
         code: error.code,

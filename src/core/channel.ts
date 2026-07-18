@@ -1,4 +1,4 @@
-import type { OutgoingMessage, PermissionRequest, NotificationMessage, AgentCommand } from './types.js'
+import type { OutgoingMessage, PermissionRequest, NotificationMessage, AgentCommand, ElicitationRequest, ElicitationResolvedEvent } from './types.js'
 
 /**
  * Configuration for an adapter channel (Telegram, Slack, etc.).
@@ -20,6 +20,11 @@ export interface AdapterCapabilities {
   reactions: boolean
   fileUpload: boolean
   voice: boolean
+  /** Optional ACP form input rendering support. */
+  elicitation?: {
+    form?: boolean
+    secureInput?: 'none' | 'private' | 'delete-after-capture'
+  }
 }
 
 /**
@@ -43,6 +48,8 @@ export interface IChannelAdapter {
   // --- Outgoing: core → platform ---
   sendMessage(sessionId: string, content: OutgoingMessage): Promise<void>
   sendPermissionRequest(sessionId: string, request: PermissionRequest): Promise<void>
+  sendElicitationRequest?(sessionId: string, request: ElicitationRequest): Promise<void>
+  dismissElicitationRequest?(sessionId: string, event: ElicitationResolvedEvent): Promise<void>
   sendNotification(notification: NotificationMessage): Promise<void>
 
   // --- Session lifecycle on platform side ---

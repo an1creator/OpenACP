@@ -56,14 +56,18 @@ export async function sseRoutes(app: FastifyInstance, deps: SSERouteDeps): Promi
       }
 
       // Determine tokenId from auth context
-      const tokenId = (request as any).auth?.tokenId ?? 'anonymous';
+      const auth = request.auth;
+      const tokenId = auth.type === 'jwt' ? auth.tokenId ?? 'anonymous-jwt' : 'master-secret';
 
       // Check connection limits before hijacking the response, so we can still send HTTP errors
       let connection;
       try {
         // Temporarily probe limits by attempting to add — we need to check before hijack
         // Perform limit checks: add will throw if limits are exceeded
-        connection = deps.connectionManager.addConnection(sessionId, tokenId, reply.raw);
+        connection = deps.connectionManager.addConnection(sessionId, tokenId, reply.raw, {
+          authType: auth.type,
+          userId: auth.type === 'jwt' ? auth.userId : undefined,
+        });
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : 'Connection limit reached';
         return reply.status(429).send({ error: message });
@@ -118,7 +122,7 @@ export async function sseRoutes(app: FastifyInstance, deps: SSERouteDeps): Promi
         throw new NotFoundError('SESSION_NOT_FOUND', `Session "${sessionId}" not found`);
       }
 
-      if (session.status === 'cancelled' || session.status === 'finished' || session.status === 'error') {
+      if (session.status === 'cancelled' || session.status === 'finished') {
         return reply.status(400).send({ error: `Session is ${session.status}` });
       }
 

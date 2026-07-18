@@ -50,6 +50,7 @@ import {
   cmdProxy,
 } from './cli/commands/index.js'
 import { resolveInstanceRoot } from './core/instance/instance-context.js'
+import { normalizeLeadingJsonFlag } from './cli/argv.js'
 
 /**
  * Global instance-targeting flags accepted by every CLI command.
@@ -111,7 +112,7 @@ export function getInstanceFlags(): InstanceFlags {
 const allArgs = process.argv.slice(2)
 const { flags, remaining } = extractInstanceFlags(allArgs)
 instanceFlags = flags
-const [command, ...args] = remaining
+const [command, ...args] = normalizeLeadingJsonFlag(remaining)
 
 // Resolve instance root from flags
 resolvedInstanceRoot = resolveInstanceRoot({
@@ -122,7 +123,7 @@ resolvedInstanceRoot = resolveInstanceRoot({
 
 // Auto-migrate global instance on first run after upgrade
 const { migrateGlobalInstance } = await import('./core/instance/migration.js')
-const migrated = await migrateGlobalInstance()
+const migrated = await migrateGlobalInstance({ quiet: args.includes('--json') })
 if (migrated && !resolvedInstanceRoot) {
   resolvedInstanceRoot = migrated
 }

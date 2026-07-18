@@ -1,10 +1,10 @@
 import type { AgentManager } from "../agents/agent-manager.js";
-import { Session, SessionTerminatingError } from "./session.js";
+import { Session, SessionTerminatingError, type PromptAdmission } from "./session.js";
 import type { SessionStore } from "./session-store.js";
 import type { EventBus } from "../event-bus.js";
 import type { MiddlewareChain } from "../plugin/middleware-chain.js";
 import type { SessionStatus, ConfigOption, AgentCapabilities } from "../types.js";
-import { Hook, BusEvent } from "../events.js";
+import { Hook, BusEvent, SessionEv } from "../events.js";
 import { createChildLogger } from "../utils/log.js";
 import { redactNetworkSecrets } from "../security/network-redaction.js";
 
@@ -44,6 +44,30 @@ export class SessionRegistrationSupersededError extends Error {
     super(`Session ${sessionId} registration was superseded: ${reason}`);
     this.name = 'SessionRegistrationSupersededError';
   }
+}
+
+export class SessionLimitError extends Error {
+  readonly code = 'SESSION_LIMIT';
+
+  constructor(readonly limit: number) {
+    super(`Maximum concurrent sessions reached (${limit})`);
+    this.name = 'SessionLimitError';
+  }
+}
+
+/** One-use capacity lease reserved before ACP spawn and retained by its live session. */
+export interface SessionAdmissionLease {
+  readonly token: symbol;
+  readonly released: boolean;
+  readonly committed: boolean;
+}
+
+interface ManagedSessionAdmissionLease extends SessionAdmissionLease {
+  released: boolean;
+  committed: boolean;
+  owner?: Session;
+  promptClaims: number;
+  promptCommitted: boolean;
 }
 
 /** A bounded, one-use lease for registering a resumed existing session. */
@@ -159,6 +183,11 @@ export class SessionManager {
   private nextRegistrationGeneration = 1;
   private pendingRegistrations = new Map<string, Set<ManagedSessionRegistrationLease>>();
   private ownedRegistrationLeases = new WeakSet<object>();
+  private sessionLimitProvider: () => number | Promise<number> = () => 20;
+  private admissionReservations = new Set<ManagedSessionAdmissionLease>();
+  private sessionAdmissionOwners = new Map<Session, ManagedSessionAdmissionLease>();
+  private admissionLifecycleWired = new WeakSet<Session>();
+  private admissionTail: Promise<void> = Promise.resolve();
   /** Transient only; completed cancellation is enforced by the terminal store record. */
   private cancellingSessionIds = new Set<string>();
   /** Serialize durable mutations per session so terminal cancellation always wins. */
@@ -238,6 +267,7 @@ export class SessionManager {
     const existing = this.sessionTeardownOps.get(session.id);
     if (existing?.session === session && existing.state === 'pending') {
       if (removeLiveIdentity && this.sessions.get(session.id) === session) {
+        this.releaseOwnedSessionAdmission(session);
         this.cleanupOwnedResources(session.id);
         this.sessions.delete(session.id);
       }
@@ -250,6 +280,7 @@ export class SessionManager {
     }
 
     session.beginTermination();
+    this.releaseOwnedSessionAdmission(session);
     this.cleanupOwnedResources(session.id);
     if (removeLiveIdentity && this.sessions.get(session.id) === session) this.sessions.delete(session.id);
 
@@ -322,6 +353,7 @@ export class SessionManager {
     }
     for (const session of this.sessions.values()) {
       session.beginTermination();
+      this.releaseOwnedSessionAdmission(session);
       this.cleanupOwnedResources(session.id);
     }
   }
@@ -356,6 +388,169 @@ export class SessionManager {
     this.store = store;
   }
 
+  /** Configure the hot-reloadable global session cap used by every creation surface. */
+  setSessionLimitProvider(provider: () => number | Promise<number>): void {
+    this.sessionLimitProvider = provider;
+  }
+
+  private async withAdmissionLock<T>(operation: () => Promise<T>): Promise<T> {
+    let releaseLock!: () => void;
+    const previous = this.admissionTail;
+    this.admissionTail = new Promise<void>((resolve) => { releaseLock = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      releaseLock();
+    }
+  }
+
+  private async configuredSessionLimit(): Promise<number> {
+    const configured = await this.sessionLimitProvider();
+    return Number.isFinite(configured) ? Math.max(0, Math.floor(configured)) : 20;
+  }
+
+  private usedSessionCapacity(): number {
+    const unownedLive = [...this.sessions.values()].filter(
+      (session) => (
+        session.status === 'active'
+        || session.status === 'initializing'
+      ) && !this.sessionAdmissionOwners.has(session),
+    ).length;
+    return this.sessionAdmissionOwners.size + this.admissionReservations.size + unownedLive;
+  }
+
+  private newAdmissionLease(): ManagedSessionAdmissionLease {
+    return {
+      token: Symbol('session-admission'),
+      released: false,
+      committed: false,
+      promptClaims: 0,
+      promptCommitted: false,
+    };
+  }
+
+  private releaseOwnedSessionAdmission(session: Session): void {
+    const admission = this.sessionAdmissionOwners.get(session);
+    if (!admission) return;
+    this.sessionAdmissionOwners.delete(session);
+    admission.released = true;
+    admission.owner = undefined;
+    admission.promptClaims = 0;
+  }
+
+  private wireSessionAdmissionLifecycle(session: Session): void {
+    if (this.admissionLifecycleWired.has(session)) return;
+    this.admissionLifecycleWired.add(session);
+    // Some embedders provide a Session-compatible test/double object. The
+    // runtime Session always exposes the guard; keep registration compatible
+    // with older structural consumers that do not submit prompts here.
+    if (typeof session.setPromptAdmissionGuard === 'function') {
+      session.setPromptAdmissionGuard(() => this.ensureSessionPromptAdmission(session));
+    }
+    session.on(SessionEv.STATUS_CHANGE, (_from, to) => {
+      if (to === 'error' || to === 'cancelled' || to === 'finished') {
+        this.releaseOwnedSessionAdmission(session);
+      }
+    });
+  }
+
+  private commitSessionAdmission(
+    session: Session,
+    admission: ManagedSessionAdmissionLease,
+  ): void {
+    this.admissionReservations.delete(admission);
+    if (this.sessionAdmissionOwners.has(session)) {
+      admission.released = true;
+      return;
+    }
+    admission.committed = true;
+    if (session.status !== 'active' && session.status !== 'initializing') {
+      admission.released = true;
+      return;
+    }
+    admission.owner = session;
+    this.sessionAdmissionOwners.set(session, admission);
+  }
+
+  private async ensureSessionPromptAdmission(session: Session): Promise<PromptAdmission> {
+    return this.withAdmissionLock(async () => {
+      if (this._closing || !this.isCurrentLiveSession(session)) {
+        throw new SessionTerminatingError(session.id);
+      }
+      const existing = this.sessionAdmissionOwners.get(session);
+      if (session.status === 'active' || session.status === 'initializing') {
+        return { commit() {}, rollback() {} };
+      }
+      if (session.status !== 'error') {
+        throw new SessionTerminatingError(session.id);
+      }
+
+      let admission = existing;
+      if (!admission) {
+        const limit = await this.configuredSessionLimit();
+        if (this._closing || !this.isCurrentLiveSession(session)) {
+          throw new SessionTerminatingError(session.id);
+        }
+        if (this.usedSessionCapacity() >= limit) throw new SessionLimitError(limit);
+        admission = this.newAdmissionLease();
+        admission.committed = true;
+        admission.owner = session;
+        this.sessionAdmissionOwners.set(session, admission);
+      }
+
+      admission.promptClaims += 1;
+      let settled = false;
+      return {
+        commit: () => {
+          if (settled) return;
+          settled = true;
+          admission!.promptClaims = Math.max(0, admission!.promptClaims - 1);
+          admission!.promptCommitted = true;
+        },
+        rollback: () => {
+          if (settled) return;
+          settled = true;
+          admission!.promptClaims = Math.max(0, admission!.promptClaims - 1);
+          if (
+            admission!.promptClaims === 0
+            && !admission!.promptCommitted
+            && session.status === 'error'
+            && this.sessionAdmissionOwners.get(session) === admission
+          ) {
+            this.releaseOwnedSessionAdmission(session);
+          }
+        },
+      };
+    });
+  }
+
+  /**
+   * Atomically reserve one live-session slot before spawning an ACP process.
+   * Reservations count alongside active/initializing sessions, closing the
+   * concurrent-create and concurrent-resume check-then-act race.
+   */
+  async reserveSessionAdmission(): Promise<SessionAdmissionLease> {
+    if (this._closing) throw new Error('Session manager is shutting down');
+    return this.withAdmissionLock(async () => {
+      if (this._closing) throw new Error('Session manager is shutting down');
+      const limit = await this.configuredSessionLimit();
+      if (this._closing) throw new Error('Session manager is shutting down');
+      if (this.usedSessionCapacity() >= limit) throw new SessionLimitError(limit);
+      const lease = this.newAdmissionLease();
+      this.admissionReservations.add(lease);
+      return lease;
+    });
+  }
+
+  /** Release a failed or aborted reservation. Committed leases are released by lifecycle transitions. */
+  releaseSessionAdmission(lease: SessionAdmissionLease): void {
+    const managed = lease as ManagedSessionAdmissionLease;
+    if (managed.released || managed.committed) return;
+    managed.released = true;
+    this.admissionReservations.delete(managed);
+  }
+
   /** Create a new session by spawning an agent and persisting the initial record. */
   async createSession(
     channelId: string,
@@ -364,39 +559,44 @@ export class SessionManager {
     agentManager: AgentManager,
     options?: { autoApprovedCommands?: string[] },
   ): Promise<Session> {
-    const agentInstance = await agentManager.spawn(agentName, workingDirectory);
-    const session = new Session({
-      channelId,
-      agentName,
-      workingDirectory,
-      agentInstance,
-      autoApprovedCommands: options?.autoApprovedCommands ?? [],
-    });
-    session.agentSessionId = session.agentInstance.sessionId;
-    this.registerSession(session);
-
+    const admission = await this.reserveSessionAdmission();
+    let session: Session | undefined;
     try {
+      const agentInstance = await agentManager.spawn(agentName, workingDirectory);
+      session = new Session({
+        channelId,
+        agentName,
+        workingDirectory,
+        agentInstance,
+        autoApprovedCommands: options?.autoApprovedCommands ?? [],
+      });
+      session.agentSessionId = session.agentInstance.sessionId;
+      this.registerSession(session, undefined, admission);
+      const registeredSession = session;
+
       if (this.store) {
-        await this.withRecordMutation(session.id, () => this.store!.save({
-          sessionId: session.id,
-          agentSessionId: session.agentInstance.sessionId,
-          agentName: session.agentName,
-          workingDir: session.workingDirectory,
+        await this.withRecordMutation(registeredSession.id, () => this.store!.save({
+          sessionId: registeredSession.id,
+          agentSessionId: registeredSession.agentInstance.sessionId,
+          agentName: registeredSession.agentName,
+          workingDir: registeredSession.workingDirectory,
           channelId,
-          status: session.status,
-          createdAt: session.createdAt.toISOString(),
+          status: registeredSession.status,
+          createdAt: registeredSession.createdAt.toISOString(),
           lastActiveAt: new Date().toISOString(),
-          name: session.name,
+          name: registeredSession.name,
+          nameSource: registeredSession.nameSource,
           clientOverrides: {},
           platform: {},
         }));
       }
+      return registeredSession;
     } catch (error) {
-      await this.discardSession(session);
+      if (session) await this.discardSession(session);
       throw error;
+    } finally {
+      this.releaseSessionAdmission(admission);
     }
-
-    return session;
   }
 
   /** Look up a live session by its OpenACP session ID. */
@@ -530,13 +730,29 @@ export class SessionManager {
   }
 
   /** Register a session that was created externally (e.g. restored from store on startup). */
-  registerSession(session: Session, lease?: SessionRegistrationLease): void {
+  registerSession(
+    session: Session,
+    lease?: SessionRegistrationLease,
+    admissionLease?: SessionAdmissionLease,
+  ): void {
     if (this._closing) {
       this.rejectRegistration(session, 'session manager is shutting down');
     }
+    const admission = admissionLease as ManagedSessionAdmissionLease | undefined;
+    if (admission && (
+      admission.released
+      || admission.committed
+      || !this.admissionReservations.has(admission)
+    )) {
+      this.rejectRegistration(session, 'session admission lease is no longer current');
+    }
     const existing = this.sessions.get(session.id);
     if (existing) {
-      if (existing === session) return;
+      if (existing === session) {
+        this.wireSessionAdmissionLifecycle(session);
+        if (admission) this.commitSessionAdmission(session, admission);
+        return;
+      }
       this.rejectRegistration(session, 'session is already live');
     }
     if (!lease && (this.pendingRegistrations.get(session.id)?.size ?? 0) > 0) {
@@ -559,6 +775,8 @@ export class SessionManager {
     }
     this.terminalCancellationStatuses.delete(session.id);
     this.sessions.set(session.id, session);
+    this.wireSessionAdmissionLifecycle(session);
+    if (admission) this.commitSessionAdmission(session, admission);
   }
 
   /**
@@ -568,6 +786,7 @@ export class SessionManager {
   async discardSession(session: Session): Promise<void> {
     if (this.sessions.get(session.id) !== session) return;
     session.beginTermination();
+    this.releaseOwnedSessionAdmission(session);
     this.cleanupOwnedResources(session.id);
     this.sessions.delete(session.id);
     const cleanup = await waitForSessionCleanup(session.destroy());
@@ -601,6 +820,8 @@ export class SessionManager {
     options?: {
       immediate?: boolean;
       expectedSession?: Session;
+      /** Skip a stale config snapshot after a newer in-memory revision wins. */
+      expectedConfigRevision?: number;
       /**
        * Authorizes one initial finished -> initializing transition for the exact
        * live session registered under this still-current lifecycle lease.
@@ -622,6 +843,10 @@ export class SessionManager {
         }
         return;
       }
+      if (
+        options?.expectedConfigRevision !== undefined
+        && options.expectedSession?.configRevision !== options.expectedConfigRevision
+      ) return;
       const record = this.store!.get(sessionId);
       if (record) {
         let merged: import('../types.js').SessionRecord;

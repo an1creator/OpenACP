@@ -27,7 +27,10 @@ The CLI update command checks and installs `@n1creator/openacp-cli`. When the
 daemon is managed by systemd, OpenACP exits with its restart status and lets
 systemd invoke the configured `ExecStart` wrapper again. This ensures wrapper
 environment variables and the newly installed package path are used and avoids
-creating a competing detached daemon.
+creating a competing detached daemon. Retained ACP subprocesses from failed
+initialization share one four-second cleanup budget during shutdown; an
+unconfirmed child is force-signalled and detached so it cannot serialize or
+indefinitely block the supervised restart.
 
 Manual `openacp restart` follows the same ownership rule. Verify after update:
 
@@ -102,11 +105,13 @@ In addition, a one-time **global instance migration** runs at CLI startup. If a 
 
 Migrations are idempotent: running them multiple times has no effect.
 
-Installed npx and uvx agent definitions are also reconciled with the current ACP
-Registry. If an adapter package moves while retaining the same registry ID,
-OpenACP updates the stored command and arguments automatically while preserving
-user-provided environment overrides. Binary adapters still require an explicit
-install because they must be downloaded for the current platform.
+Installed npx and uvx agent definitions are reconciled with the current ACP
+Registry only within the same runner distribution. Their stored command uses the
+exact reviewed package version, and registry environment defaults remain below
+user-provided environment overrides. Binary updates and changes between
+distribution types are reported as available updates but keep the installed
+version and command until an explicit agent installation completes and verifies
+the replacement runtime.
 
 ## Post-Upgrade Checks
 

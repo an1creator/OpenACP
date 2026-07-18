@@ -69,10 +69,13 @@ Platform-specific setup is in the maintained [Telegram](https://github.com/an1cr
 ### Agents and sessions
 
 - Run modern Codex and Cursor ACP processes alongside Claude Code, Gemini CLI, and other ACP-compatible agents.
+- Launch npx and uvx adapters from the exact reviewed registry version; binary downloads support registry zip, tar, and raw-executable targets, verify published SHA-256 digests, and replace the installed runtime transactionally. If removal of the replaced runtime is temporarily blocked, installation still reports success with a cleanup-pending warning and retries only a safely marked artifact; otherwise it gives a manual-cleanup warning.
 - Read model, mode, and reasoning choices from each agent at runtime instead of maintaining a hard-coded model list.
 - Keep one persistent session per topic, thread, or API session; resume it after process restarts.
 - Switch agents with `/switch`, transfer work between terminal and chat with `/handoff`, and cancel safely with `/cancel`.
 - Review permission requests through connector controls or configure narrowly scoped approval behavior.
+- Answer ACP form requests in Telegram or through authenticated REST/SSE clients; values are validated, returned only to the requesting agent, and never written to session history.
+- Use agent-advertised commands from connector action buttons; system slash commands keep precedence when names overlap.
 
 ### Connectors and automation
 
@@ -83,7 +86,7 @@ Platform-specific setup is in the maintained [Telegram](https://github.com/an1cr
 | Slack | Channels and threads | Socket Mode, commands, files, streaming |
 | REST + SSE | API session IDs | Automation, attachments, live event streams |
 
-The core session pipeline is connector-neutral. An external adapter gets the same session, attachment, speech, permission, and agent-routing behavior when it implements the standard adapter contract.
+The core session pipeline is connector-neutral. An external adapter gets the same session, attachment, speech, permission, structured-input, and agent-routing behavior when it implements the standard adapter contract. Adapters without a form renderer receive a visible REST fallback for non-sensitive requests.
 
 ### Native speech-to-text
 
@@ -150,9 +153,10 @@ OpenACP uses ACP-compatible agent definitions and the public [ACP agent registry
 ```bash
 openacp agents
 openacp agents install <name>
+openacp agents refresh
 ```
 
-Agent CLIs may require their own installation, account, or provider credentials.
+Agent lists report whether their catalog came from the live registry, cache, or packaged snapshot. An explicit refresh exits non-zero if the configured registry route cannot be reached. Agent CLIs may require their own installation, account, or provider credentials.
 
 ## CLI Reference
 

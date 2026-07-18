@@ -17,6 +17,7 @@ export async function handleAgents(ctx: Context, core: OpenACPCore, page = 0): P
 
   const installed = items.filter((i) => i.installed);
   const available = items.filter((i) => !i.installed);
+  const catalogStatus = catalog.getRegistryStatus();
 
   let text = "<b>🤖 Agents</b>\n\n";
 
@@ -25,6 +26,10 @@ export async function handleAgents(ctx: Context, core: OpenACPCore, page = 0): P
     text += "<b>Installed:</b>\n";
     for (const item of installed) {
       text += `✅ <b>${escapeHtml(item.name)}</b>`;
+      text += ` <code>v${escapeHtml(item.version)}</code>`;
+      if (item.updateRequired) {
+        text += ` → <b>v${escapeHtml(item.availableVersion ?? "available")}</b> ⚠️`;
+      }
       if (item.description) {
         text += ` — <i>${escapeHtml(truncate(item.description, 50))}</i>`;
       }
@@ -85,9 +90,11 @@ export async function handleAgents(ctx: Context, core: OpenACPCore, page = 0): P
       text += "\n💡 <i>Agents marked ⚠️ need additional setup. Use</i> <code>openacp agents info &lt;name&gt;</code> <i>for details.</i>\n";
     }
 
+    text += `\n<i>Catalog: ${escapeHtml(formatCatalogStatus(catalogStatus))}</i>`;
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
   } else {
     text += "<i>All agents are already installed!</i>";
+    text += `\n\n<i>Catalog: ${escapeHtml(formatCatalogStatus(catalogStatus))}</i>`;
     await ctx.reply(text, { parse_mode: "HTML" });
   }
 }
@@ -134,6 +141,7 @@ export async function handleAgentCallback(ctx: Context, core: OpenACPCore): Prom
       const items = catalog.getAvailable();
       const installed = items.filter((i) => i.installed);
       const available = items.filter((i) => !i.installed);
+      const catalogStatus = catalog.getRegistryStatus();
 
       let text = "<b>🤖 Agents</b>\n\n";
 
@@ -141,6 +149,10 @@ export async function handleAgentCallback(ctx: Context, core: OpenACPCore): Prom
         text += "<b>Installed:</b>\n";
         for (const item of installed) {
           text += `✅ <b>${escapeHtml(item.name)}</b>`;
+          text += ` <code>v${escapeHtml(item.version)}</code>`;
+          if (item.updateRequired) {
+            text += ` → <b>v${escapeHtml(item.availableVersion ?? "available")}</b> ⚠️`;
+          }
           if (item.description) {
             text += ` — <i>${escapeHtml(truncate(item.description, 50))}</i>`;
           }
@@ -192,6 +204,7 @@ export async function handleAgentCallback(ctx: Context, core: OpenACPCore): Prom
         keyboard.row();
       }
 
+      text += `\n<i>Catalog: ${escapeHtml(formatCatalogStatus(catalogStatus))}</i>`;
       await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
     } catch { /* ignore edit failures */ }
   }
@@ -254,6 +267,11 @@ async function installAgentWithProgress(ctx: Context, core: OpenACPCore, nameOrI
         } catch { /* ignore */ }
       }
     }
+    if (result.cleanupPending) {
+      try {
+        await ctx.reply(`⚠️ ${escapeHtml(result.cleanupMessage ?? "Previous runtime cleanup is pending.")}`);
+      } catch { /* optional notification */ }
+    }
   }
 
   // Show setup steps as a follow-up message with copyable commands
@@ -314,4 +332,15 @@ function buildProgressBar(percent: number): string {
   const filled = Math.round(percent / 10);
   const empty = 10 - filled;
   return "█".repeat(filled) + "░".repeat(empty);
+}
+
+function formatCatalogStatus(status: ReturnType<OpenACPCore['agentCatalog']['getRegistryStatus']>): string {
+  const source = status.source === 'network'
+    ? 'live registry'
+    : status.source === 'cache'
+      ? 'cached registry'
+      : status.source === 'snapshot'
+        ? 'packaged snapshot'
+        : 'unavailable';
+  return `${source}${status.stale ? ' (stale)' : ''}`;
 }

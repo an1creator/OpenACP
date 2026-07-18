@@ -5,6 +5,7 @@ import { BusEvent } from "../../core/events.js";
 
 interface SSEResponse extends http.ServerResponse {
   sessionFilter?: string;
+  authType?: 'secret' | 'jwt';
 }
 
 interface SessionStats {
@@ -61,6 +62,8 @@ export class SSEManager {
       BusEvent.AGENT_EVENT,
       BusEvent.PERMISSION_REQUEST,
       BusEvent.PERMISSION_RESOLVED,
+      BusEvent.ELICITATION_REQUEST,
+      BusEvent.ELICITATION_RESOLVED,
       BusEvent.MESSAGE_QUEUED,
       BusEvent.MESSAGE_PROCESSING,
       BusEvent.MESSAGE_FAILED,
@@ -107,7 +110,11 @@ export class SSEManager {
    * An initial `: connected` comment is written immediately so proxies and browsers
    * flush the response headers before the first real event arrives.
    */
-  handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+  handleRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    principal?: { authType?: 'secret' | 'jwt' },
+  ): void {
     if (this.sseConnections.size >= MAX_SSE_CONNECTIONS) {
       res.writeHead(503, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Too many SSE connections" }));
@@ -141,6 +148,7 @@ export class SSEManager {
 
     // Store filter metadata on the response for broadcast
     (res as SSEResponse).sessionFilter = sessionFilter ?? undefined;
+    (res as SSEResponse).authType = principal?.authType;
 
     this.sseConnections.add(res);
 
@@ -167,6 +175,8 @@ export class SSEManager {
       BusEvent.AGENT_EVENT,
       BusEvent.PERMISSION_REQUEST,
       BusEvent.PERMISSION_RESOLVED,
+      BusEvent.ELICITATION_REQUEST,
+      BusEvent.ELICITATION_RESOLVED,
       BusEvent.SESSION_UPDATED,
       BusEvent.MESSAGE_QUEUED,
       BusEvent.MESSAGE_PROCESSING,
@@ -174,6 +184,10 @@ export class SSEManager {
       BusEvent.PROMPT_WAITING,
     ];
     for (const res of this.sseConnections) {
+      if (
+        (event === BusEvent.ELICITATION_REQUEST || event === BusEvent.ELICITATION_RESOLVED)
+        && (res as SSEResponse).authType !== 'secret'
+      ) continue;
       const filter = (res as SSEResponse).sessionFilter;
       if (filter && sessionEvents.includes(event)) {
         const eventData = data as { sessionId: string };
@@ -194,7 +208,7 @@ export class SSEManager {
   createFastifyHandler() {
     return async (request: FastifyRequest, reply: FastifyReply) => {
       reply.hijack();
-      this.handleRequest(request.raw, reply.raw);
+      this.handleRequest(request.raw, reply.raw, { authType: request.auth.type });
     };
   }
 

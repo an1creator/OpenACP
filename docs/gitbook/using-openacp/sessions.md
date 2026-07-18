@@ -32,7 +32,9 @@ Use `/status` inside a session topic to see the current state.
 
 ## Auto-naming
 
-After you send your first message, OpenACP silently asks the agent to generate a 5-word title. The session topic or thread is renamed automatically. You never see this internal prompt — it runs in the background and does not affect your conversation.
+After you send your first message, OpenACP silently asks the agent to generate a title of at most 5 words and 50 characters. The session topic or thread is renamed automatically. You never see this internal prompt — it runs in the background and does not affect your conversation.
+
+New names are normalized to one line in core before they reach Telegram, Discord, Slack, REST, or SSE. Manual names set through the authenticated API may contain up to 200 characters and have priority even when automatic naming is already in progress. Stored session names are restored as written. An agent metadata update that merely repeats the current user prompt is ignored, so it cannot replace auto-naming or appear as a session update.
 
 If naming fails, the session falls back to `Session <id>`.
 
@@ -41,6 +43,14 @@ If naming fails, the session falls back to `Session <id>`.
 You can run multiple sessions at the same time. The default limit is 20 concurrent active sessions. This is configurable via `maxConcurrentSessions` in your config file.
 
 If the limit is reached, `/new` returns an error message. Cancel or finish an existing session to free a slot.
+
+OpenACP reserves capacity before it starts an ACP process. Concurrent creates
+and lazy resumes across chat, REST, and SSE cannot exceed the configured limit.
+The limit applies to new live sessions, not to additional prompts in a session
+that already owns a slot. A session releases its slot when it enters `error`.
+Sending another prompt to that live errored session atomically reacquires a slot
+before the prompt is queued or the session returns to `active`; if the current
+limit is full, the prompt is rejected and the session remains in `error`.
 
 ## Session timeout
 
@@ -66,6 +76,38 @@ Some agents let you change settings mid-conversation — like switching between 
 ```
 
 Available options depend on the agent you are using. When an agent updates its available options, the session reflects the changes automatically.
+
+OpenACP restores saved agent options only after the resumed agent acknowledges
+the change. If an option is no longer supported or the agent rejects it, the
+live value remains authoritative and is saved for the next resume.
+
+## Structured input requests
+
+An ACP agent can pause a turn and request a small form. Telegram presents each
+field in the session topic; REST/SSE clients receive the same request as a
+structured event. Required fields and string, number, integer, boolean, select,
+and multi-select constraints are validated before the response reaches the
+agent.
+
+Every REST response is bound to the principal that started the turn. The same
+JWT, another JWT linked to the same canonical user, or the master API secret can
+answer; an unrelated JWT cannot accept, decline, or cancel the request.
+Telegram removes a protected reply before accepting it; if deletion
+fails, OpenACP cancels the request and does not use the value. Standard ACP form
+fields are not treated as secret input. Protected fields are available only for
+the Codex ACP extension and require Telegram's delete-after-capture flow or an
+authenticated HTTPS/loopback REST request.
+
+String `pattern` constraints are rejected. OpenACP does not execute
+agent-supplied JavaScript regular expressions on its event loop; use enumerated
+choices, length bounds, or one of the supported string formats instead.
+
+Requests expire, are cancelled with their turn, and accept only the first
+response. Submitted values are transient: OpenACP returns them to the requesting
+agent but does not place them in session history, SSE resolution events, or
+logs. Adapters without a form UI show an authenticated REST fallback for
+non-sensitive requests; protected connector requests fail closed instead of
+falling back to an unsafe chat message.
 
 ## Cancelling a prompt
 

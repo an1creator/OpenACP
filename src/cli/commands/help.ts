@@ -25,7 +25,7 @@ Connect messaging platforms (Telegram, Discord) to 28+ AI coding agents via ACP 
   openacp --foreground                 Force foreground mode
 
 \x1b[1mAgent Management:\x1b[0m
-  openacp agents                       Browse all agents (installed + available)  \x1b[2m[--json]\x1b[0m
+  openacp agents [--json]              Browse all agents (installed + available)
   openacp agents install <name>        Install an agent from the ACP Registry     \x1b[2m[--json]\x1b[0m
   openacp agents uninstall <name>      Remove an installed agent                  \x1b[2m[--json]\x1b[0m
   openacp agents info <name>           Show details, dependencies & setup guide   \x1b[2m[--json]\x1b[0m
@@ -115,6 +115,7 @@ Connect messaging platforms (Telegram, Discord) to 28+ AI coding agents via ACP 
 
 \x1b[1mOutput Flags:\x1b[0m
   --json               Output result as JSON (single-line, stdout)
+                       It may appear before or after the command.
                        Commands marked \x1b[2m[--json]\x1b[0m support machine-readable output.
                        Success: { "success": true, "data": { ... } }
                        Error:   { "success": false, "error": { "code": "...", "message": "..." } }

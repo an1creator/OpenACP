@@ -112,6 +112,56 @@ describe("SessionBridge — Idempotent Connect/Disconnect", () => {
 
     expect(() => bridge.disconnect()).not.toThrow();
   });
+
+  it("hands permission ownership from headless mode to a bridge and restores it on reconnect cycles", () => {
+    const agent = createMockAgentInstance();
+    const session = createSession(agent);
+    const headlessPermission = vi.fn().mockResolvedValue("allow");
+    session.setHeadlessPermissionHandler(headlessPermission);
+    const first = new SessionBridge(session, createMockAdapter(), createMockDeps(), "sse");
+
+    expect(session.hasConnectedBridges).toBe(false);
+    expect(agent.onPermissionRequest).toBe(headlessPermission);
+    first.connect();
+    expect(session.hasConnectedBridges).toBe(true);
+    expect(agent.onPermissionRequest).not.toBe(headlessPermission);
+    first.disconnect();
+    expect(session.hasConnectedBridges).toBe(false);
+    expect(agent.onPermissionRequest).toBe(headlessPermission);
+
+    const second = new SessionBridge(session, createMockAdapter(), createMockDeps(), "sse");
+    second.connect();
+    expect(session.hasConnectedBridges).toBe(true);
+    second.disconnect();
+    expect(agent.onPermissionRequest).toBe(headlessPermission);
+  });
+
+  it("keeps pre-cutover headless claims valid across attach, detach, and reconnect", () => {
+    const session = createSession();
+    const preAttach = session.claimHeadlessDelivery("agent:event");
+
+    expect(preAttach).not.toBeNull();
+    session.registerBridge("sse");
+    expect(session.isHeadlessDeliveryClaimActive(preAttach!)).toBe(true);
+    expect(session.claimHeadlessDelivery("agent:event")).toBeNull();
+
+    session.unregisterBridge("sse");
+    const detached = session.claimHeadlessDelivery("agent:event");
+    expect(detached).not.toBeNull();
+    expect(detached!.epoch).toBeGreaterThan(preAttach!.epoch);
+
+    session.registerBridge("sse");
+    expect(session.isHeadlessDeliveryClaimActive(detached!)).toBe(true);
+    session.releaseHeadlessDelivery(preAttach!);
+    session.releaseHeadlessDelivery(detached!);
+    expect(session.hasActiveHeadlessDelivery("agent:event")).toBe(false);
+
+    session.unregisterBridge("sse");
+    const afterReconnect = session.claimHeadlessDelivery("agent:event");
+    expect(afterReconnect).not.toBeNull();
+    expect(afterReconnect!.epoch).toBeGreaterThan(detached!.epoch);
+    session.releaseHeadlessDelivery(afterReconnect!);
+  });
 });
 
 describe("SessionBridge — image_content & audio_content", () => {

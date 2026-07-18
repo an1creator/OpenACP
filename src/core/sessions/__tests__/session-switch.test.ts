@@ -23,6 +23,12 @@ function createTestSession(agentInstance?: any, agentName?: string) {
   })
 }
 
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 describe('Session.switchAgent', () => {
   it('tracks firstAgent on creation', () => {
     const session = createTestSession(undefined, 'claude')
@@ -269,5 +275,162 @@ describe('Session.switchAgent', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it.each(['success', 'fallback'] as const)(
+    'discards an old auto-name %s that settles while switch teardown is pending',
+    async (outcome) => {
+      const autoStarted = deferred()
+      const releaseAuto = deferred()
+      const destroyStarted = deferred()
+      const releaseDestroy = deferred()
+      const oldAgent = mockAgentInstance({ sessionId: 'old-sess' })
+      oldAgent.prompt.mockImplementation(async (text: string) => {
+        if (!text.startsWith('Summarize this conversation')) return
+        autoStarted.resolve()
+        await releaseAuto.promise
+        if (outcome === 'fallback') throw new Error('old auto-name failed')
+        oldAgent.emit('agent_event', { type: 'text', content: 'Old Agent Title' })
+      })
+      oldAgent.destroy.mockImplementation(async () => {
+        destroyStarted.resolve()
+        await releaseDestroy.promise
+      })
+      const session = createTestSession(oldAgent, 'claude')
+      const newAgent = mockAgentInstance({ sessionId: 'new-sess' })
+      newAgent.prompt.mockImplementation(async (text: string) => {
+        if (text.startsWith('Summarize this conversation')) {
+          newAgent.emit('agent_event', { type: 'text', content: 'New Agent Title' })
+        }
+      })
+      const createNewAgent = vi.fn(async () => newAgent)
+
+      const prompt = session.enqueuePrompt('start old auto-name')
+      await autoStarted.promise
+      const switching = session.switchAgent('gemini', createNewAgent)
+      await destroyStarted.promise
+      expect(createNewAgent).not.toHaveBeenCalled()
+
+      releaseAuto.resolve()
+      await prompt
+      expect(session.name).toBeUndefined()
+      expect(session.nameSource).toBeUndefined()
+
+      releaseDestroy.resolve()
+      await switching
+      expect(session.agentInstance).toBe(newAgent)
+      expect(session.name).toBeUndefined()
+
+      await session.enqueuePrompt('name with replacement')
+      expect(session.name).toBe('New Agent Title')
+      expect(session.nameSource).toBe('auto')
+    },
+  )
+
+  it('allows a retained old agent to auto-name only on a new prompt after switch teardown fails', async () => {
+    const autoStarted = deferred()
+    const releaseAuto = deferred()
+    const destroyStarted = deferred()
+    const releaseDestroy = deferred()
+    const oldAgent = mockAgentInstance({ sessionId: 'old-sess' })
+    let autoAttempt = 0
+    oldAgent.prompt.mockImplementation(async (text: string) => {
+      if (!text.startsWith('Summarize this conversation')) return
+      autoAttempt += 1
+      if (autoAttempt === 1) {
+        autoStarted.resolve()
+        await releaseAuto.promise
+        oldAgent.emit('agent_event', { type: 'text', content: 'Invalidated Old Title' })
+      } else {
+        oldAgent.emit('agent_event', { type: 'text', content: 'Retained Agent Retry' })
+      }
+    })
+    oldAgent.destroy.mockImplementation(async () => {
+      destroyStarted.resolve()
+      await releaseDestroy.promise
+      throw new Error('old process retained')
+    })
+    const session = createTestSession(oldAgent, 'claude')
+
+    const prompt = session.enqueuePrompt('start retained-agent race')
+    await autoStarted.promise
+    const switching = session.switchAgent('gemini', async () => mockAgentInstance())
+    await destroyStarted.promise
+    releaseAuto.resolve()
+    await prompt
+    expect(session.name).toBeUndefined()
+
+    releaseDestroy.resolve()
+    await expect(switching).rejects.toThrow('old process retained')
+    expect(session.agentInstance).toBe(oldAgent)
+    expect(session.agentName).toBe('claude')
+
+    await session.enqueuePrompt('retry naming on retained agent')
+    expect(session.name).toBe('Retained Agent Retry')
+    expect(session.nameSource).toBe('auto')
+  })
+
+  it('keeps old naming invalidated across a failed switch and explicit rollback', async () => {
+    const autoStarted = deferred()
+    const releaseAuto = deferred()
+    const destroyStarted = deferred()
+    const releaseDestroy = deferred()
+    const oldAgent = mockAgentInstance({ sessionId: 'old-sess' })
+    oldAgent.prompt.mockImplementation(async (text: string) => {
+      if (!text.startsWith('Summarize this conversation')) return
+      autoStarted.resolve()
+      await releaseAuto.promise
+      oldAgent.emit('agent_event', { type: 'text', content: 'Invalidated Before Rollback' })
+    })
+    oldAgent.destroy.mockImplementation(async () => {
+      destroyStarted.resolve()
+      await releaseDestroy.promise
+    })
+    const session = createTestSession(oldAgent, 'claude')
+
+    const prompt = session.enqueuePrompt('start rollback race')
+    await autoStarted.promise
+    const switching = session.switchAgent('gemini', async () => {
+      throw new Error('replacement startup failed')
+    })
+    await destroyStarted.promise
+    releaseAuto.resolve()
+    await prompt
+    releaseDestroy.resolve()
+    await expect(switching).rejects.toThrow('replacement startup failed')
+    expect(session.name).toBeUndefined()
+
+    const rollbackAgent = mockAgentInstance({ sessionId: 'rollback-sess' })
+    rollbackAgent.prompt.mockImplementation(async (text: string) => {
+      if (text.startsWith('Summarize this conversation')) {
+        rollbackAgent.emit('agent_event', { type: 'text', content: 'Rollback Agent Title' })
+      }
+    })
+    await session.restoreAgentAfterFailedSwitch('claude', async () => rollbackAgent)
+    await session.enqueuePrompt('name after rollback')
+
+    expect(session.agentInstance).toBe(rollbackAgent)
+    expect(session.name).toBe('Rollback Agent Title')
+    expect(session.nameSource).toBe('auto')
+  })
+
+  it('keeps naming ownership with the final agent across rapid sequential switches', async () => {
+    const agentA = mockAgentInstance({ sessionId: 'a-sess' })
+    const session = createTestSession(agentA, 'agentA')
+    const agentB = mockAgentInstance({ sessionId: 'b-sess' })
+    const agentC = mockAgentInstance({ sessionId: 'c-sess' })
+    agentC.prompt.mockImplementation(async (text: string) => {
+      if (text.startsWith('Summarize this conversation')) {
+        agentC.emit('agent_event', { type: 'text', content: 'Final Agent Title' })
+      }
+    })
+
+    await session.switchAgent('agentB', async () => agentB)
+    await session.switchAgent('agentC', async () => agentC)
+    await session.enqueuePrompt('name final agent')
+
+    expect(session.agentInstance).toBe(agentC)
+    expect(session.name).toBe('Final Agent Title')
+    expect(session.nameSource).toBe('auto')
   })
 })

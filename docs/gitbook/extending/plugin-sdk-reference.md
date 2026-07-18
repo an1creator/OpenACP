@@ -103,6 +103,10 @@ interface STTOptions {
 | `OutgoingMessage` | Message sent from OpenACP to a channel. |
 | `PermissionRequest` | Permission prompt sent to the user. |
 | `PermissionOption` | A selectable option in a permission request. |
+| `ElicitationRequest` | A transient ACP form request with a validated schema and expiry. |
+| `ElicitationResponse` | Exact `accept`, `decline`, or `cancel` response returned to the agent. |
+| `ElicitationContentValue` | Supported form value union: string, number, boolean, or string array. |
+| `ElicitationResolvedEvent` | Resolution metadata with no submitted content. |
 | `NotificationMessage` | Notification sent to the notification channel. |
 | `AgentCommand` | Command received from a channel adapter. |
 
@@ -111,6 +115,14 @@ contract for a remote thread created before the first session record is durable.
 Threaded adapters should implement it when `createSessionThread` allocates a
 remote resource. Existing adapters remain valid without it; Core uses
 `deleteSessionThread(sessionId)` as a fallback after a session identity exists.
+
+Form-capable adapters can additionally implement
+`sendElicitationRequest?(sessionId, request)` and
+`dismissElicitationRequest?(sessionId, event)`, and declare
+`capabilities.elicitation.form`. See [Adapter Reference](adapter-reference.md)
+for ownership and protected-input requirements.
+OpenACP accepts flat primitive schemas but rejects string `pattern` constraints;
+plugins must not compile agent-supplied regular expressions independently.
 
 ---
 

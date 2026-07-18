@@ -82,6 +82,11 @@ function mockSession(configOptions: ConfigOption[] = [], overrides?: Partial<any
         o.id === configId && o.type === 'select' ? { ...o, currentValue: value.value } : o
       )
     }
+    return {
+      acknowledged: true,
+      authoritative: Boolean(response.configOptions?.length),
+      effective: session.configOptions.find((o: ConfigOption) => o.id === configId),
+    }
   })
   return session
 }
@@ -196,6 +201,21 @@ describe('Config Commands', () => {
         'mode',
         { type: 'select', value: 'architect' },
       )
+    })
+
+    it('shows a bounded error and emits no change event when policy blocks the mutation', async () => {
+      session.setConfigOption.mockResolvedValueOnce({
+        acknowledged: false,
+        authoritative: false,
+        effective: modeOption,
+        reason: 'blocked',
+        message: 'Configuration change was blocked by policy.',
+      })
+
+      const res = await registry.execute('/mode architect', baseArgs('test-session'))
+
+      expect(res).toEqual({ type: 'error', message: 'Configuration change was blocked by policy.' })
+      expect(core.eventBus.emit).not.toHaveBeenCalled()
     })
 
     it('success message uses "switched to" phrasing', async () => {

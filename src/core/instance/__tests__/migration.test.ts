@@ -91,6 +91,19 @@ describe('migrateGlobalInstance', () => {
     expect(fs.existsSync(path.join(expectedTarget, 'config.json'))).toBe(true)
   })
 
+  it('suppresses the human migration notice for machine-readable commands', async () => {
+    mockHomedir()
+    fs.writeFileSync(path.join(globalRoot, 'config.json'), JSON.stringify({
+      workspace: { baseDir: path.join(tmpDir, 'workspace') },
+    }))
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    const { migrateGlobalInstance } = await import('../migration.js')
+
+    await migrateGlobalInstance({ quiet: true })
+
+    expect(log).not.toHaveBeenCalled()
+  })
+
   it('strips workspace.baseDir from migrated config.json', async () => {
     mockHomedir()
     const baseDir = path.join(tmpDir, 'workspace')

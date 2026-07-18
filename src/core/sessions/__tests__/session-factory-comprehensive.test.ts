@@ -27,7 +27,10 @@ function createMockAgentManager() {
 }
 
 function createMockSessionManager() {
+  const admission = { token: Symbol('admission'), released: false, committed: false };
   return {
+    reserveSessionAdmission: vi.fn().mockResolvedValue(admission),
+    releaseSessionAdmission: vi.fn(),
     registerSession: vi.fn(),
     patchRecord: vi.fn(),
   } as any;
@@ -143,7 +146,11 @@ describe("SessionFactory — Comprehensive Tests", () => {
         workingDirectory: "/workspace",
       });
 
-      expect(sessionManager.registerSession).toHaveBeenCalledWith(session);
+      expect(sessionManager.registerSession).toHaveBeenCalledWith(
+        session,
+        undefined,
+        expect.objectContaining({ token: expect.any(Symbol) }),
+      );
     });
 
     it("defers session:created until Core durably persists the initial record", async () => {

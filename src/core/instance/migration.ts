@@ -22,7 +22,7 @@ import { InstanceRegistry } from './instance-registry.js'
  * Called once on first CLI invocation after upgrade. Safe to call multiple times
  * — returns null if no migration is needed.
  */
-export async function migrateGlobalInstance(): Promise<string | null> {
+export async function migrateGlobalInstance(options: { quiet?: boolean } = {}): Promise<string | null> {
   const globalRoot = getGlobalRoot()
   const globalConfig = path.join(globalRoot, 'config.json')
 
@@ -123,7 +123,9 @@ export async function migrateGlobalInstance(): Promise<string | null> {
     // Non-critical
   }
 
-  console.log(`\x1b[32m✓\x1b[0m Migrated global instance → ${baseDir.replace(os.homedir(), '~')}/.openacp`)
+  if (!options.quiet) {
+    console.log(`\x1b[32m✓\x1b[0m Migrated global instance → ${baseDir.replace(os.homedir(), '~')}/.openacp`)
+  }
 
   return targetRoot
 }

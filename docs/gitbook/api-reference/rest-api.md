@@ -45,7 +45,7 @@ memory details are deliberately omitted.
   "status": "ok",
   "instanceId": "default",
   "uptime": 123456,
-  "version": "2026.718.2"
+  "version": "2026.718.3"
 }
 ```
 
@@ -67,7 +67,7 @@ Returns authenticated operational diagnostics. Requires `system:health`.
 {
   "status": "ok",
   "uptime": 123456,
-  "version": "2026.718.2",
+  "version": "2026.718.3",
   "memory": {
     "rss": 52428800,
     "heapUsed": 30000000,
@@ -76,7 +76,7 @@ Returns authenticated operational diagnostics. Requires `system:health`.
   "sessions": { "active": 2, "total": 5 },
   "serviceResources": {
     "assistant": { "live": 1, "active": 1 },
-    "terminalCleanup": { "pending": 0, "failed": 0 },
+    "terminalCleanup": { "pending": 0, "failed": 0, "terminalFailed": 0 },
     "warmPool": {
       "state": "ready",
       "capacity": 1,
@@ -97,7 +97,13 @@ ACP/logger teardown still pending or needing a retry. `warmPool.state` is one of
 `closing`. A ready entry enters owned cleanup in the background at `expiresAt`
 if no session claims it. Failed cleanup retains the slot and reports bounded
 retry attempts plus a redacted `lastError`; it is never reported as empty until
-process destruction succeeds.
+process destruction succeeds. `terminalCleanup.terminalFailed` counts failed
+initialization subprocesses that exhausted automatic retries but remain owned;
+the bounded owner registry prevents another child from starting when it is full,
+and shutdown makes a final cleanup attempt. All retained initialization cleanups
+share one four-second daemon-wide shutdown budget with bounded concurrency. Any
+child whose exit is still unconfirmed after the final best-effort SIGKILL remains
+counted in `failed` and `terminalFailed` while shutdown continues.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
@@ -112,7 +118,7 @@ Returns the daemon version string. Requires `system:health`.
 
 **Response**
 ```json
-{ "version": "2026.718.2" }
+{ "version": "2026.718.3" }
 ```
 
 ```bash
@@ -252,6 +258,30 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:21420/api/v1/sessions/se
 
 ---
 
+### GET /api/v1/sessions/:id/queue
+
+Returns an in-memory queue snapshot without starting or resuming an ACP
+process. This endpoint is strictly read-only.
+
+```json
+{
+  "pending": [
+    { "userPrompt": "Run the next check", "turnId": "client-turn-43" }
+  ],
+  "processing": true,
+  "queueDepth": 1,
+  "status": "active",
+  "isLive": true
+}
+```
+
+For a persisted session that is not live, including `finished` or `cancelled`
+records, the response reports its durable `status`, `isLive: false`, an empty
+pending list, and zero queue depth. Unknown IDs return HTTP 404 with
+`SESSION_NOT_FOUND`.
+
+---
+
 ### POST /api/v1/sessions
 
 Creates a new session.
@@ -276,7 +306,11 @@ Creates a new session.
 }
 ```
 
-Returns `429` if `maxConcurrentSessions` is reached.
+Returns HTTP 429 with `SESSION_LIMIT` if `maxConcurrentSessions` is reached.
+Capacity is reserved atomically before ACP startup across REST, chat, SSE, and
+lazy resume. Prompts to sessions that already own a slot are not rejected by
+this creation limit. A live `error` session must reacquire a slot using the
+current configured limit before accepting another prompt.
 
 Permissions are auto-approved for sessions created via the API when no channel adapter is attached.
 
@@ -320,8 +354,9 @@ asynchronous.
 The response preserves a supplied `turnId`; otherwise OpenACP creates one.
 Blocked work is never queued or dispatched. Policy rejection returns a standard
 error envelope with `MESSAGE_BLOCKED` and HTTP 403. The global concurrent-session
-limit returns `SESSION_LIMIT` and HTTP 429. A `cancelled`, `finished`, or `error`
-session returns 400; an unknown session returns 404.
+limit returns `SESSION_LIMIT` and HTTP 429. A live `error` session uses that same
+admission path and remains in `error` if capacity is full. A `cancelled` or
+`finished` session returns 400; an unknown session returns 404.
 
 ```bash
 curl -X POST \
@@ -372,6 +407,66 @@ Resolves a pending permission request for a session.
 ```
 
 Returns `400` if there is no matching pending request.
+
+---
+
+### GET /api/v1/sessions/:id/elicitation
+
+Lists pending ACP form requests for the live session. Requires `sessions:read`.
+JWT callers see only requests they own (the initiating token or linked canonical
+user); the master secret is the administrative override. The response includes
+the request message, schema, expiry, and protected-field markers, but not internal
+owner metadata or submitted values.
+
+```json
+{
+  "requests": [
+    {
+      "id": "input_abc",
+      "sessionId": "sess_abc123",
+      "mode": "form",
+      "message": "Choose a deployment target",
+      "requestedSchema": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string", "enum": ["staging", "production"] }
+        },
+        "required": ["target"]
+      },
+      "expiresAt": 1784384400000
+    }
+  ]
+}
+```
+
+---
+
+### POST /api/v1/sessions/:id/elicitation/:requestId
+
+Resolves one pending form request. Requires `sessions:permission`. Send exactly
+one ACP action:
+
+```json
+{ "action": "accept", "content": { "target": "staging" } }
+```
+
+```json
+{ "action": "decline" }
+```
+
+```json
+{ "action": "cancel" }
+```
+
+The response confirms only the action and never echoes submitted content.
+Invalid content returns 400, an unknown request returns 404, and a repeated or
+late response returns 409. Every action is owner-bound: it can be submitted by
+the initiating JWT, another valid JWT linked to the same canonical user, or the
+master secret as an explicit administrative override. An unlinked JWT is bound
+to its exact token. Protected Codex fields additionally require HTTPS or a
+loopback connection. String schema `pattern` constraints are unsupported and
+are rejected before a pending request is published; OpenACP never executes
+agent-supplied JavaScript regular expressions.
 
 ---
 
@@ -718,7 +813,10 @@ Returns the agent-declared config options for a session (modes, models, toggles)
 
 ### PUT /api/v1/sessions/:id/config/:configId
 
-Updates a config option value for a session.
+Updates a config option value for a live session. Changes for the same session
+run in request-arrival order. The policy hook runs immediately before each agent
+RPC, and a blocked or failed request does not prevent the next queued request
+from running.
 
 **Request body**
 ```json
@@ -727,8 +825,32 @@ Updates a config option value for a session.
 
 **Response**
 ```json
-{ "ok": true, "configId": "mode", "value": "architect" }
+{
+  "configOptions": [
+    {
+      "id": "mode",
+      "name": "Mode",
+      "type": "select",
+      "currentValue": "architect",
+      "options": [
+        { "value": "code", "label": "Code" },
+        { "value": "architect", "label": "Architect" }
+      ]
+    }
+  ],
+  "clientOverrides": { "bypassPermissions": false }
+}
 ```
+
+Each successful response contains the agent-acknowledged snapshot for that
+request, even when a later queued request has already completed. Persistence is
+revision-guarded so an older HTTP continuation cannot overwrite newer config.
+Waiting to enter the per-session queue is limited to 30 seconds; expiry returns
+`400 CONFIG_CHANGE_REJECTED`. Agent switch or session termination cancels queued
+changes before they reach the old agent and immediately releases callers waiting
+on an active RPC. The old transport operation remains observed in the background;
+its late settlement or rejection cannot change the new session generation or
+produce an unhandled rejection.
 
 ---
 
@@ -965,7 +1087,11 @@ SSE stream of real-time daemon events. Auth via query parameter (EventSource can
 GET /api/v1/events?token=<api-secret>
 ```
 
-Returns a persistent SSE connection. Events include session lifecycle changes, agent output, and health pings (every 30 seconds).
+Returns a persistent SSE connection. Events include session lifecycle changes,
+agent output, `elicitation:request`, `elicitation:resolved`, and health pings
+(every 30 seconds). Elicitation events are visible on this global administrative
+stream only to the master secret; JWT clients receive their owned form events on
+the per-session stream below. Resolution events never contain submitted form values.
 
 ### GET /api/v1/sse/sessions/:id/stream
 
@@ -977,4 +1103,9 @@ GET /api/v1/sse/sessions/:id/stream?token=<jwt>
 
 Streams only events for the specified session. Supports reconnect replay — if fewer than 100 events were missed, they are replayed on reconnection. Multiple clients can connect to the same session stream simultaneously.
 
-**Event types**: `agent:event`, `session:updated`, `permission:request`, `health`.
+**Event types**: `agent:event`, `session:updated`, `permission:request`,
+`elicitation_request`, `elicitation_resolved`, `health`. Elicitation requests
+omit owner metadata; resolution events omit submitted content. Form-input events
+are transient, delivered only to the owning authenticated principal (or the master
+secret), and are not stored in the reconnect buffer. After reconnecting, use
+`GET /api/v1/sessions/:id/elicitation` to list pending requests.

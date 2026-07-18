@@ -42,8 +42,13 @@ describe("Agent Installer Security", () => {
 
     it("rejects absolute path entries", async () => {
       const { validateTarContents } = await import("../agent-installer.js");
-      const entries = ["/etc/passwd"];
-      expect(() => validateTarContents(entries, tmpDir)).toThrow(/unsafe/i);
+      expect(() => validateTarContents(["/etc/passwd"], tmpDir)).toThrow(/unsafe/i);
+      expect(() => validateTarContents(["C:\\Windows\\system.ini"], tmpDir)).toThrow(/unsafe/i);
+    });
+
+    it("rejects traversal written with Windows separators", async () => {
+      const { validateTarContents } = await import("../agent-installer.js");
+      expect(() => validateTarContents(["..\\..\\outside.exe"], tmpDir)).toThrow(/unsafe/i);
     });
 
     it("allows normal entries", async () => {
@@ -84,6 +89,16 @@ describe("Agent Installer Security", () => {
       const agentPath = path.join(tmpDir, "my-agent");
       fs.mkdirSync(agentPath, { recursive: true });
       expect(() => validateUninstallPath(agentPath, tmpDir)).not.toThrow();
+    });
+  });
+
+  describe("registered binary command paths", () => {
+    it("normalizes registry Windows separators without allowing traversal", async () => {
+      const { resolveBinaryCommandPath } = await import("../agent-installer.js");
+      expect(resolveBinaryCommandPath(tmpDir, ".\\goose-package\\goose.exe"))
+        .toBe(path.join(tmpDir, "goose-package", "goose.exe"));
+      expect(() => resolveBinaryCommandPath(tmpDir, "..\\outside.exe")).toThrow(/escapes/i);
+      expect(() => resolveBinaryCommandPath(tmpDir, "C:\\outside.exe")).toThrow(/relative/i);
     });
   });
 });

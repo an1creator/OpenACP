@@ -36,6 +36,8 @@ export async function systemRoutes(
     const sessions = deps.core.sessionManager.listAllSessions();
     const mem = process.memoryUsage();
     const tunnel = deps.core.tunnelService;
+    const sessionResources = deps.core.sessionManager.getServiceResourceStatus();
+    const initializationCleanup = deps.core.agentManager.getInitializationCleanupResourceStatus();
 
     return {
       status: 'ok',
@@ -53,7 +55,12 @@ export async function systemRoutes(
         total: sessions.length,
       },
       serviceResources: {
-        ...deps.core.sessionManager.getServiceResourceStatus(),
+        ...sessionResources,
+        terminalCleanup: {
+          pending: sessionResources.terminalCleanup.pending + initializationCleanup.pending,
+          failed: sessionResources.terminalCleanup.failed + initializationCleanup.failed,
+          terminalFailed: initializationCleanup.terminalFailed ?? 0,
+        },
         warmPool: deps.core.agentManager.getWarmPoolResourceStatus(),
       },
       adapters: Array.from(deps.core.adapters.keys()),

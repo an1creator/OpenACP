@@ -756,6 +756,49 @@ describe('persisted-only resume cancellation registration lease', () => {
     expect(disconnect).toHaveBeenCalledOnce();
   });
 
+  it('keeps a headless ACP prompt echo out of persistence and EventBus before auto-naming', async () => {
+    const { store, records } = createDelayedStore();
+    const manager = new SessionManager(store as any);
+    const agent = mockAgentInstance('headless-naming-agent');
+    agent.prompt.mockImplementation(async (text: string) => {
+      if (text.startsWith('Summarize this conversation')) {
+        agent.emit('agent_event', { type: 'text', content: 'Headless Short Name' });
+      } else {
+        agent.emit('agent_event', { type: 'session_info_update', title: text });
+      }
+    });
+    const agentManager = {
+      spawn: vi.fn().mockResolvedValue(agent),
+      resume: vi.fn(),
+      getAgent: vi.fn().mockReturnValue({ name: 'claude' }),
+    };
+    const { core, eventBus } = createCoreHarness(
+      manager,
+      store,
+      agentManager,
+      {},
+      { headless: true },
+    );
+    const observed = vi.fn();
+    eventBus.on('agent:event', observed);
+    const session = await core.createSession({
+      channelId: 'api',
+      agentName: 'claude',
+      workingDirectory: '/workspace',
+    });
+    const prompt = 'This entire prompt must not become the headless session title';
+
+    await session.enqueuePrompt(prompt);
+    await vi.waitFor(() => expect(records.get(session.id)?.name).toBe('Headless Short Name'));
+
+    expect(session.name).toBe('Headless Short Name');
+    expect(records.get(session.id)?.nameSource).toBe('auto');
+    expect(observed).not.toHaveBeenCalledWith(expect.objectContaining({
+      event: expect.objectContaining({ type: 'session_info_update', title: prompt }),
+    }));
+    await session.destroy();
+  });
+
   it('drops a delayed headless name event from an old agent generation while the replacement still works', async () => {
     const { store, records } = createDelayedStore();
     const manager = new SessionManager(store as any);
@@ -858,6 +901,54 @@ describe('persisted-only resume cancellation registration lease', () => {
     expect(records.get(session.id)).toMatchObject({ status: 'cancelled' });
     expect(records.get(session.id)?.name).toBeUndefined();
     expect(observed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['ordinary output', { type: 'text', content: 'claimed output' }],
+    ['config update', {
+      type: 'config_option_update',
+      options: [{ id: 'mode', name: 'Mode', type: 'select', currentValue: 'architect', options: [] }],
+    }],
+    ['title update', { type: 'session_info_update', title: 'claimed title' }],
+    ['terminal event', { type: 'session_end', reason: 'done' }],
+  ])('completes a middleware-delayed headless %s exactly once after bridge cutover', async (_name, event) => {
+    const { store } = createDelayedStore();
+    const manager = new SessionManager(store as any);
+    const agent = mockAgentInstance(`handoff-${String(_name)}`);
+    const agentManager = {
+      spawn: vi.fn().mockResolvedValue(agent),
+      resume: vi.fn(),
+      getAgent: vi.fn().mockReturnValue({ name: 'claude' }),
+    };
+    const { core, eventBus } = createCoreHarness(manager, store, agentManager, {}, { headless: true });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const middleware = {
+      execute: vi.fn(async (_hook: string, payload: unknown) => {
+        await gate;
+        return payload;
+      }),
+    };
+    (core as any).lifecycleManager.middlewareChain = middleware;
+    const observed = vi.fn();
+    eventBus.on('agent:event', observed);
+    const session = await core.createSession({
+      channelId: 'api', agentName: 'claude', workingDirectory: '/workspace',
+    });
+    session.activate();
+
+    agent.emit('agent_event', event as any);
+    await vi.waitFor(() => expect(middleware.execute).toHaveBeenCalled());
+    session.registerBridge('sse');
+    release();
+    await vi.waitFor(() => expect(observed).toHaveBeenCalledOnce());
+    expect(observed).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: session.id,
+      event: expect.objectContaining({ type: event.type }),
+    }));
+
+    session.unregisterBridge('sse');
+    await session.destroy();
   });
 
   it('observes headless terminal ENOSPC and lets cancel retry durability without a false completion event', async () => {

@@ -57,7 +57,7 @@ Some agents need additional setup before they can be used:
 Agents are installed in three ways depending on the agent:
 - **npx** — Node.js agents, downloaded automatically on first use
 - **uvx** — Python agents, downloaded automatically on first use
-- **binary** — Platform-specific binaries, downloaded to \`~/.openacp/agents/\`
+- **binary** — Platform-specific zip, tar, or raw executables, integrity-checked when the registry supplies SHA-256 and activated transactionally in \`~/.openacp/agents/\`
 
 ### Project Folder (Workspace)
 The directory where the agent reads, writes, and runs code.
@@ -244,7 +244,7 @@ Just chat naturally: "How do I create a session?", "What's the status?", "Someth
 - \`openacp agents uninstall <name>\` — Remove an agent
 - \`openacp agents info <name>\` — Show details, dependencies, and setup guide
 - \`openacp agents run <name> [-- args]\` — Run agent CLI directly (for login, config, etc.)
-- \`openacp agents refresh\` — Force-refresh registry cache
+- \`openacp agents refresh\` — Fetch the live registry; exits non-zero on connectivity failure
 
 ### Plugins
 - \`openacp install <package>\` — Install adapter plugin

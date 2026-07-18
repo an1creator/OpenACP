@@ -8,6 +8,7 @@ import { SessionManager } from '../session-manager.js'
 import { JsonFileSessionStore } from '../session-store.js'
 import type { AgentInstance } from '../../agents/agent-instance.js'
 import type { ConfigOption, SessionRecord } from '../../types.js'
+import { MiddlewareChain } from '../../plugin/middleware-chain.js'
 
 function mockAgentInstance(): AgentInstance {
   return {
@@ -18,7 +19,7 @@ function mockAgentInstance(): AgentInstance {
     prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
     cancel: vi.fn().mockResolvedValue(undefined),
     destroy: vi.fn().mockResolvedValue(undefined),
-    setConfigOption: vi.fn().mockResolvedValue({ configOptions: [] }),
+    setConfigOption: vi.fn().mockResolvedValue({ configOptions: [], legacyAcknowledged: true }),
     onPermissionRequest: vi.fn(),
     initialSessionResponse: undefined,
     agentCapabilities: undefined,
@@ -113,6 +114,7 @@ describe('SessionFactory lazy resume — configOptions re-application', () => {
     const resumedSession = buildResumedSession(agentInst, 'normal')
     factory.createFullSession = vi.fn().mockImplementation(async () => {
       sessionManager.registerSession(resumedSession)
+      await resumedSession.setConfigOption('mode', { type: 'select', value: 'bypassPermissions' })
       return resumedSession
     })
 
@@ -194,6 +196,7 @@ describe('SessionFactory lazy resume — configOptions re-application', () => {
     resumedSession.id = 'sess-resume-byid'
     factory.createFullSession = vi.fn().mockImplementation(async () => {
       sessionManager.registerSession(resumedSession)
+      await resumedSession.setConfigOption('mode', { type: 'select', value: 'bypassPermissions' })
       return resumedSession
     })
 
@@ -237,6 +240,7 @@ describe('SessionFactory lazy resume — configOptions re-application', () => {
     resumedSession.id = persistedRecord.sessionId
     factory.createFullSession = vi.fn().mockImplementation(async () => {
       sessionManager.registerSession(resumedSession)
+      await resumedSession.setConfigOption('mode', { type: 'select', value: 'bypassPermissions' })
       return resumedSession
     })
 
@@ -248,6 +252,82 @@ describe('SessionFactory lazy resume — configOptions re-application', () => {
     await expect(resume).resolves.toBeNull()
     expect(sessionManager.getSession(persistedRecord.sessionId)).toBeUndefined()
     expect(agentInst.destroy).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the live value when the agent rejects a persisted preference', async () => {
+    const persistedMode: ConfigOption = {
+      id: 'mode', name: 'Mode', category: 'mode', type: 'select',
+      currentValue: 'bypassPermissions', options: MODE_OPTIONS,
+    }
+    const record: SessionRecord = {
+      sessionId: 'truthful-config', agentSessionId: 'old-agent', agentName: 'claude',
+      workingDir: '/tmp', channelId: 'telegram', status: 'active',
+      createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      platform: { topicId: 1200 }, acpState: { configOptions: [persistedMode] },
+    }
+    await store.save(record)
+    const agent = mockAgentInstance()
+    agent.initialSessionResponse = { configOptions: [{ ...persistedMode, currentValue: 'normal' }] }
+    agent.setConfigOption = vi.fn().mockRejectedValue(new Error('rejected'))
+    const localFactory = new SessionFactory(
+      { resume: vi.fn().mockResolvedValue(agent) } as any,
+      sessionManager,
+      null as any,
+      { emit: vi.fn() } as any,
+    )
+    localFactory.sessionStore = store
+
+    const session = await localFactory.create({
+      channelId: record.channelId,
+      agentName: record.agentName,
+      workingDirectory: record.workingDir,
+      resumeAgentSessionId: record.agentSessionId,
+      existingSessionId: record.sessionId,
+    })
+
+    expect(agent.setConfigOption).toHaveBeenCalledOnce()
+    expect(session.getConfigValue('mode')).toBe('normal')
+    expect(session.toAcpStateSnapshot().configOptions?.[0]).toMatchObject({ currentValue: 'normal' })
+    await sessionManager.discardSession(session)
+  })
+
+  it('uses the fail-closed config path during restore without starting a duplicate agent RPC', async () => {
+    const persistedMode: ConfigOption = {
+      id: 'mode', name: 'Mode', category: 'mode', type: 'select',
+      currentValue: 'bypassPermissions', options: MODE_OPTIONS,
+    }
+    const record: SessionRecord = {
+      sessionId: 'policy-blocked-restore', agentSessionId: 'old-agent', agentName: 'claude',
+      workingDir: '/tmp', channelId: 'telegram', status: 'active',
+      createdAt: new Date().toISOString(), lastActiveAt: new Date().toISOString(),
+      platform: { topicId: 1201 }, acpState: { configOptions: [persistedMode] },
+    }
+    await store.save(record)
+    const agent = mockAgentInstance()
+    agent.initialSessionResponse = { configOptions: [{ ...persistedMode, currentValue: 'normal' }] }
+    const chain = new MiddlewareChain()
+    chain.add('config:beforeChange', 'restore-policy', { handler: vi.fn().mockResolvedValue(null) })
+    const localFactory = new SessionFactory(
+      { resume: vi.fn().mockResolvedValue(agent) } as any,
+      sessionManager,
+      null as any,
+      { emit: vi.fn() } as any,
+    )
+    localFactory.sessionStore = store
+    localFactory.middlewareChain = chain
+
+    const session = await localFactory.create({
+      channelId: record.channelId,
+      agentName: record.agentName,
+      workingDirectory: record.workingDir,
+      resumeAgentSessionId: record.agentSessionId,
+      existingSessionId: record.sessionId,
+    })
+
+    expect(agent.setConfigOption).not.toHaveBeenCalled()
+    expect(session.getConfigValue('mode')).toBe('normal')
+    expect(session.toAcpStateSnapshot().configOptions?.[0]).toMatchObject({ currentValue: 'normal' })
+    await sessionManager.discardSession(session)
   })
 
   it('hydrates durable metadata before the initial resume commit and preserves it across another restart', async () => {

@@ -14,6 +14,8 @@ export interface SSEConnection {
   id: string;
   sessionId: string;
   tokenId: string;
+  authType?: 'secret' | 'jwt';
+  userId?: string;
   response: ServerResponse;
   connectedAt: Date;
   lastEventId?: string;
@@ -51,7 +53,12 @@ export class ConnectionManager {
    *
    * @throws if the global or per-session connection limit is reached.
    */
-  addConnection(sessionId: string, tokenId: string, response: ServerResponse): SSEConnection {
+  addConnection(
+    sessionId: string,
+    tokenId: string,
+    response: ServerResponse,
+    principal?: { authType?: 'secret' | 'jwt'; userId?: string },
+  ): SSEConnection {
     // Enforce global connection limit
     if (this.connections.size >= this.maxTotalConnections) {
       throw new Error('Maximum total connections reached');
@@ -64,7 +71,15 @@ export class ConnectionManager {
     }
 
     const id = `conn_${randomBytes(8).toString('hex')}`;
-    const connection: SSEConnection = { id, sessionId, tokenId, response, connectedAt: new Date() };
+    const connection: SSEConnection = {
+      id,
+      sessionId,
+      tokenId,
+      response,
+      connectedAt: new Date(),
+      authType: principal?.authType,
+      userId: principal?.userId,
+    };
     this.connections.set(id, connection);
 
     let sessionConnsSet = this.sessionIndex.get(sessionId);
@@ -109,7 +124,17 @@ export class ConnectionManager {
    * growth from queuing writes on a slow or stalled client.
    */
   broadcast(sessionId: string, serializedEvent: string): void {
+    this.broadcastWhere(sessionId, serializedEvent, () => true);
+  }
+
+  /** Broadcast only to connections whose authenticated principal may observe the event. */
+  broadcastWhere(
+    sessionId: string,
+    serializedEvent: string,
+    mayReceive: (connection: SSEConnection) => boolean,
+  ): void {
     for (const conn of this.getConnectionsBySession(sessionId)) {
+      if (!mayReceive(conn)) continue;
       if (conn.response.writableEnded) continue;
       try {
         const ok = conn.response.write(serializedEvent);

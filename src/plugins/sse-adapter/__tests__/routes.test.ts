@@ -5,6 +5,7 @@ import { sseRoutes, type SSERouteDeps } from '../routes.js';
 import { ConnectionManager } from '../connection-manager.js';
 import { EventBuffer } from '../event-buffer.js';
 import { globalErrorHandler } from '../../api-server/middleware/error-handler.js';
+import { SessionLimitError } from '../../../core/sessions/session-manager.js';
 
 function createMockSession(overrides: Record<string, unknown> = {}) {
   return {
@@ -177,6 +178,27 @@ describe('SSE Routes', () => {
       });
 
       expect(response.statusCode).toBe(400);
+    });
+
+    it('routes a live error session through atomic admission and returns SESSION_LIMIT at the cap', async () => {
+      session.status = 'error';
+      deps.core.handleMessageInSession.mockRejectedValueOnce(new SessionLimitError(1));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/sessions/sess-1/prompt',
+        payload: { prompt: 'Retry' },
+      });
+
+      expect(response.statusCode).toBe(429);
+      expect(response.json()).toEqual({
+        error: {
+          code: 'SESSION_LIMIT',
+          message: 'Maximum concurrent sessions reached (1)',
+          statusCode: 429,
+        },
+      });
+      expect(deps.core.handleMessageInSession).toHaveBeenCalledOnce();
     });
   });
 

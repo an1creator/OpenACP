@@ -152,7 +152,7 @@ describe("AgentInstance setConfigOption legacy fallback", () => {
     const result = await instance.setConfigOption("mode", { type: "select", value: "architect" });
 
     expect(setSessionMode).toHaveBeenCalledWith({ sessionId: "sess-1", modeId: "architect" });
-    expect(result).toEqual({ configOptions: [] });
+    expect(result).toEqual({ configOptions: [], legacyAcknowledged: true });
   });
 
   it("falls back to the legacy session/set_model request when setSessionConfigOption returns -32601", async () => {
@@ -172,7 +172,7 @@ describe("AgentInstance setConfigOption legacy fallback", () => {
       sessionId: "sess-1",
       modelId: "gemini-2.5-pro",
     });
-    expect(result).toEqual({ configOptions: [] });
+    expect(result).toEqual({ configOptions: [], legacyAcknowledged: true });
   });
 
   it("rethrows -32601 when configId is not mode or model", async () => {
@@ -247,5 +247,41 @@ describe("AgentInstance new ACP methods exist", () => {
   it("has closeSession method", async () => {
     const { AgentInstance } = await import("../agent-instance.js");
     expect(typeof AgentInstance.prototype.closeSession).toBe("function");
+  });
+});
+
+describe("AgentInstance ACP form elicitation client", () => {
+  it("forwards supported session-scoped forms and preserves accepted content", async () => {
+    const { AgentInstance } = await import("../agent-instance.js");
+    const instance = Object.create(AgentInstance.prototype) as InstanceType<typeof AgentInstance>;
+    (instance as any).sessionId = "agent-session";
+    (instance as any).onElicitationRequest = vi.fn().mockResolvedValue({
+      action: "accept", content: { answer: "yes" },
+    });
+    const client = (instance as any).createClient({});
+
+    await expect(client.unstable_createElicitation({
+      mode: "form",
+      sessionId: "agent-session",
+      message: "Choose",
+      requestedSchema: {
+        type: "object", properties: { answer: { type: "string", enum: ["yes", "no"] } },
+      },
+    })).resolves.toEqual({ action: "accept", content: { answer: "yes" } });
+  });
+
+  it.each([
+    [{ mode: "url", sessionId: "agent-session", elicitationId: "id", url: "https://example.com", message: "Open" }],
+    [{ mode: "form", requestId: "rpc-1", message: "Choose", requestedSchema: { type: "object" } }],
+    [{ mode: "form", sessionId: "wrong-session", message: "Choose", requestedSchema: { type: "object" } }],
+  ])("rejects unsupported elicitation scope or mode with invalid params", async (params) => {
+    const { AgentInstance } = await import("../agent-instance.js");
+    const instance = Object.create(AgentInstance.prototype) as InstanceType<typeof AgentInstance>;
+    (instance as any).sessionId = "agent-session";
+    (instance as any).onElicitationRequest = vi.fn();
+    const client = (instance as any).createClient({});
+
+    await expect(client.unstable_createElicitation(params)).rejects.toMatchObject({ code: -32602 });
+    expect((instance as any).onElicitationRequest).not.toHaveBeenCalled();
   });
 });

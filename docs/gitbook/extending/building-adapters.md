@@ -201,6 +201,11 @@ async deleteSessionThreadById(threadId: string): Promise<void> {
 }
 ```
 
+`newName` has already passed the connector-neutral core naming policy. New
+manual names are single-line values of at most 200 characters; generated names
+contain at most 5 words and 50 characters. Adapters should render the supplied
+value and must not derive a title from the raw user prompt.
+
 `deleteSessionThread(sessionId)` and `archiveSessionTopic(sessionId)` are optional
 session-aware cleanup hooks with base-class no-op defaults.
 `deleteSessionThreadById(threadId)` is an optional capability without a base

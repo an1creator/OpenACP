@@ -4,6 +4,10 @@ OpenACP has a centralized command system for chat commands (`/new`, `/cancel`, `
 
 This system covers **chat commands only** (Telegram, Discord, Slack), not CLI commands (`openacp start`, `openacp plugins install`).
 
+Runtime commands advertised by an ACP agent are not registered in `CommandRegistry`. Adapters expose them as session-scoped agent actions and route them through the normal message ingress pipeline. Button actions use the central security service before session lookup or metadata rendering, never lazy-resume a session from a stale button, and pass through normal ingress security again when submitted. Typed `CommandRegistry` commands retain precedence; an adapter action must use a distinct callback namespace so an agent command with the same name remains unambiguous.
+
+Telegram persists the complete rendered command-message set in `platform.skillMsgIds`, while `platform.skillMsgId` mirrors its first ID for backward compatibility. `platform.skillMsgDigest` makes repeated updates idempotent. `platform.skillStaleMsgIds` is a bounded cleanup journal: a replacement is fully sent, pinned, and persisted before superseded bot-owned messages are retired, and a restart retries any interrupted retirement without deleting an unverified message ID.
+
 ---
 
 ## How It Works

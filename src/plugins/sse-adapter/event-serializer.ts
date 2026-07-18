@@ -1,4 +1,5 @@
 import type { OutgoingMessage } from '../../core/types.js';
+import type { ElicitationRequest, ElicitationResolvedEvent } from '../../core/types.js';
 
 /**
  * Shape of every SSE event payload sent over the wire.
@@ -63,6 +64,22 @@ export function serializePermissionRequest(
   request: { id: string; description: string; options: Array<{ id: string; label: string; isAllow: boolean }> },
 ): string {
   return serializeSSE('permission_request', eventId, { sessionId, ...request });
+}
+
+/** Serialize a structured input request without connector ownership metadata. */
+export function serializeElicitationRequest(
+  sessionId: string,
+  eventId: string | undefined,
+  request: ElicitationRequest,
+): string {
+  const publicRequest = structuredClone(request) as ElicitationRequest & { owner?: unknown };
+  delete publicRequest.owner;
+  return serializeSSE('elicitation_request', eventId, { sessionId, request: publicRequest });
+}
+
+/** Serialize only safe terminal metadata; submitted content is never included. */
+export function serializeElicitationResolved(eventId: string | undefined, event: ElicitationResolvedEvent): string {
+  return serializeSSE('elicitation_resolved', eventId, event);
 }
 
 /** Serialize a session status/name change as an SSE `session_update` event. */

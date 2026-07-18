@@ -1,5 +1,61 @@
 ## Unreleased
 
+## 2026.718.3 - 2026-07-18
+
+### Added
+
+- Support connector-neutral ACP form elicitation with validated transient values,
+  Telegram form controls, authenticated REST resolution, owner-filtered SSE events,
+  and matching CLI and plugin SDK contracts. Adapters without a form renderer receive
+  a visible REST fallback for non-sensitive requests.
+- Expose agent-advertised commands as session-scoped Telegram actions while keeping
+  OpenACP slash commands authoritative, and persist multi-message command menus with
+  restart-safe cleanup.
+- Add a read-only session queue endpoint and richer agent catalog diagnostics for
+  source, freshness, validation, recovery, and reconciliation state.
+
+### Changed
+
+- Require exact reviewed npx and uvx runner versions, reconcile only provably newer
+  compatible SemVer or PEP 440 releases, and show installed and available versions
+  separately. Explicit registry refresh now fails truthfully when no valid live
+  catalog can be fetched.
+- Make agent installation and removal crash-consistent across OpenACP processes.
+  Binary zip, tar, and raw-executable distributions use checksum verification,
+  per-agent locking, atomic metadata commits, recovery journals, and bounded
+  post-commit cleanup without rolling back a working replacement.
+- Keep machine-readable CLI output stable regardless of documented global flag
+  order, including early migration and already-running checks, and extend packaged
+  artifact verification over those public command paths.
+- Serialize per-session configuration changes, revision-guard persistence, cancel
+  queued changes on agent replacement, and return the agent-acknowledged snapshot
+  for each request.
+
+### Fixed
+
+- Reserve concurrent-session capacity before ACP startup and lazy resume, retain one
+  exact lease per live session, and require errored sessions to reacquire capacity
+  before accepting more work.
+- Keep generated session titles to five words and 50 characters, reject prompt echoes,
+  preserve stored and manual names, and prevent late naming results from an old agent
+  from overwriting a switch, termination, or newer title.
+- Bound failed ACP initialization cleanup and daemon shutdown, retain truthful health
+  ownership until process exit is confirmed, and prevent abandoned children from
+  blocking supervised restart indefinitely.
+- Preserve form, command-menu, and SSE ownership through duplicate delivery,
+  reconnect, cancellation, switch, and teardown races without leaking submitted
+  values or resuming a stale session.
+
+### Security
+
+- Bind structured-input responses to the initiating API principal or canonical user,
+  require protected Codex fields to use Telegram delete-after-capture or HTTPS/
+  loopback REST, omit submitted values from history and events, and reject
+  agent-supplied string patterns instead of evaluating untrusted regular expressions.
+- Validate registry runners and binary archive paths before activation, preserve
+  corrupt agent stores for recovery, and keep installer and catalog diagnostics
+  bounded and free of credentials.
+
 ## 2026.718.2 - 2026-07-18
 
 ### Added

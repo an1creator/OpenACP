@@ -82,15 +82,20 @@ export async function setupAgents(instanceRoot?: string): Promise<{
     const claudeRegistry = catalog.findRegistryAgent("claude-acp");
     const installed = claudeRegistry ? await catalog.install("claude-acp") : null;
     if (!installed?.ok) {
+      const { createRequire } = await import("node:module");
+      const require = createRequire(import.meta.url);
+      const bundledClaude = require("@agentclientprotocol/claude-agent-acp/package.json") as {
+        version: string;
+      };
       // Fallback: register bundled claude-agent-acp directly into the catalog's
       // own store so it shows up in getAvailable() even when Claude CLI is absent.
       catalog.registerFallbackAgent("claude", {
         registryId: "claude-acp",
         name: "Claude Agent",
-        version: "bundled",
+        version: bundledClaude.version,
         distribution: "npx",
         command: "npx",
-        args: ["@agentclientprotocol/claude-agent-acp"],
+        args: [`@agentclientprotocol/claude-agent-acp@${bundledClaude.version}`],
         env: {},
         installedAt: new Date().toISOString(),
         binaryPath: null,
@@ -148,7 +153,9 @@ export async function setupAgents(instanceRoot?: string): Promise<{
         const result = await catalog.install(key);
         unmuteLogger();
         if (result.ok) {
-          installSpinner.stop(ok("done"));
+          installSpinner.stop(result.cleanupPending
+            ? warn("installed; previous runtime cleanup will retry later")
+            : ok("done"));
         } else {
           installSpinner.stop(warn(`skipped: ${result.error}`));
         }

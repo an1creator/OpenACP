@@ -25,6 +25,7 @@ function createMockAgentInstance(sessionId = "agent-session-1"): AgentInstance {
 
 function createMockDeps() {
   const mockAgent = createMockAgentInstance();
+  const admissionLease = { token: Symbol('admission'), released: false, committed: false };
 
   const agentManager = {
     spawn: vi.fn().mockResolvedValue(mockAgent),
@@ -32,6 +33,8 @@ function createMockDeps() {
   } as unknown as AgentManager;
 
   const sessionManager = {
+    reserveSessionAdmission: vi.fn().mockResolvedValue(admissionLease),
+    releaseSessionAdmission: vi.fn(),
     registerSession: vi.fn(),
   } as unknown as SessionManager;
 
@@ -39,7 +42,7 @@ function createMockDeps() {
 
   const eventBus = new EventBus();
 
-  return { agentManager, sessionManager, speechService, eventBus, mockAgent };
+  return { agentManager, sessionManager, speechService, eventBus, mockAgent, admissionLease };
 }
 
 describe("SessionFactory", () => {
@@ -142,6 +145,42 @@ describe("SessionFactory", () => {
       });
 
       expect(session.name).toBe("My Session");
+      expect(session.nameSource).toBe("system");
+    });
+
+    it("restores persisted name provenance for resume priority", async () => {
+      const session = await factory.create({
+        channelId: "telegram",
+        agentName: "claude",
+        workingDirectory: "/tmp/test",
+        existingSessionId: "restored-session",
+        initialName: "Manual Session",
+        initialNameSource: "manual",
+      });
+
+      expect(session.name).toBe("Manual Session");
+      expect(session.nameSource).toBe("manual");
+      expect(session.applyAgentTitle("Agent Override", session.captureAgentTitleContext()))
+        .toEqual({ status: "ignored", reason: "manual_priority" });
+    });
+
+    it("restores a long legacy name without rewriting it and permits an explicit rename", async () => {
+      const legacyName = `Legacy\n${"L".repeat(240)}`;
+      const session = await factory.create({
+        channelId: "telegram",
+        agentName: "claude",
+        workingDirectory: "/tmp/test",
+        existingSessionId: "legacy-session",
+        initialName: legacyName,
+      });
+
+      expect(session.name).toBe(legacyName);
+      expect(session.nameSource).toBe("persisted");
+
+      const renamed = "R".repeat(200);
+      expect(session.setName(renamed, "manual")).toBe(renamed);
+      expect(session.name).toBe(renamed);
+      expect(session.nameSource).toBe("manual");
     });
 
     it("registers session in SessionManager", async () => {
@@ -153,6 +192,8 @@ describe("SessionFactory", () => {
 
       expect(deps.sessionManager.registerSession).toHaveBeenCalledWith(
         session,
+        undefined,
+        deps.admissionLease,
       );
     });
 

@@ -20,7 +20,9 @@ export type SecurityAccessResult =
     };
 
 /**
- * Enforces user allowlist and global session-count limits on every incoming message.
+ * Enforces connector user access. Session capacity is reserved atomically by
+ * SessionManager before an ACP process is spawned, not while an existing
+ * session admits another prompt.
  *
  * Implemented as a plugin service (rather than baked into core) so that the access
  * policy is swappable — deployments can replace or extend it without touching core.
@@ -36,11 +38,8 @@ export class SecurityGuard {
    * Returns `{ allowed: true }` when the message may proceed, or
    * `{ allowed: false, reason }` when it should be blocked.
    *
-   * Two checks run in order:
-   * 1. **Allowlist** — if `allowedUserIds` is non-empty, the user's ID (coerced to string)
-   *    must appear in the list. Telegram/Slack IDs are numbers, so coercion is required.
-   * 2. **Session cap** — counts sessions in `active` or `initializing` state. `initializing`
-   *    is included because a session holds resources before it reaches `active`.
+   * If `allowedUserIds` is non-empty, the user's ID (coerced to string) must
+   * appear in the list. Telegram/Slack IDs are numbers, so coercion is required.
    */
   async checkAccess(
     message: { userId: string | number },
@@ -49,8 +48,6 @@ export class SecurityGuard {
   {
     const config = await this.getSecurityConfig();
     const allowedIds = config.allowedUserIds ?? [];
-    const maxSessions = config.maxConcurrentSessions ?? 20;
-
     if (!options?.skipUserAllowlist && allowedIds.length > 0) {
       // Coerce to string: platform adapters may deliver userId as a number (e.g. Telegram)
       const userId = String(message.userId);
@@ -58,15 +55,17 @@ export class SecurityGuard {
         return { allowed: false, code: "UNAUTHORIZED_USER", reason: "Unauthorized user" };
       }
     }
-    const active = this.sessionManager.listSessions()
-      .filter(s => s.status === "active" || s.status === "initializing");
-    if (active.length >= maxSessions) {
-      return {
-        allowed: false,
-        code: "SESSION_LIMIT",
-        reason: `Session limit reached (${maxSessions})`,
-      };
-    }
     return { allowed: true };
+  }
+
+  /** Non-reserving capacity snapshot for diagnostics; creation uses SessionManager. */
+  async checkSessionLimit(): Promise<SecurityAccessResult> {
+    const config = await this.getSecurityConfig();
+    const maxSessions = config.maxConcurrentSessions ?? 20;
+    const active = this.sessionManager.listSessions()
+      .filter((session) => session.status === "active" || session.status === "initializing");
+    return active.length >= maxSessions
+      ? { allowed: false, code: "SESSION_LIMIT", reason: `Session limit reached (${maxSessions})` }
+      : { allowed: true };
   }
 }

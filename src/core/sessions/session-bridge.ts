@@ -3,7 +3,7 @@ import type { IChannelAdapter } from "../channel.js";
 import type { MessageTransformer } from "../message-transformer.js";
 import type { NotificationManager } from "../../plugins/notifications/notification.js";
 import type { SessionManager } from "./session-manager.js";
-import type { AgentEvent, PermissionRequest, SessionStatus } from "../types.js";
+import type { AgentEvent, PermissionRequest, SessionStatus, ElicitationRequest, ElicitationResolvedEvent } from "../types.js";
 import type { EventBus } from "../event-bus.js";
 import type { FileServiceInterface } from "../plugin/types.js";
 import type { MiddlewareChain } from "../plugin/middleware-chain.js";
@@ -15,6 +15,7 @@ import micromatch from "micromatch";
 const { isMatch } = micromatch;
 import { isSystemEvent, getEffectiveTarget, extractSender, type TurnContext, type TurnRouting } from "./turn-context.js";
 import { Hook, BusEvent, SessionEv } from "../events.js";
+import type { AgentTitleContext } from "./session-naming.js";
 
 const log = createChildLogger({ module: "session-bridge" });
 const TERMINAL_STEP_TIMEOUT_MS = 2_000;
@@ -259,8 +260,11 @@ export class SessionBridge {
     // so session.on(SessionEv.AGENT_EVENT) fires for all sessions including headless ones.
     this.listen(this.session, SessionEv.AGENT_EVENT, (event: AgentEvent) => {
       const agentGeneration = this.session.agentGeneration;
+      const titleContext = event.type === "session_info_update" && event.title
+        ? this.session.captureAgentTitleContext()
+        : undefined;
       if (this.shouldForward(event)) {
-        this.dispatchAgentEvent(event, agentGeneration);
+        this.dispatchAgentEvent(event, agentGeneration, titleContext);
       } else {
         // Event is not forwarded to this adapter's channel, but EventBus observers
         // (e.g. /events SSE stream) still need to see it for cross-adapter visibility.
@@ -298,6 +302,64 @@ export class SessionBridge {
       } catch (err) {
         log.error({ err, sessionId: this.session.id, adapterId: this.adapterId }, "Failed to send permission request to adapter");
       }
+    });
+
+    this.listen(this.session, SessionEv.ELICITATION_REQUEST, (request: ElicitationRequest) => {
+      if (!this.isCurrentLiveBridge() || request.targetAdapterId !== this.adapterId) return;
+      const task = async () => {
+        const secureInput = this.adapter.capabilities.elicitation?.secureInput ?? "none";
+        if (
+          request.sensitiveFields?.length
+          && request.owner?.apiCredential === undefined
+          && (
+            !request.owner?.userId
+            || (secureInput !== "private" && secureInput !== "delete-after-capture")
+          )
+        ) {
+          await this.adapter.sendMessage(this.session.id, {
+            type: "system_message",
+            text: "The agent requested protected input, but this connector cannot capture it safely. The request was cancelled.",
+          });
+          this.session.elicitationGate.cancel(request.id, "delivery_failed");
+          return;
+        }
+        if (
+          request.sensitiveFields?.length
+          && request.owner?.apiCredential !== undefined
+          && secureInput !== "none"
+        ) {
+          await this.adapter.sendMessage(this.session.id, {
+            type: "system_message",
+            text: `Protected input required: ${request.message}\nRespond through the authenticated REST endpoint for this session.`,
+          });
+          return;
+        }
+        if (this.adapter.sendElicitationRequest && this.adapter.capabilities.elicitation?.form) {
+          await this.adapter.sendElicitationRequest(this.session.id, request);
+          return;
+        }
+        await this.adapter.sendMessage(this.session.id, {
+          type: "system_message",
+          text: `Input required: ${request.message}\nRespond through the authenticated REST endpoint for this session.`,
+        });
+      };
+      void task().catch((error) => {
+        log.error(
+          { err: error, sessionId: this.session.id, requestId: request.id, adapterId: this.adapterId },
+          "Failed to present structured input request",
+        );
+        this.session.elicitationGate.cancel(request.id, "delivery_failed");
+      });
+    });
+
+    this.listen(this.session, SessionEv.ELICITATION_RESOLVED, (event: ElicitationResolvedEvent) => {
+      if (!this.adapter.dismissElicitationRequest) return;
+      void this.adapter.dismissElicitationRequest(this.session.id, event).catch((error) => {
+        log.warn(
+          { err: error, sessionId: this.session.id, requestId: event.requestId, adapterId: this.adapterId },
+          "Failed to dismiss structured input UI",
+        );
+      });
     });
 
     // Wire lifecycle: persist status changes and auto-disconnect on terminal states
@@ -341,7 +403,7 @@ export class SessionBridge {
         if (!this.isCurrentLiveBridge()) return;
         await this.deps.sessionManager.patchRecord(
           this.session.id,
-          { name },
+          { name, nameSource: this.session.nameSource },
           { expectedSession: this.session },
         );
         if (!this.isCurrentLiveBridge()) return;
@@ -401,7 +463,10 @@ export class SessionBridge {
     }
 
     // Replay configOptions so the adapter reflects the current agent's options
-    if (this.session.configOptions.length > 0) {
+    if (
+      this.session.configOptions.length > 0
+      && !this.session.hasActiveHeadlessDelivery("agent:config")
+    ) {
       this.session.emit(SessionEv.AGENT_EVENT, { type: "config_option_update", options: this.session.configOptions });
     }
   }
@@ -412,7 +477,6 @@ export class SessionBridge {
     this.connected = false;
     this.lifecycleController?.abort();
     this.lifecycleController = null;
-    this.session.unregisterBridge(this.adapterId);
     this.cleanupFns.forEach(fn => fn());
     this.cleanupFns = [];
     // Only clear onPermissionRequest if this bridge currently owns it.
@@ -422,12 +486,19 @@ export class SessionBridge {
     if (current?.__bridgeId === this.adapterId) {
       this.session.agentInstance.onPermissionRequest = async () => "";
     }
+    // unregisterBridge restores the headless permission owner when this was the
+    // final attached bridge, so it must run after clearing the bridge handler.
+    this.session.unregisterBridge(this.adapterId);
     // Clean up transformer caches for this session
     this.deps.messageTransformer.clearSessionCaches?.(this.session.id);
   }
 
   /** Dispatch an agent event through middleware and to the adapter */
-  private async dispatchAgentEvent(event: AgentEvent, agentGeneration: number): Promise<void> {
+  private async dispatchAgentEvent(
+    event: AgentEvent,
+    agentGeneration: number,
+    titleContext?: AgentTitleContext,
+  ): Promise<void> {
     if (!this.canHandleAgentEvent(event, agentGeneration)) return;
     this.tracer?.log("core", { step: "agent_event", sessionId: this.session.id, event });
     const mw = this.deps.middlewareChain;
@@ -439,26 +510,30 @@ export class SessionBridge {
         if (!result) return; // blocked by middleware
         const transformedEvent = result.event;
         if (!this.canHandleAgentEvent(transformedEvent, agentGeneration)) return;
-        this.handleAgentEvent(transformedEvent, agentGeneration);
+        this.handleAgentEvent(transformedEvent, agentGeneration, titleContext);
       } catch {
         // Middleware error — proceed with original event
         if (!this.canHandleAgentEvent(event, agentGeneration)) return;
         try {
-          this.handleAgentEvent(event, agentGeneration);
+          this.handleAgentEvent(event, agentGeneration, titleContext);
         } catch (err) {
           log.error({ err, sessionId: this.session.id }, "Error handling agent event (middleware fallback)");
         }
       }
     } else {
       try {
-        this.handleAgentEvent(event, agentGeneration);
+        this.handleAgentEvent(event, agentGeneration, titleContext);
       } catch (err) {
         log.error({ err, sessionId: this.session.id }, "Error handling agent event");
       }
     }
   }
 
-  private handleAgentEvent(event: AgentEvent, agentGeneration: number): import('../types.js').OutgoingMessage | undefined {
+  private handleAgentEvent(
+    event: AgentEvent,
+    agentGeneration: number,
+    titleContext?: AgentTitleContext,
+  ): import('../types.js').OutgoingMessage | undefined {
     if (!this.canHandleAgentEvent(event, agentGeneration)) return undefined;
     const session = this.session;
     const ctx = {
@@ -554,7 +629,12 @@ export class SessionBridge {
 
         case "session_info_update":
           if (event.title) {
-            this.session.setName(event.title);
+            const decision = this.session.applyAgentTitle(
+              event.title,
+              titleContext ?? this.session.captureAgentTitleContext(),
+            );
+            if (decision.status === "ignored") break;
+            event = { ...event, title: decision.name };
             outgoing = this.deps.messageTransformer.transform(event);
             this.sendMessage(this.session.id, outgoing, agentGeneration);
           }
@@ -562,7 +642,8 @@ export class SessionBridge {
           break;
 
         case "config_option_update":
-          this.session.updateConfigOptions(event.options, agentGeneration).then(() => {
+          this.session.updateConfigOptions(event.options, agentGeneration).then((applied) => {
+            if (applied === false) return;
             if (!this.isCurrentLiveBridge() || this.session.agentGeneration !== agentGeneration) return;
             this.persistAcpState();
           }).catch(() => { /* middleware blocked or error — skip persist */ });

@@ -101,7 +101,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
         makeConfigGetter({ maxConcurrentSessions: 3 }),
         makeSessionManager([{ status: "active" }, { status: "active" }]),
       );
-      expect(await guard.checkAccess(makeMessage())).toEqual({ allowed: true });
+      expect(await guard.checkSessionLimit()).toEqual({ allowed: true });
     });
 
     it("rejects when active sessions == max (boundary)", async () => {
@@ -109,7 +109,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
         makeConfigGetter({ maxConcurrentSessions: 2 }),
         makeSessionManager([{ status: "active" }, { status: "active" }]),
       );
-      const result = await guard.checkAccess(makeMessage());
+      const result = await guard.checkSessionLimit();
       expect(result).toEqual({
         allowed: false,
         code: "SESSION_LIMIT",
@@ -125,7 +125,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
           { status: "active" },
         ]),
       );
-      expect((await guard.checkAccess(makeMessage())).allowed).toBe(false);
+      expect((await guard.checkSessionLimit()).allowed).toBe(false);
     });
 
     it("counts initializing sessions toward limit", async () => {
@@ -136,7 +136,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
           { status: "initializing" },
         ]),
       );
-      expect((await guard.checkAccess(makeMessage())).allowed).toBe(false);
+      expect((await guard.checkSessionLimit()).allowed).toBe(false);
     });
 
     it("counts mix of active and initializing", async () => {
@@ -147,7 +147,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
           { status: "initializing" },
         ]),
       );
-      expect((await guard.checkAccess(makeMessage())).allowed).toBe(false);
+      expect((await guard.checkSessionLimit()).allowed).toBe(false);
     });
 
     it("ignores finished sessions for limit", async () => {
@@ -159,7 +159,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
           { status: "finished" },
         ]),
       );
-      expect(await guard.checkAccess(makeMessage())).toEqual({ allowed: true });
+      expect(await guard.checkSessionLimit()).toEqual({ allowed: true });
     });
 
     it("ignores cancelled sessions for limit", async () => {
@@ -167,7 +167,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
         makeConfigGetter({ maxConcurrentSessions: 1 }),
         makeSessionManager([{ status: "cancelled" }]),
       );
-      expect(await guard.checkAccess(makeMessage())).toEqual({ allowed: true });
+      expect(await guard.checkSessionLimit()).toEqual({ allowed: true });
     });
 
     it("ignores error sessions for limit", async () => {
@@ -175,7 +175,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
         makeConfigGetter({ maxConcurrentSessions: 1 }),
         makeSessionManager([{ status: "error" }]),
       );
-      expect(await guard.checkAccess(makeMessage())).toEqual({ allowed: true });
+      expect(await guard.checkSessionLimit()).toEqual({ allowed: true });
     });
 
     it("maxConcurrentSessions of 0 always rejects", async () => {
@@ -183,7 +183,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
         makeConfigGetter({ maxConcurrentSessions: 0 }),
         makeSessionManager([]),
       );
-      expect((await guard.checkAccess(makeMessage())).allowed).toBe(false);
+      expect((await guard.checkSessionLimit()).allowed).toBe(false);
     });
   });
 
@@ -205,7 +205,7 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
       });
     });
 
-    it("authorized user still blocked by session limit", async () => {
+    it("authorized user keeps using an admitted session while new capacity is blocked", async () => {
       const guard = new SecurityGuard(
         makeConfigGetter({
           allowedUserIds: ["user-1"],
@@ -214,8 +214,12 @@ describe("SecurityGuard — Comprehensive Edge Cases", () => {
         makeSessionManager([{ status: "active" }]),
       );
       const result = await guard.checkAccess(makeMessage({ userId: "user-1" }));
-      expect(result.allowed).toBe(false);
-      expect((result as any).reason).toContain("Session limit");
+      expect(result).toEqual({ allowed: true });
+      expect(await guard.checkSessionLimit()).toEqual({
+        allowed: false,
+        code: "SESSION_LIMIT",
+        reason: "Session limit reached (1)",
+      });
     });
   });
 

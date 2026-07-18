@@ -69,6 +69,8 @@ export const Hook = {
   // --- Config ---
   /** Before config options change — modifiable, can block. */
   CONFIG_BEFORE_CHANGE: 'config:beforeChange',
+  /** After an acknowledged config change — read-only, observational. */
+  CONFIG_AFTER_CHANGE: 'config:afterChange',
 
   // --- Filesystem (agent-level) ---
   /** Before a file read operation — modifiable. */
@@ -128,6 +130,10 @@ export const BusEvent = {
   PERMISSION_REQUEST: 'permission:request',
   /** Fired after a permission request is resolved (approved or denied). */
   PERMISSION_RESOLVED: 'permission:resolved',
+  /** Fired when the agent requests structured user input. */
+  ELICITATION_REQUEST: 'elicitation:request',
+  /** Fired after structured user input reaches a terminal state. */
+  ELICITATION_RESOLVED: 'elicitation:resolved',
 
   // --- Message visibility ---
   /** Fired when a user message is queued (for cross-adapter input visibility). */
@@ -207,6 +213,10 @@ export const SessionEv = {
   AGENT_EVENT: 'agent_event',
   /** Agent is requesting user permission — blocks until resolved. */
   PERMISSION_REQUEST: 'permission_request',
+  /** Agent is requesting structured user input — blocks until resolved. */
+  ELICITATION_REQUEST: 'elicitation_request',
+  /** A structured input request reached a terminal state. */
+  ELICITATION_RESOLVED: 'elicitation_resolved',
   /** Session ended (agent finished, cancelled, or errored). */
   SESSION_END: 'session_end',
   /** Session status changed (e.g., initializing → active). */

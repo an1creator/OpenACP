@@ -1,5 +1,5 @@
 import { TypedEmitter } from "./utils/typed-emitter.js";
-import type { AgentEvent, PermissionRequest, SessionStatus, UsageRecordEvent } from "./types.js";
+import type { AgentEvent, PermissionRequest, SessionStatus, UsageRecordEvent, ElicitationRequest, ElicitationResolvedEvent } from "./types.js";
 import type { TurnSender } from "./sessions/turn-context.js";
 
 /**
@@ -36,6 +36,11 @@ export interface EventBusEvents {
     optionId?: string;
     resolvedBy?: string;
   }) => void;
+  "elicitation:request": (data: {
+    sessionId: string;
+    request: ElicitationRequest;
+  }) => void;
+  "elicitation:resolved": (data: ElicitationResolvedEvent) => void;
 
   // System lifecycle
   "kernel:booted": () => void;

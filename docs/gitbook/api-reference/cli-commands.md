@@ -82,18 +82,36 @@ openacp agents [subcommand]
 
 ### agents (no subcommand)
 
-Lists all installed agents and agents available to install from the registry.
+Lists all installed agents and agents available to install from the registry. Human and JSON output report the catalog source (`network`, `cache`, `snapshot`, or `none`) and whether it is stale. Installed entries keep their running `version`; `availableVersion` and `updateRequired` describe an explicit pending update.
 
 **Example**
 ```bash
 openacp agents
 openacp agents --json
+openacp --json agents
 ```
 
 **JSON output** (`data` shape):
 ```json
-{ "agents": [{ "key": "claude", "name": "Claude Code", "version": "1.0.0", "distribution": "npm", "description": "...", "installed": true, "available": true, "missingDeps": [] }] }
+{ "agents": [{ "key": "claude", "name": "Claude Code", "version": "1.0.0", "availableVersion": null, "updateRequired": false, "distribution": "npx", "description": "...", "installed": true, "available": true, "missingDeps": [] }], "catalog": { "source": "cache", "stale": false, "fetchedAt": "..." } }
 ```
+
+An invalid or far-future cache timestamp is reported with `stale: true` and
+`cacheTimestampInvalid: true`. If registry reconciliation cannot be written,
+the prior installed definitions stay active and the catalog status includes
+`reconciliationPending: true` with a bounded diagnostic. A mixed registry
+payload reports `invalidEntries` and `lastValidationWarning`; only its valid,
+non-duplicate entries are listed or cached. Startup transaction recovery is
+reported through `recoveredAgentTransactions`; an invalid or not-yet-cleanable
+journal sets `agentTransactionRecoveryPending` with a bounded diagnostic.
+When installed runner metadata cannot be compared safely with its registry
+record, catalog status includes `runnerReconciliationSkipped` and
+`lastRunnerReconciliationWarning`; the installed command and version remain
+unchanged until an explicit install.
+Package-runner entries are valid only when their npx or uvx package argument
+selects the exact registry version. Moving tags, ranges, wildcards, conditional
+markers, URLs, and VCS sources count as invalid entries and never replace the
+active catalog.
 
 ### agents install
 
@@ -105,7 +123,7 @@ openacp agents install <name> [--force] [--json]
 
 | Flag | Description |
 |---|---|
-| `--force` | Reinstall even if already installed |
+| `--force` | Explicitly replace the currently installed version |
 | `--json` | Output result as JSON |
 
 ```bash
@@ -116,8 +134,25 @@ openacp agents install claude --json
 
 **JSON output** (`data` shape):
 ```json
-{ "key": "claude", "version": "1.0.0", "installed": true }
+{ "key": "claude", "version": "1.0.0", "installed": true, "alreadyInstalled": false, "cleanupPending": false }
 ```
+
+Installing the active registry version again succeeds with
+`alreadyInstalled: true` and does not change runtime files or metadata. A
+different installed version is retained unless `--force` is supplied. This
+decision is repeated under the per-agent transaction lock, so an install that
+finished in another OpenACP process during the download cannot be overwritten
+or downgraded accidentally.
+
+For binary replacements, `cleanupPending: true` means the new runtime and
+`agents.json` metadata are already committed, but deletion of the marked prior
+runtime was blocked. The install still exits successfully and a later install
+retries the bounded cleanup when `cleanupRetryable` is true. `cleanupMessage` is
+included when cleanup is pending and gives a truthful manual-recovery warning
+when automatic retry is not safe. Concurrent OpenACP processes may download the
+same agent in parallel, but activation, metadata persistence, rollback, and
+cleanup are serialized per agent. A later install automatically recovers a
+transaction whose owning process exited during that commit.
 
 ### agents uninstall
 
@@ -130,6 +165,12 @@ openacp agents uninstall <name> [--json]
 | Flag | Description |
 |---|---|
 | `--json` | Output result as JSON |
+
+For binary agents, runtime removal and `agents.json` removal are journaled and
+serialized with installation. A process exit before metadata removal restores
+the prior runtime on the next startup, install, uninstall, or `openacp doctor` repair. A
+process exit after metadata removal completes the uninstall and retries only
+the detached old-runtime cleanup; it never recreates stale metadata.
 
 ```bash
 openacp agents uninstall gemini
@@ -186,7 +227,10 @@ Force-refreshes the agent catalog from the ACP Registry, bypassing the normal st
 
 ```
 openacp agents refresh
+openacp agents refresh --json
 ```
+
+A successful refresh reports the live valid-agent count. Network, proxy, HTTP, an all-invalid registry response, or response-validation failure exits non-zero; JSON mode uses `AGENT_REGISTRY_REFRESH_FAILED`. Existing cached or packaged data remains available for ordinary browsing and is marked stale. If an automatic refresh is already running, this command joins it instead of starting a second request.
 
 ---
 

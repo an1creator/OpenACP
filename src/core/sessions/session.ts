@@ -1,21 +1,120 @@
 import { nanoid } from "nanoid";
 import type { AgentInstance } from "../agents/agent-instance.js";
-import type { AgentCapabilities, AgentCommand, AgentEvent, AgentSwitchEntry, Attachment, PermissionRequest, SessionStatus, ConfigOption, SessionModeState, SessionModelState, TurnMeta } from "../types.js";
+import type { AgentCapabilities, AgentCommand, AgentEvent, AgentSwitchEntry, Attachment, PermissionRequest, SessionStatus, ConfigOption, SetConfigOptionValue, SessionModeState, SessionModelState, TurnMeta, ElicitationRequest, ElicitationResolvedEvent } from "../types.js";
+import type { CreateElicitationRequest, CreateElicitationResponse, ElicitationSchema } from "@agentclientprotocol/sdk";
 import { TypedEmitter } from "../utils/typed-emitter.js";
 import { PromptQueue } from "./prompt-queue.js";
 import { PermissionGate } from "./permission-gate.js";
+import { ElicitationGate } from "./elicitation-gate.js";
 import { createChildLogger, createSessionLogger, closeSessionLogger, type Logger } from "../utils/log.js";
 import type { SpeechService } from "../../plugins/speech/exports.js";
 import type { MiddlewareChain } from "../plugin/middleware-chain.js";
 import * as fs from "node:fs";
 import type { TurnRouting } from "./turn-context.js";
-import { createTurnContext, type TurnContext } from "./turn-context.js";
+import { createTurnContext, getEffectiveTarget, type TurnContext } from "./turn-context.js";
+import {
+  captureAgentTitleContext,
+  isPromptEcho,
+  normalizeSessionName,
+  restoreSessionName,
+  type AgentTitleContext,
+  type AgentTitleDecision,
+  type SessionNameSource,
+} from "./session-naming.js";
 import { Hook, SessionEv } from "../events.js";
 import { redactNetworkSecrets } from "../security/network-redaction.js";
 const moduleLog = createChildLogger({ module: "session" });
 
+type FormElicitationRequest = CreateElicitationRequest & {
+  mode: "form";
+  requestedSchema: ElicitationSchema;
+  sessionId: string;
+  toolCallId?: string | null;
+};
+
 // Telegram expands escaped HTML entities, so this keeps the rendered warning below its 4,096-character limit.
 const MAX_TRANSCRIPTION_ERROR_LENGTH = 700;
+
+const CONFIG_CHANGE_BLOCKED = "Configuration change was blocked by policy.";
+const CONFIG_CHANGE_SUPERSEDED = "Configuration change was cancelled because the session changed.";
+const CONFIG_CHANGE_UNACKNOWLEDGED = "The agent did not acknowledge the configuration change.";
+const CONFIG_CHANGE_QUEUE_TIMEOUT = "Configuration change could not start before the queue timeout.";
+const CONFIG_MUTATION_QUEUE_TIMEOUT_MS = 30_000;
+
+/** Non-enumerable ownership marker used during headless → bridge handoff. */
+export const HEADLESS_DELIVERY_CLAIM = Symbol("openacp.headlessDeliveryClaim");
+
+export interface HeadlessDeliveryClaim {
+  readonly sessionId: string;
+  readonly id: number;
+  readonly epoch: number;
+  readonly kind: string;
+}
+
+export type HeadlessClaimedPayload<T extends object> = T & {
+  [HEADLESS_DELIVERY_CLAIM]?: HeadlessDeliveryClaim;
+};
+
+export function markHeadlessDelivery<T extends object>(
+  payload: T,
+  claim: HeadlessDeliveryClaim,
+): HeadlessClaimedPayload<T> {
+  Object.defineProperty(payload, HEADLESS_DELIVERY_CLAIM, {
+    configurable: false,
+    enumerable: false,
+    value: claim,
+    writable: false,
+  });
+  return payload;
+}
+
+export interface ConfigOptionChangeOutcome {
+  acknowledged: boolean;
+  authoritative: boolean;
+  effective?: ConfigOption;
+  reason?: "blocked" | "superseded" | "unacknowledged" | "queue_timeout";
+  message?: string;
+  /** Monotonic state revision associated with configOptions. */
+  revision: number;
+  /** Stable state snapshot at the mutation's linearization point. */
+  configOptions: ConfigOption[];
+}
+
+function sanitizeElicitationSchema(schema: ElicitationSchema): ElicitationSchema {
+  const sanitized = structuredClone(schema) as ElicitationSchema & { _meta?: unknown };
+  delete sanitized._meta;
+  for (const property of Object.values(sanitized.properties ?? {})) {
+    delete (property as { _meta?: unknown })._meta;
+    if ("oneOf" in property && Array.isArray(property.oneOf)) {
+      for (const option of property.oneOf) delete (option as { _meta?: unknown })._meta;
+    }
+    if ("items" in property && property.items && typeof property.items === "object") {
+      delete (property.items as { _meta?: unknown })._meta;
+      if ("anyOf" in property.items && Array.isArray(property.items.anyOf)) {
+        for (const option of property.items.anyOf) delete (option as { _meta?: unknown })._meta;
+      }
+    }
+  }
+  return sanitized;
+}
+
+function codexSensitiveFields(request: FormElicitationRequest): string[] {
+  return Object.entries(request.requestedSchema.properties ?? {})
+    .filter(([, property]) => {
+      const meta = property._meta as Record<string, unknown> | null | undefined;
+      const codex = meta?.codex;
+      return typeof codex === "object" && codex !== null && (codex as { isSecret?: unknown }).isSecret === true;
+    })
+    .map(([fieldId]) => fieldId);
+}
+
+function codexAutoResolutionMs(request: FormElicitationRequest): number | undefined {
+  const codex = request._meta?.codex;
+  const value = typeof codex === "object" && codex !== null
+    ? (codex as { autoResolutionMs?: unknown }).autoResolutionMs
+    : undefined;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
 
 function formatPromptError(err: unknown): string {
   const message = extractErrorMessage(err);
@@ -153,6 +252,25 @@ export class PromptBlockedError extends Error {
   }
 }
 
+/** One prompt-local admission result. Rollback is idempotent and only releases a newly acquired slot. */
+export interface PromptAdmission {
+  commit(): void;
+  rollback(): void;
+}
+
+/** Manager-provided guard used before an errored live session can accept or start more work. */
+export type PromptAdmissionGuard = () => Promise<PromptAdmission>;
+
+interface AutoNameAttempt {
+  token: number;
+  nameRevision: number;
+  nameSource: SessionNameSource | undefined;
+  name: string | undefined;
+  agentInstance: AgentInstance;
+  agentGeneration: number;
+  agentOwnershipEpoch: number;
+}
+
 // Session state machine — valid transitions: from → Set<to>
 //
 //   initializing → active (first prompt received)
@@ -176,6 +294,8 @@ const VALID_TRANSITIONS: Record<SessionStatus, Set<SessionStatus>> = {
 export interface SessionEvents {
   agent_event: (event: AgentEvent) => void;
   permission_request: (request: PermissionRequest) => void;
+  elicitation_request: (request: ElicitationRequest) => void;
+  elicitation_resolved: (event: ElicitationResolvedEvent) => void;
   session_end: (reason: string) => void;
   status_change: (from: SessionStatus, to: SessionStatus) => void;
   named: (name: string) => void;
@@ -214,19 +334,42 @@ export class Session extends TypedEmitter<SessionEvents> {
   private _agentInstance!: AgentInstance;
   get agentInstance(): AgentInstance { return this._agentInstance; }
   private _agentGeneration = 0;
+  private _configMutationTail: Promise<void> = Promise.resolve();
+  private _configMutationEpoch = 0;
+  private _configMutationPaused = false;
+  private _configRevision = 0;
+  private _resolveConfigMutationInvalidation: () => void = () => {};
+  private _configMutationInvalidation: Promise<void> = new Promise((resolve) => {
+    this._resolveConfigMutationInvalidation = resolve;
+  });
+  private _headlessPermissionHandler?: NonNullable<AgentInstance["onPermissionRequest"]>;
+  private _agentOwnershipEpoch = 0;
   /** Monotonic identity for async continuations crossing an agent replacement. */
   get agentGeneration(): number { return this._agentGeneration; }
+  /** Monotonic identity for durable config snapshots. */
+  get configRevision(): number { return this._configRevision; }
   /** Setting agentInstance wires the agent→session event relay and commands buffer.
    *  This happens both at construction and on agent switch (switchAgent). */
   set agentInstance(agent: AgentInstance) {
+    this.invalidateConfigMutations(false);
+    this.invalidateAutoNaming();
+    this._agentOwnershipEpoch += 1;
     this._agentInstance = agent;
     this._agentGeneration += 1;
     this.wireAgentRelay();
     this.wireCommandsBuffer();
+    this.wireElicitationHandler();
+    if (this._connectedBridgeIds.size === 0 && this._headlessPermissionHandler) {
+      this._agentInstance.onPermissionRequest = this._headlessPermissionHandler;
+    }
   }
   agentSessionId: string = "";
   private _status: SessionStatus = "initializing";
   name?: string;
+  private _nameSource: SessionNameSource | undefined;
+  private _nameRevision = 0;
+  private _autoNameAttemptToken = 0;
+  private _autoNameOperation: Promise<void> | null = null;
   createdAt: Date = new Date();
   voiceMode: "off" | "next" | "on" = "off";
   configOptions: ConfigOption[] = [];
@@ -249,6 +392,9 @@ export class Session extends TypedEmitter<SessionEvents> {
   activeTurnContext: TurnContext | null = null;
 
   readonly permissionGate = new PermissionGate();
+  readonly elicitationGate = new ElicitationGate((event) => {
+    this.emit(SessionEv.ELICITATION_RESOLVED, event);
+  });
   private readonly queue: PromptQueue;
   private speechService?: SpeechService;
   private pendingContext: string | null = null;
@@ -271,8 +417,12 @@ export class Session extends TypedEmitter<SessionEvents> {
     operation: Promise<ObservedOperation>;
   }>();
   private _queueCloseOperation: Promise<ObservedOperation> | null = null;
+  private _promptAdmissionGuard?: PromptAdmissionGuard;
   /** Bridges connected before a terminal event are the final-delivery recipients. */
   private readonly _connectedBridgeIds = new Set<string>();
+  private _headlessDeliveryEpoch = 0;
+  private _nextHeadlessDeliveryClaimId = 1;
+  private readonly _activeHeadlessDeliveryClaims = new Map<number, HeadlessDeliveryClaim>();
   private _nextTerminalDeliveryGeneration = 1;
   private _terminalDelivery: {
     generation: number;
@@ -300,6 +450,11 @@ export class Session extends TypedEmitter<SessionEvents> {
     return this._lifecycleState !== 'live';
   }
 
+  /** Install the lifecycle owner's atomic capacity guard. */
+  setPromptAdmissionGuard(guard: PromptAdmissionGuard): void {
+    this._promptAdmissionGuard = guard;
+  }
+
   /**
    * Cross the monotonic terminal boundary synchronously, before cancellation does
    * any durable I/O. This does not itself cancel prompts or destroy resources.
@@ -307,6 +462,10 @@ export class Session extends TypedEmitter<SessionEvents> {
   beginTermination(): void {
     if (this._lifecycleState !== 'live') return;
     this._lifecycleState = 'terminating';
+    this.invalidateAutoNaming();
+    this._agentOwnershipEpoch += 1;
+    this.invalidateConfigMutations(true);
+    this.elicitationGate.cancelAll("session_end");
     this._notifyTermination();
   }
 
@@ -364,6 +523,116 @@ export class Session extends TypedEmitter<SessionEvents> {
     this.agentRelayCleanup = () => instance.off(SessionEv.AGENT_EVENT, handler);
   }
 
+  private wireElicitationHandler(): void {
+    const instance = this._agentInstance;
+    const generation = this.agentGeneration;
+    const ownershipEpoch = this._agentOwnershipEpoch;
+    instance.onElicitationRequest = (request) => {
+      if (
+        this.isTerminating
+        || this.agentInstance !== instance
+        || this.agentGeneration !== generation
+        || this._agentOwnershipEpoch !== ownershipEpoch
+        || request.mode !== "form"
+        || !("sessionId" in request)
+        || !("requestedSchema" in request)
+        || typeof request.requestedSchema !== "object"
+        || request.requestedSchema === null
+      ) return Promise.resolve({ action: "cancel" });
+      return this.requestElicitation(
+        request as FormElicitationRequest,
+        instance,
+        generation,
+        ownershipEpoch,
+      );
+    };
+  }
+
+  private async requestElicitation(
+    request: FormElicitationRequest,
+    instance: AgentInstance,
+    generation: number,
+    ownershipEpoch: number,
+  ): Promise<CreateElicitationResponse> {
+    if (
+      this.isTerminating
+      || this.agentInstance !== instance
+      || this.agentGeneration !== generation
+      || this._agentOwnershipEpoch !== ownershipEpoch
+    ) return { action: "cancel" };
+    const turn = this.activeTurnContext;
+    const targetAdapterId = turn ? getEffectiveTarget(turn) ?? undefined : this.channelId;
+    const channelUser = turn?.meta?.channelUser;
+    const principal = turn?.meta?.principal;
+    const identity = turn?.meta?.identity;
+    const sourceAdapterId = typeof channelUser === "object" && channelUser !== null
+      && typeof (channelUser as { channelId?: unknown }).channelId === "string"
+      ? (channelUser as { channelId: string }).channelId
+      : turn?.sourceAdapterId ?? this.channelId;
+    const owner = {
+      adapterId: sourceAdapterId,
+      userId: typeof channelUser === "object" && channelUser !== null
+        && typeof (channelUser as { userId?: unknown }).userId === "string"
+        ? (channelUser as { userId: string }).userId
+        : undefined,
+      canonicalUserId: typeof principal === "object" && principal !== null
+        && (principal as { type?: unknown }).type === "api"
+        && typeof (principal as { linkedUserId?: unknown }).linkedUserId === "string"
+        ? (principal as { linkedUserId: string }).linkedUserId
+        : typeof identity === "object" && identity !== null
+          && typeof (identity as { userId?: unknown }).userId === "string"
+          ? (identity as { userId: string }).userId
+          : undefined,
+      conversationId: sourceAdapterId ? this.threadIds.get(sourceAdapterId) : undefined,
+      apiCredential: typeof principal === "object" && principal !== null
+        && (principal as { type?: unknown }).type === "api"
+        ? (principal as { credential?: "secret" | "jwt" }).credential
+        : undefined,
+      apiTokenId: typeof principal === "object" && principal !== null
+        && (principal as { type?: unknown }).type === "api"
+        && typeof (principal as { tokenId?: unknown }).tokenId === "string"
+        ? (principal as { tokenId: string }).tokenId
+        : undefined,
+    };
+    const requestId = nanoid(12);
+    const sensitiveFields = codexSensitiveFields(request);
+    try {
+      if (
+        this.isTerminating
+        || this.agentInstance !== instance
+        || this.agentGeneration !== generation
+        || this._agentOwnershipEpoch !== ownershipEpoch
+      ) return { action: "cancel" };
+      const response = this.elicitationGate.request({
+        id: requestId,
+        sessionId: this.id,
+        turnId: turn?.turnId,
+        targetAdapterId,
+        toolCallId: request.toolCallId ?? undefined,
+        mode: "form",
+        message: request.message,
+        requestedSchema: sanitizeElicitationSchema(request.requestedSchema),
+        owner,
+        sensitiveFields: sensitiveFields.length > 0 ? sensitiveFields : undefined,
+        timeoutMs: codexAutoResolutionMs(request),
+      });
+      const pending = this.elicitationGate.get(requestId);
+      if (!pending) return { action: "cancel" };
+      this.emit(SessionEv.ELICITATION_REQUEST, pending);
+      return await response;
+    } catch (error) {
+      this.log.warn(
+        { requestId, error: error instanceof Error ? error.message : String(error) },
+        "ACP form input request was rejected",
+      );
+      this.emit(SessionEv.AGENT_EVENT, {
+        type: "system_message",
+        message: "The agent requested input that OpenACP could not present safely. The request was cancelled.",
+      });
+      return { action: "cancel" };
+    }
+  }
+
   /** Wire a listener on the current agentInstance to buffer commands_update events.
    *  Must be called after every agentInstance replacement (constructor + switchAgent). */
   private commandsBufferCleanup?: () => void;
@@ -407,6 +676,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     // Cancellation/destroy owns the lifecycle once beginTermination() fires.
     // Delayed middleware or agent events must not race it to another terminal state.
     if (this.isTerminating) return false;
+    this.elicitationGate.cancelAll("session_end");
     this.transition("finished");
     this.emit(SessionEv.SESSION_END, reason ?? "completed");
     return true;
@@ -415,14 +685,60 @@ export class Session extends TypedEmitter<SessionEvents> {
   /** Track bridge membership so a terminal event can snapshot exact recipients. */
   registerBridge(adapterId: string): void {
     if (this._status === "finished" || this.isTerminating) return;
+    if (this._connectedBridgeIds.size === 0) this._headlessDeliveryEpoch += 1;
     this._connectedBridgeIds.add(adapterId);
   }
 
   unregisterBridge(adapterId: string): void {
-    this._connectedBridgeIds.delete(adapterId);
+    const removed = this._connectedBridgeIds.delete(adapterId);
+    if (removed && this._connectedBridgeIds.size === 0) this._headlessDeliveryEpoch += 1;
+    if (this._connectedBridgeIds.size === 0 && this._headlessPermissionHandler && !this.isTerminating) {
+      this.agentInstance.onPermissionRequest = this._headlessPermissionHandler;
+    }
     const delivery = this._terminalDelivery;
     if (!delivery?.recipients.has(adapterId)) return;
     this.completeTerminalDelivery(adapterId, delivery.generation);
+  }
+
+  get hasConnectedBridges(): boolean {
+    return this._connectedBridgeIds.size > 0;
+  }
+
+  /** Claim one event synchronously before the first bridge ownership cutover. */
+  claimHeadlessDelivery(kind: string): HeadlessDeliveryClaim | null {
+    if (this.hasConnectedBridges || this.isTerminating) return null;
+    const claim: HeadlessDeliveryClaim = Object.freeze({
+      sessionId: this.id,
+      id: this._nextHeadlessDeliveryClaimId++,
+      epoch: this._headlessDeliveryEpoch,
+      kind,
+    });
+    this._activeHeadlessDeliveryClaims.set(claim.id, claim);
+    return claim;
+  }
+
+  isHeadlessDeliveryClaimActive(claim: HeadlessDeliveryClaim | undefined): boolean {
+    if (!claim || claim.sessionId !== this.id) return false;
+    return this._activeHeadlessDeliveryClaims.get(claim.id) === claim;
+  }
+
+  releaseHeadlessDelivery(claim: HeadlessDeliveryClaim): void {
+    if (this._activeHeadlessDeliveryClaims.get(claim.id) === claim) {
+      this._activeHeadlessDeliveryClaims.delete(claim.id);
+    }
+  }
+
+  hasActiveHeadlessDelivery(kind: string): boolean {
+    for (const claim of this._activeHeadlessDeliveryClaims.values()) {
+      if (claim.kind === kind) return true;
+    }
+    return false;
+  }
+
+  /** Preserve headless permission ownership across attach/detach and agent replacement. */
+  setHeadlessPermissionHandler(handler: NonNullable<AgentInstance["onPermissionRequest"]>): void {
+    this._headlessPermissionHandler = handler;
+    if (!this.hasConnectedBridges) this.agentInstance.onPermissionRequest = handler;
   }
 
   /**
@@ -573,6 +889,7 @@ export class Session extends TypedEmitter<SessionEvents> {
 
   /** Transition to cancelled — from initializing, active, or error. */
   markCancelled(): void {
+    this.elicitationGate.cancelAll("session_end");
     this.transition("cancelled");
   }
 
@@ -658,9 +975,23 @@ export class Session extends TypedEmitter<SessionEvents> {
     if (this.isTerminating || this._status === "finished" || this._status === "cancelled") {
       throw new SessionTerminatingError(this.id);
     }
-    onAccepting?.(turnId);
-    const completion = this.queue.submit(text, userPrompt, attachments, routing, turnId, turnMeta);
-    return { turnId, completion };
+    const admission = this._promptAdmissionGuard
+      ? await this._promptAdmissionGuard()
+      : undefined;
+    const postAdmissionStatus = this._status as SessionStatus;
+    if (this.isTerminating || postAdmissionStatus === "finished" || postAdmissionStatus === "cancelled") {
+      admission?.rollback();
+      throw new SessionTerminatingError(this.id);
+    }
+    try {
+      onAccepting?.(turnId);
+      const completion = this.queue.submit(text, userPrompt, attachments, routing, turnId, turnMeta);
+      admission?.commit();
+      return { turnId, completion };
+    } catch (error) {
+      admission?.rollback();
+      throw error;
+    }
   }
 
   async enqueuePrompt(text: string, attachments?: Attachment[], routing?: TurnRouting, externalTurnId?: string, meta?: TurnMeta): Promise<string> {
@@ -699,6 +1030,26 @@ export class Session extends TypedEmitter<SessionEvents> {
     // Terminal sessions may still have queued callbacks, but cannot start work.
     if (this.isTerminating || this._status === "finished" || this._status === "cancelled") return;
 
+    // A previous queued turn may have failed after later prompts were accepted.
+    // Reacquire capacity before publishing turn-start or returning to active.
+    let reactivationAdmission: PromptAdmission | undefined;
+    if (this._status === "error" && this._promptAdmissionGuard) {
+      reactivationAdmission = await this._promptAdmissionGuard();
+      const postAdmissionStatus = this._status as SessionStatus;
+      if (this.isTerminating || postAdmissionStatus === "finished" || postAdmissionStatus === "cancelled") {
+        reactivationAdmission?.rollback();
+        return;
+      }
+    }
+
+    if (this._status === "initializing" || this._status === "error") {
+      if (!this.activate()) {
+        reactivationAdmission?.rollback();
+        return;
+      }
+    }
+    reactivationAdmission?.commit();
+
     // Seal turn context — bridges use this to decide routing for every emitted event
     // Pass the pre-generated turnId so message:queued and message:processing share the same ID
     this.activeTurnContext = createTurnContext(
@@ -717,9 +1068,6 @@ export class Session extends TypedEmitter<SessionEvents> {
     this.promptCount++;
     this.emit(SessionEv.PROMPT_COUNT_CHANGED, this.promptCount);
 
-    if (this._status === "initializing" || this._status === "error") {
-      this.activate();
-    }
     const promptStart = Date.now();
     this.log.debug("Prompt execution started");
 
@@ -755,6 +1103,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     } catch (error) {
       if (signal?.aborted) {
         const interruptedTurnId = this.activeTurnContext?.turnId ?? turnId ?? '';
+        this.elicitationGate.cancelTurn(interruptedTurnId);
         this._abortedTurnIds.delete(interruptedTurnId);
         if (this.middlewareChain) {
           this.middlewareChain.execute(Hook.TURN_END, {
@@ -858,6 +1207,7 @@ export class Session extends TypedEmitter<SessionEvents> {
       this.off(SessionEv.AGENT_EVENT, turnTextListener);
 
       const finalTurnId = this.activeTurnContext?.turnId ?? turnId ?? '';
+      this.elicitationGate.cancelTurn(finalTurnId);
       const wasExplicitlyAborted = this._abortedTurnIds.has(finalTurnId);
       if (wasExplicitlyAborted) this._abortedTurnIds.delete(finalTurnId);
       const wasAborted = wasExplicitlyAborted || signal?.aborted === true;
@@ -907,8 +1257,8 @@ export class Session extends TypedEmitter<SessionEvents> {
       });
     }
 
-    // Also trigger auto-naming when name is still the adopted session placeholder.
-    if (!this.name || this.name === "Adopted session") {
+    // Also trigger auto-naming when name is still an adopted-session placeholder.
+    if (!this.name || this._nameSource === "placeholder") {
       this._activePromptPhase = 'agent';
       try {
         await this.autoName(turnAgent);
@@ -1033,7 +1383,27 @@ export class Session extends TypedEmitter<SessionEvents> {
   // Sends a special prompt to the agent to generate a short session title.
   // The session emitter is paused (excluding non-agent_event emissions) so the naming
   // prompt's output is intercepted by a capture handler instead of being forwarded to adapters.
-  private async autoName(agentInstance: AgentInstance): Promise<void> {
+  private autoName(agentInstance: AgentInstance): Promise<void> {
+    if (this._autoNameOperation) return this._autoNameOperation;
+
+    const attempt: AutoNameAttempt = {
+      token: ++this._autoNameAttemptToken,
+      nameRevision: this._nameRevision,
+      nameSource: this._nameSource,
+      name: this.name,
+      agentInstance,
+      agentGeneration: this.agentGeneration,
+      agentOwnershipEpoch: this._agentOwnershipEpoch,
+    };
+    let operation!: Promise<void>;
+    operation = this.runAutoName(attempt).finally(() => {
+      if (this._autoNameOperation === operation) this._autoNameOperation = null;
+    });
+    this._autoNameOperation = operation;
+    return operation;
+  }
+
+  private async runAutoName(attempt: AutoNameAttempt): Promise<void> {
     let title = "";
 
     // Temporarily remove all agent_event listeners so auto-name output
@@ -1047,32 +1417,56 @@ export class Session extends TypedEmitter<SessionEvents> {
     // don't reach the adapter during auto-name. The AgentInstance emitter
     // stays active — we just intercept with our capture handler.
     this.pause((event) => event !== SessionEv.AGENT_EVENT);
-    agentInstance.on(SessionEv.AGENT_EVENT, captureHandler);
+    attempt.agentInstance.on(SessionEv.AGENT_EVENT, captureHandler);
 
     try {
-      await agentInstance.prompt(
+      await attempt.agentInstance.prompt(
         "Summarize this conversation in max 5 words for a topic title. Reply ONLY with the title, nothing else.",
       );
-      this.name = title.trim().slice(0, 50) || `Session ${this.id.slice(0, 6)}`;
-      this.log.info({ name: this.name }, "Session auto-named");
-
-      // Emit named event — SessionBridge listens to rename the thread
-      this.emit(SessionEv.NAMED, this.name);
-    } catch {
-      this.name = `Session ${this.id.slice(0, 6)}`;
+      const name = title || `Session ${this.id.slice(0, 6)}`;
+      if (this.commitAutoNameIfCurrent(name, attempt)) {
+        this.log.info({ name: this.name }, "Session auto-named");
+      }
+    } catch (error) {
+      if (this.commitAutoNameIfCurrent(`Session ${this.id.slice(0, 6)}`, attempt)) {
+        this.log.warn({ err: error, name: this.name }, "Session auto-name failed; using fallback");
+      }
     } finally {
-      agentInstance.off(SessionEv.AGENT_EVENT, captureHandler);
+      attempt.agentInstance.off(SessionEv.AGENT_EVENT, captureHandler);
       // Discard buffered auto-name agent_events, then resume normal delivery
       this.clearBuffer();
       this.resume();
     }
   }
 
+  private commitAutoNameIfCurrent(name: string, attempt: AutoNameAttempt): boolean {
+    if (
+      attempt.token !== this._autoNameAttemptToken
+      || attempt.nameRevision !== this._nameRevision
+      || attempt.nameSource !== this._nameSource
+      || attempt.name !== this.name
+      || attempt.agentInstance !== this.agentInstance
+      || attempt.agentGeneration !== this.agentGeneration
+      || attempt.agentOwnershipEpoch !== this._agentOwnershipEpoch
+      || (attempt.nameSource !== undefined && attempt.nameSource !== "placeholder")
+      || this.isTerminating
+      || this._status === "cancelled"
+      || this._status === "finished"
+    ) return false;
+
+    this.setName(name, "auto");
+    return true;
+  }
+
+  private invalidateAutoNaming(): void {
+    this._autoNameAttemptToken += 1;
+  }
+
 
   // --- ACP Mode / Config / Model State ---
 
   setInitialConfigOptions(options: ConfigOption[]): void {
-    this.configOptions = options ?? [];
+    this.replaceConfigOptions(options ?? []);
   }
 
   setAgentCapabilities(caps: AgentCapabilities | undefined): void {
@@ -1088,7 +1482,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     if (!resp) return;
 
     if (resp.configOptions) {
-      this.configOptions = resp.configOptions as ConfigOption[];
+      this.replaceConfigOptions(resp.configOptions as ConfigOption[]);
       return;
     }
 
@@ -1110,7 +1504,7 @@ export class Session extends TypedEmitter<SessionEvents> {
         options: m.availableModels.map(x => ({ value: (x as any).modelId ?? x.id, name: x.name, description: x.description })),
       });
     }
-    if (legacyOptions.length > 0) this.configOptions = legacyOptions;
+    if (legacyOptions.length > 0) this.replaceConfigOptions(legacyOptions);
   }
 
   getConfigOption(id: string): ConfigOption | undefined {
@@ -1127,37 +1521,325 @@ export class Session extends TypedEmitter<SessionEvents> {
     return String(option.currentValue);
   }
 
-  /** Set session name explicitly and emit 'named' event */
-  setName(name: string): void {
+  /** Source of the current name, persisted so a manual rename keeps priority after resume. */
+  get nameSource(): SessionNameSource | undefined {
+    return this._nameSource;
+  }
+
+  /** Initialize a restored or system-provided name without publishing a rename event. */
+  initializeName(name: string, source: SessionNameSource = "persisted"): string {
+    const normalized = source === "persisted" || source === "manual"
+      ? restoreSessionName(name)
+      : normalizeSessionName(name, {
+        generated: source === "agent" || source === "auto",
+      });
+    if (!normalized) throw new Error("Session name must contain visible text");
+    this.name = normalized;
+    this._nameSource = source;
+    this._nameRevision += 1;
+    return normalized;
+  }
+
+  /** Capture ACP title provenance before asynchronous middleware can outlive the turn. */
+  captureAgentTitleContext(): AgentTitleContext {
+    return captureAgentTitleContext(this.activeTurnContext, this._nameRevision);
+  }
+
+  /**
+   * Apply a title reported by an ACP agent through the connector-neutral naming policy.
+   * Prompt echoes and stale events are ignored; accepted names are normalized once in core.
+   */
+  applyAgentTitle(name: string, context: AgentTitleContext): AgentTitleDecision {
+    if (isPromptEcho(name, context)) return { status: "ignored", reason: "prompt_echo" };
+    if (context.turnId !== null && context.nameRevision !== this._nameRevision) {
+      return { status: "ignored", reason: "stale" };
+    }
+    if (this._nameSource === "manual") {
+      return { status: "ignored", reason: "manual_priority" };
+    }
+
+    const normalized = normalizeSessionName(name, { generated: true });
+    if (!normalized) return { status: "ignored", reason: "empty" };
+    if (normalized === this.name) return { status: "ignored", reason: "unchanged" };
+
+    this.commitName(normalized, "agent");
+    return { status: "accepted", name: normalized };
+  }
+
+  /** Set a manual, generated, restored, or system name and publish one normalized rename. */
+  setName(name: string, source: SessionNameSource = "manual"): string {
+    const normalized = normalizeSessionName(name, {
+      generated: source === "agent" || source === "auto",
+    });
+    if (!normalized) throw new Error("Session name must contain visible text");
+    if (normalized === this.name && source === this._nameSource) return normalized;
+    this.commitName(normalized, source);
+    return normalized;
+  }
+
+  private commitName(name: string, source: SessionNameSource): void {
     this.name = name;
+    this._nameSource = source;
+    this._nameRevision += 1;
     this.emit(SessionEv.NAMED, name);
   }
 
-  /** Send a config option change to the agent and update local state from the response. */
-  async setConfigOption(configId: string, value: import("../types.js").SetConfigOptionValue): Promise<void> {
-    const response = await this.agentInstance.setConfigOption(configId, value);
-    if (response.configOptions && response.configOptions.length > 0) {
-      await this.updateConfigOptions(response.configOptions as ConfigOption[]);
-    } else if (value.type === 'select') {
-      // Legacy agents return empty configOptions — update currentValue optimistically.
-      const updated = this.configOptions.map((o): ConfigOption =>
-        o.id === configId && o.type === 'select' ? { ...o, currentValue: value.value as string } : o
-      );
-      await this.updateConfigOptions(updated);
+  /** Send a config option change and report the effective agent-acknowledged state. */
+  async setConfigOption(
+    configId: string,
+    value: SetConfigOptionValue,
+  ): Promise<ConfigOptionChangeOutcome> {
+    return this.runSerializedConfigMutation(
+      () => this.configFailure("superseded", CONFIG_CHANGE_SUPERSEDED, configId),
+      () => this.configFailure("queue_timeout", CONFIG_CHANGE_QUEUE_TIMEOUT, configId),
+      async ({ agent, generation, epoch, invalidation }) => {
+        const oldValue = this.getConfigOption(configId)?.currentValue;
+        let requestedValue = value;
+
+        if (this.middlewareChain) {
+          const result = await this.middlewareChain.execute(
+            Hook.CONFIG_BEFORE_CHANGE,
+            {
+              sessionId: this.id,
+              configId,
+              oldValue,
+              newValue: value.value,
+            },
+            async (payload) => payload,
+            { onError: 'block' },
+          );
+          if (!result || typeof result.newValue !== typeof value.value) {
+            return this.configFailure("blocked", CONFIG_CHANGE_BLOCKED, configId);
+          }
+          requestedValue = value.type === "boolean"
+            ? { type: "boolean", value: result.newValue as boolean }
+            : { type: "select", value: result.newValue as string };
+        }
+
+        if (!this.isCurrentConfigMutation(agent, generation, epoch)) {
+          return this.configFailure("superseded", CONFIG_CHANGE_SUPERSEDED, configId);
+        }
+
+        const rpc = Promise.resolve()
+          .then(() => agent.setConfigOption(configId, requestedValue))
+          .then(
+            (response) => ({ status: "fulfilled" as const, response }),
+            (error: unknown) => ({ status: "rejected" as const, error }),
+          );
+        const rpcResult = await Promise.race([
+          rpc,
+          invalidation.then(() => ({ status: "superseded" as const })),
+        ]);
+        if (rpcResult.status === "superseded") {
+          return this.configFailure("superseded", CONFIG_CHANGE_SUPERSEDED, configId);
+        }
+        if (rpcResult.status === "rejected") throw rpcResult.error;
+        const response = rpcResult.response;
+        if (!this.isCurrentConfigMutation(agent, generation, epoch)) {
+          return this.configFailure("superseded", CONFIG_CHANGE_SUPERSEDED, configId);
+        }
+
+        if (response.legacyAcknowledged !== true && Array.isArray(response.configOptions)) {
+          this.replaceConfigOptions(response.configOptions as ConfigOption[]);
+          const outcome = this.configSuccess(true, configId);
+          this.notifyConfigAfterChange(configId, oldValue, requestedValue.value, outcome);
+          return outcome;
+        }
+        if (
+          response.legacyAcknowledged === true
+          && requestedValue.type === 'select'
+          && this.getConfigOption(configId)?.type === 'select'
+        ) {
+          // Legacy mode/model methods have no authoritative response. Their successful
+          // JSON-RPC settlement is the only acknowledgement available.
+          this.replaceConfigOptions(this.configOptions.map((option): ConfigOption =>
+            option.id === configId && option.type === 'select'
+              ? { ...option, currentValue: requestedValue.value }
+              : option
+          ));
+          const outcome = this.configSuccess(false, configId);
+          this.notifyConfigAfterChange(configId, oldValue, requestedValue.value, outcome);
+          return outcome;
+        }
+        return this.configFailure("unacknowledged", CONFIG_CHANGE_UNACKNOWLEDGED, configId);
+      },
+    );
+  }
+
+  private replaceConfigOptions(options: ConfigOption[]): void {
+    this.configOptions = structuredClone(options);
+    this._configRevision += 1;
+  }
+
+  private configSuccess(authoritative: boolean, configId: string): ConfigOptionChangeOutcome {
+    const configOptions = structuredClone(this.configOptions);
+    return {
+      acknowledged: true,
+      authoritative,
+      effective: configOptions.find((option) => option.id === configId),
+      revision: this.configRevision,
+      configOptions,
+    };
+  }
+
+  private configFailure(
+    reason: NonNullable<ConfigOptionChangeOutcome["reason"]>,
+    message: string,
+    configId: string,
+  ): ConfigOptionChangeOutcome {
+    const configOptions = structuredClone(this.configOptions);
+    return {
+      acknowledged: false,
+      authoritative: false,
+      effective: configOptions.find((option) => option.id === configId),
+      reason,
+      message,
+      revision: this.configRevision,
+      configOptions,
+    };
+  }
+
+  private invalidateConfigMutations(paused: boolean): void {
+    this._configMutationEpoch += 1;
+    this._configRevision += 1;
+    this._configMutationPaused = paused;
+    this._resolveConfigMutationInvalidation();
+    this._configMutationTail = Promise.resolve();
+    this._configMutationInvalidation = new Promise((resolve) => {
+      this._resolveConfigMutationInvalidation = resolve;
+    });
+  }
+
+  private isCurrentConfigMutation(agent: AgentInstance, generation: number, epoch: number): boolean {
+    return !this.isTerminating
+      && !this._configMutationPaused
+      && this.agentInstance === agent
+      && this.agentGeneration === generation
+      && this._configMutationEpoch === epoch;
+  }
+
+  private async waitForConfigMutationSlot(
+    predecessor: Promise<void>,
+    invalidation: Promise<void>,
+  ): Promise<"ready" | "superseded" | "queue_timeout"> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (result: "ready" | "superseded" | "queue_timeout") => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(() => finish("queue_timeout"), CONFIG_MUTATION_QUEUE_TIMEOUT_MS);
+      void predecessor.then(() => finish("ready"));
+      void invalidation.then(() => finish("superseded"));
+    });
+  }
+
+  private async runSerializedConfigMutation<T>(
+    onSuperseded: () => T,
+    onQueueTimeout: () => T,
+    operation: (context: {
+      agent: AgentInstance;
+      generation: number;
+      epoch: number;
+      invalidation: Promise<void>;
+    }) => Promise<T>,
+    expectedAgentGeneration: number = this.agentGeneration,
+  ): Promise<T> {
+    const agent = this.agentInstance;
+    const generation = expectedAgentGeneration;
+    const epoch = this._configMutationEpoch;
+    const invalidation = this._configMutationInvalidation;
+    if (!this.isCurrentConfigMutation(agent, generation, epoch)) return onSuperseded();
+
+    const predecessor = this._configMutationTail;
+    let release!: () => void;
+    const completed = new Promise<void>((resolve) => { release = resolve; });
+    this._configMutationTail = predecessor.then(() => completed);
+
+    const slot = await this.waitForConfigMutationSlot(predecessor, invalidation);
+    if (slot !== "ready") {
+      release();
+      return slot === "queue_timeout" ? onQueueTimeout() : onSuperseded();
+    }
+    if (!this.isCurrentConfigMutation(agent, generation, epoch)) {
+      release();
+      return onSuperseded();
+    }
+
+    try {
+      return await operation({ agent, generation, epoch, invalidation });
+    } finally {
+      release();
     }
   }
 
-  async updateConfigOptions(options: ConfigOption[], expectedAgentGeneration?: number): Promise<void> {
-    // Hook: config:beforeChange — await-able, can block
-    if (this.middlewareChain) {
-      const result = await this.middlewareChain.execute(Hook.CONFIG_BEFORE_CHANGE, { sessionId: this.id, configId: 'options', oldValue: this.configOptions, newValue: options }, async (p) => p);
-      if (!result) return; // blocked by middleware
-    }
-    if (
-      expectedAgentGeneration !== undefined &&
-      (this.agentGeneration !== expectedAgentGeneration || this.isTerminating)
-    ) return;
-    this.configOptions = options;
+  private notifyConfigAfterChange(
+    configId: string,
+    oldValue: unknown,
+    requestedValue: unknown,
+    outcome: ConfigOptionChangeOutcome,
+    effectiveValue: unknown = outcome.effective?.currentValue,
+  ): void {
+    if (!this.middlewareChain || !outcome.acknowledged) return;
+    void this.middlewareChain.execute(
+      Hook.CONFIG_AFTER_CHANGE,
+      {
+        sessionId: this.id,
+        configId,
+        oldValue: structuredClone(oldValue),
+        requestedValue: structuredClone(requestedValue),
+        newValue: structuredClone(effectiveValue),
+        acknowledged: true as const,
+        authoritative: outcome.authoritative,
+      },
+      async (payload) => payload,
+    ).catch((error) => {
+      moduleLog.warn(
+        { err: redactNetworkSecrets(error instanceof Error ? error.message : String(error)), sessionId: this.id, configId },
+        "Config after-change middleware failed",
+      );
+    });
+  }
+
+  async updateConfigOptions(
+    options: ConfigOption[],
+    expectedAgentGeneration?: number,
+    ownsMutation: () => boolean = () => true,
+  ): Promise<boolean> {
+    const generation = expectedAgentGeneration ?? this.agentGeneration;
+    return this.runSerializedConfigMutation(
+      () => false,
+      () => false,
+      async ({ agent, generation: activeGeneration, epoch }) => {
+        if (!ownsMutation()) return false;
+        const oldOptions = structuredClone(this.configOptions);
+        let nextOptions = structuredClone(options);
+        if (this.middlewareChain) {
+          const result = await this.middlewareChain.execute(
+            Hook.CONFIG_BEFORE_CHANGE,
+            { sessionId: this.id, configId: 'options', oldValue: oldOptions, newValue: nextOptions },
+            async (payload) => payload,
+            { onError: 'block' },
+          );
+          if (!result || !Array.isArray(result.newValue)) return false;
+          nextOptions = structuredClone(result.newValue as ConfigOption[]);
+        }
+        if (!ownsMutation() || !this.isCurrentConfigMutation(agent, activeGeneration, epoch)) return false;
+        this.replaceConfigOptions(nextOptions);
+        const configOptions = structuredClone(this.configOptions);
+        this.notifyConfigAfterChange('options', oldOptions, options, {
+          acknowledged: true,
+          authoritative: true,
+          effective: undefined,
+          revision: this.configRevision,
+          configOptions,
+        }, configOptions);
+        return true;
+      },
+      generation,
+    );
   }
 
   /** Snapshot of current ACP state for persistence */
@@ -1299,6 +1981,7 @@ export class Session extends TypedEmitter<SessionEvents> {
       if (!result) return; // blocked by middleware
     }
     const turnId = this.activeTurnContext?.turnId;
+    if (turnId) this.elicitationGate.cancelTurn(turnId);
 
     if (turnId) {
       // Turn is still in-flight — mark for interrupted stopReason in the finally block
@@ -1347,6 +2030,7 @@ export class Session extends TypedEmitter<SessionEvents> {
       if (!result) return; // blocked by middleware
     }
     const turnId = this.activeTurnContext?.turnId;
+    if (turnId) this.elicitationGate.cancelTurn(turnId);
     if (turnId) this._abortedTurnIds.add(turnId);
 
     const cancelRequest = this.requestAgentCancellation();
@@ -1371,6 +2055,7 @@ export class Session extends TypedEmitter<SessionEvents> {
 
     // Cancel agent so the current processPrompt resolves and drainNext
     // picks up the promoted item. Timeout fallback if agent is unresponsive.
+    if (this.activeTurnContext?.turnId) this.elicitationGate.cancelTurn(this.activeTurnContext.turnId);
     const cancelRequest = this.requestAgentCancellation();
 
     const queueCleanup = this.queue.isProcessing
@@ -1398,6 +2083,11 @@ export class Session extends TypedEmitter<SessionEvents> {
     if (agentName === this.agentName) {
       throw new Error(`Already using ${agentName}`);
     }
+    // Switching is a synchronous config mutation boundary: queued work must not
+    // reach the old agent while replacement teardown is in progress.
+    this.invalidateAutoNaming();
+    this.invalidateConfigMutations(true);
+    this._agentOwnershipEpoch += 1;
 
     // Record current agent in history
     this.agentSwitchHistory.push({
@@ -1411,6 +2101,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     if (this.permissionGate.isPending) {
       this.permissionGate.reject("Agent switched");
     }
+    this.elicitationGate.cancelAll("cancelled");
 
     const oldAgent = this.agentInstance;
     await this.quiesceQueueForAgentSwitch(oldAgent);
@@ -1422,6 +2113,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     let installed = false;
     try {
       this.assertReplacementAllowed();
+      this.elicitationGate.cancelAll("cancelled");
       this.agentInstance = newAgent;
       this.agentName = agentName;
       this.agentSessionId = newAgent.sessionId;
@@ -1429,7 +2121,7 @@ export class Session extends TypedEmitter<SessionEvents> {
 
       // Hydrate ACP state from the new agent's spawn response
       this.agentCapabilities = undefined;
-      this.configOptions = [];
+      this.replaceConfigOptions([]);
       this.latestCommands = null;
       this.applySpawnResponse(newAgent.initialSessionResponse, newAgent.agentCapabilities);
       installed = true;

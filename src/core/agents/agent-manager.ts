@@ -1,5 +1,5 @@
 import type { AgentDefinition } from "../types.js";
-import { AgentInstance } from "./agent-instance.js";
+import { AgentInstance, type InitializationCleanupResourceStatus } from "./agent-instance.js";
 import type { AgentCatalog } from "./agent-catalog.js";
 import { createChildLogger } from "../utils/log.js";
 import { filterEnv } from '../security/env-filter.js';
@@ -241,6 +241,11 @@ export class AgentManager {
     return { state: this.warming ? 'warming' : 'empty', capacity: 1 };
   }
 
+  /** Failed handshakes remain owned by AgentInstance until child exit is confirmed. */
+  getInitializationCleanupResourceStatus(): InitializationCleanupResourceStatus {
+    return AgentInstance.getInitializationCleanupResourceStatus();
+  }
+
   /** Return definitions for all installed agents. */
   getAvailableAgents(): AgentDefinition[] {
     const installed = this.catalog.getInstalledEntries();
@@ -369,15 +374,16 @@ export class AgentManager {
       if (this.warmClaimOperation) await this.warmClaimOperation.catch(() => {});
       for (let attempt = 0; attempt < WARM_CLEANUP_MAX_ATTEMPTS; attempt++) {
         const entry = this.warmEntry;
-        if (!entry) return;
+        if (!entry) break;
         const destroyed = await this.beginWarmCleanup(entry, 'shutdown', false);
-        if (destroyed) return;
+        if (destroyed) break;
         if (attempt + 1 < WARM_CLEANUP_MAX_ATTEMPTS) {
           await new Promise<void>((resolve) => {
             setTimeout(resolve, WARM_SHUTDOWN_RETRY_BASE_MS * (2 ** attempt));
           });
         }
       }
+      await AgentInstance.shutdownInitializationCleanups();
     })();
     this.warmShutdownOperation = operation;
     try {

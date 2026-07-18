@@ -1,6 +1,6 @@
 # Agent Client Protocol (ACP) — Reference Documentation
 
-> Protocol version: v0.11.3 (March 2026)
+> Protocol generation: v1
 > Source: agentclientprotocol.com | GitHub: agentclientprotocol/agent-client-protocol
 
 ---
@@ -103,6 +103,7 @@ Client                              Agent
 - `fileSystem.readTextFile` — allows the agent to read files
 - `fileSystem.writeTextFile` — allows the agent to write files
 - `terminal` — allows the agent to run shell commands
+- `elicitation.form` — allows the agent to request validated structured input
 
 **Agent Capabilities (declared by the agent):**
 - `loadSession` — supports reloading previous sessions
@@ -132,6 +133,8 @@ Client                              Agent                    LLM
   │    [If there's a tool call]       │                       │
   │◄── permission request ───────────│                       │
   │──── permission response ────────►│                       │
+  │◄── form elicitation ─────────────│                       │
+  │──── accept / decline / cancel ──►│                       │
   │                                   │── execute tool ──────►│
   │◄── session/update (tool status)──│                       │
   │    { in_progress / completed }    │                       │

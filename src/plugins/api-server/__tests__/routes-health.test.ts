@@ -34,6 +34,12 @@ describe('system health routes', () => {
           }),
         },
         agentManager: {
+          getInitializationCleanupResourceStatus: vi.fn().mockReturnValue({
+            pending: 1,
+            failed: 1,
+            terminalFailed: 1,
+            capacity: 32,
+          }),
           getWarmPoolResourceStatus: vi.fn().mockReturnValue({
             state: 'ready',
             capacity: 1,
@@ -60,7 +66,7 @@ describe('system health routes', () => {
     expect(response.json().sessions).toEqual({ active: 2, total: 3 })
     expect(response.json().serviceResources).toEqual({
       assistant: { live: 1, active: 1 },
-      terminalCleanup: { pending: 2, failed: 0 },
+      terminalCleanup: { pending: 3, failed: 1, terminalFailed: 1 },
       warmPool: {
         state: 'ready',
         capacity: 1,

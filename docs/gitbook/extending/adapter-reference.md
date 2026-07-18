@@ -24,6 +24,8 @@ Complete API reference for the `ChannelAdapter` abstract class and the types it 
 |--------|-----------|-------------|
 | `deleteSessionThread` | `(sessionId: string) => Promise<void>` | Delete the platform thread when a session is cleaned up. |
 | `deleteSessionThreadById` | `(threadId: string) => Promise<void>` | Delete a thread created before the initial session record is durable. Recommended when `createSessionThread` creates a remote resource. |
+| `sendElicitationRequest` | `(sessionId: string, request: ElicitationRequest) => Promise<void>` | Present a transient ACP form request when `capabilities.elicitation.form` is true. |
+| `dismissElicitationRequest` | `(sessionId: string, event: ElicitationResolvedEvent) => Promise<void>` | Remove or disable stale form UI after any resolution. Resolution metadata contains no submitted values. |
 | `sendSkillCommands` | `(sessionId: string, commands: AgentCommand[]) => Promise<void>` | Register dynamic slash commands or menu entries surfaced by the agent. |
 | `cleanupSkillCommands` | `(sessionId: string) => Promise<void>` | Remove dynamic commands when the session ends. |
 | `archiveSessionTopic` | `(sessionId: string) => Promise<void>` | Archive (rather than delete) the session thread — for platforms that support it (e.g. Telegram forum topics). |
@@ -33,6 +35,38 @@ session-aware hooks, but intentionally does not implement
 `deleteSessionThreadById`. This lets Core distinguish adapters that can clean up
 a pre-created remote thread by its platform ID. Existing adapters do not need to
 add the method; it is optional, and Core retains the session-ID fallback.
+
+An adapter that renders ACP forms declares:
+
+```typescript
+capabilities: {
+  // existing capability fields...
+  elicitation: {
+    form: true,
+    secureInput: 'none' // or 'private' / 'delete-after-capture'
+  }
+}
+```
+
+`form` enables structured field delivery. `secureInput` describes the platform
+guarantee; it does not turn standard ACP fields into secrets. OpenACP uses
+protected input only for the Codex `isSecret` extension and fails closed if the
+target connector cannot meet the declared guarantee. Adapters must bind replies
+to the initiating conversation and user, keep callback identifiers short, and
+call the session elicitation gate exactly once. They must never copy submitted
+values into logs, visible confirmation messages, or resolution events.
+ForceReply handlers must match the exact form prompt before command routing;
+slash-prefixed values are valid form content, while replies to unrelated agent
+command prompts must continue to the owning command router. Concurrent forms in
+one conversation must bind text replies to the exact prompt message and owner,
+not just to the topic. If any initial or mid-form send/edit fails, the adapter
+must clear partial content, dismiss the remaining UI with bounded best-effort
+cleanup, and cancel the gate exactly once. Request IDs are scoped by session, so
+adapter lookup keys must include both `sessionId` and `requestId`. Every form also
+needs a serialized transition boundary: duplicate callbacks, text replies, and
+cancel actions must re-check the field generation after acquiring it, and a stale
+action must never advance or cancel the active field. String `pattern`
+constraints are rejected by Core and must not be evaluated by adapters.
 
 ### Constructor
 
@@ -140,8 +174,11 @@ interface AgentCommand {
   name: string
   description: string
   input?: unknown
+  _meta?: Record<string, unknown> | null
 }
 ```
+
+Adapters must preserve `input` and opaque ACP `_meta` fields. Interactive action callbacks should stay distinct from the adapter's system-command namespace and must forward the advertised command with exactly one leading `/`.
 
 ### ChannelConfig
 

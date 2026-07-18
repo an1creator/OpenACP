@@ -263,12 +263,22 @@ Register with \`ctx.registerMiddleware(hook, { priority?, handler })\`. Return \
 - \`permission:beforeRequest\` — before permission prompt (sessionId, request, autoResolve)
 - \`permission:afterResolve\` — after permission resolved (sessionId, requestId, decision, userId, durationMs)
 
+ACP form input is delivered through the adapter contract, not middleware. A
+form-capable adapter declares \`capabilities.elicitation.form\`, implements
+\`sendElicitationRequest?\`, and removes stale UI in
+\`dismissElicitationRequest?\`. Submitted values are transient and must not be
+logged or echoed. Match the exact form prompt before command routing so a
+slash-prefixed form value is captured but unrelated ForceReply commands keep
+their owner. Do not compile agent-supplied string \`pattern\` constraints;
+OpenACP rejects them.
+
 ### Session
 - \`session:beforeCreate\` — before session creation (agentName, workingDir, userId, channelId, threadId)
 - \`session:afterDestroy\` — after session destroyed (sessionId, reason, durationMs, promptCount)
 
 ### Control
-- \`config:beforeChange\` — before config change (sessionId, configId, oldValue, newValue)
+- \`config:beforeChange\` — blocking policy gate before any agent RPC or local config mutation (sessionId, configId, oldValue, newValue). Returning null, throwing, or timing out rejects the change.
+- \`config:afterChange\` — observational notification after an acknowledged effective change (sessionId, configId, oldValue, requestedValue, newValue, acknowledged, authoritative). Errors do not roll back the applied change.
 - \`agent:beforeCancel\` — before agent cancellation (sessionId, reason)
 - \`agent:beforeSwitch\` — **blocking** before agent switch (sessionId, fromAgent, toAgent). Return null/false to block.
 - \`agent:afterSwitch\` — **fire-and-forget** after agent switch (sessionId, fromAgent, toAgent, resumed). Observational only.
@@ -289,6 +299,9 @@ Register with \`ctx.registerMiddleware(hook, { priority?, handler })\`. Return \
 
 ### Permission
 - \`permission:request\`, \`permission:resolved\`
+
+### Elicitation
+- \`elicitation:request\`, \`elicitation:resolved\` — safe metadata only; resolution never includes submitted content
 
 ## Testing
 

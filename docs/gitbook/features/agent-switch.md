@@ -31,7 +31,10 @@ When you run `/switch <agent>`, OpenACP:
 1. Collects the conversation history from the current session.
 2. Starts a new session with the target agent (or resumes an existing one — see below).
 3. Injects the conversation history into the new agent as context.
-4. Routes all subsequent messages to the new agent.
+4. Reconnects the session's currently attached connectors and stores the new agent identity.
+5. Routes all subsequent messages to the new agent.
+
+The old agent's controls are suspended before cleanup starts. Every control and local control response belongs to the current action epoch, so delayed buttons, command updates, and queued multipart responses from an older runtime are ignored. The new runtime and connector bridges stay provisional until the stored session identity is updated; only then are its controls activated. If connector cleanup, reconnect, or storage fails, OpenACP retires the provisional runtime and restores the previous agent and stored identity with a fresh action epoch. A connector explicitly detached while the switch is running stays detached.
 
 ---
 

@@ -87,10 +87,74 @@ describe("AgentCatalog", () => {
         command: "npx",
         args: ["@agentclientprotocol/codex-acp@1.1.4"],
         env: { OPENACP_TEST: "preserved", REGISTRY_DEFAULT: "added" },
+        registryPackage: undefined,
+        installedVersion: "1.1.4",
+        registryRuntimeAttested: false,
+        registryEnvironment: { OPENACP_TEST: "registry", REGISTRY_DEFAULT: "added" },
       });
       expect(catalog.getInstalledAgent("codex")).toMatchObject({
         name: "Codex",
         version: "1.1.4",
+      });
+    });
+
+    it("does not attest a persisted Codex label with a mismatched runtime", () => {
+      const storeData = { version: 1, installed: { codex: {
+        registryId: "codex-acp", name: "Codex", version: "1.1.4",
+        distribution: "npx", command: "custom-wrapper",
+        args: ["@evil/codex-acp@1.1.4"], env: {},
+        installedAt: "2026-07-18T00:00:00.000Z", binaryPath: null,
+      } } };
+      const cacheData = {
+        fetchedAt: new Date().toISOString(), ttlHours: 24,
+        data: { agents: [{
+          id: "codex-acp", name: "Codex", version: "1.1.4", description: "Codex",
+          distribution: { npx: { package: "@agentclientprotocol/codex-acp@1.1.4" } },
+        }] },
+      };
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation((filePath) =>
+        JSON.stringify(String(filePath).endsWith("agents.json") ? storeData : cacheData) as any,
+      );
+
+      catalog.load();
+
+      expect(catalog.resolve("codex")).toMatchObject({
+        command: "custom-wrapper",
+        args: ["@evil/codex-acp@1.1.4"],
+        registryRuntimeAttested: false,
+      });
+      expect(catalog.resolve("codex")?.registryPackage).toBeUndefined();
+    });
+
+    it("attests only the exact reviewed runner environment without exposing values in diagnostics", () => {
+      const reviewedEnv = { CODEX_MODE: "reviewed", SAFE_FLAG: "1" };
+      const storeData = { version: 1, installed: { codex: {
+        registryId: "codex-acp", name: "Codex", version: "1.1.4",
+        distribution: "npx", command: "npx",
+        args: ["@agentclientprotocol/codex-acp@1.1.4"], env: reviewedEnv,
+        installedAt: "2026-07-18T00:00:00.000Z", binaryPath: null,
+      } } };
+      const cacheData = {
+        fetchedAt: new Date().toISOString(), ttlHours: 24,
+        data: { agents: [{
+          id: "codex-acp", name: "Codex", version: "1.1.4", description: "Codex",
+          distribution: { npx: {
+            package: "@agentclientprotocol/codex-acp@1.1.4", env: reviewedEnv,
+          } },
+        }] },
+      };
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation((filePath) =>
+        JSON.stringify(String(filePath).endsWith("agents.json") ? storeData : cacheData) as any,
+      );
+
+      catalog.load();
+
+      expect(catalog.resolve("codex")).toMatchObject({
+        registryRuntimeAttested: true,
+        registryEnvironment: reviewedEnv,
+        env: reviewedEnv,
       });
     });
   });
@@ -235,6 +299,11 @@ describe("AgentCatalog", () => {
     });
     expect(catalog.getAvailable().find((item) => item.key === "codex")).toMatchObject({
       updateRequired: false,
+    });
+    expect(catalog.resolve("codex")).toMatchObject({
+      registryRuntimeAttested: true,
+      registryPackage: "@agentclientprotocol/codex-acp@1.1.4",
+      installedVersion: "1.2.0",
     });
   });
 

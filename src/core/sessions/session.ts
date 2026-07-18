@@ -1,6 +1,6 @@
 import { nanoid } from "nanoid";
 import type { AgentInstance } from "../agents/agent-instance.js";
-import type { AgentCapabilities, AgentCommand, AgentEvent, AgentSwitchEntry, Attachment, PermissionRequest, SessionStatus, ConfigOption, SetConfigOptionValue, SessionModeState, SessionModelState, TurnMeta, ElicitationRequest, ElicitationResolvedEvent } from "../types.js";
+import type { AgentActionControlResponse, AgentCapabilities, AgentCommand, AgentEvent, AgentSwitchEntry, Attachment, PermissionRequest, SessionStatus, ConfigOption, SetConfigOptionValue, SessionModeState, SessionModelState, TurnMeta, ElicitationRequest, ElicitationResolvedEvent } from "../types.js";
 import type { CreateElicitationRequest, CreateElicitationResponse, ElicitationSchema } from "@agentclientprotocol/sdk";
 import { TypedEmitter } from "../utils/typed-emitter.js";
 import { PromptQueue } from "./prompt-queue.js";
@@ -23,6 +23,7 @@ import {
 } from "./session-naming.js";
 import { Hook, SessionEv } from "../events.js";
 import { redactNetworkSecrets } from "../security/network-redaction.js";
+import { buildSkillsControlResponse, canonicalAgentActionKey } from "../agents/agent-action-policy.js";
 const moduleLog = createChildLogger({ module: "session" });
 
 type FormElicitationRequest = CreateElicitationRequest & {
@@ -306,6 +307,13 @@ export interface SessionEvents {
   prompt_queued: (data: { turnId: string | undefined; position: number; routing: TurnRouting | undefined }) => void;
 }
 
+/** Immutable proof that one adapter/thread binding is still the same attachment. */
+export interface SessionAttachmentLease {
+  readonly adapterId: string;
+  readonly threadId: string;
+  readonly generation: number;
+}
+
 /**
  * Manages a single conversation between a user and an AI agent.
  *
@@ -334,6 +342,8 @@ export class Session extends TypedEmitter<SessionEvents> {
   private _agentInstance!: AgentInstance;
   get agentInstance(): AgentInstance { return this._agentInstance; }
   private _agentGeneration = 0;
+  private _agentActionEpoch = 0;
+  private _agentActionsSuspended = false;
   private _configMutationTail: Promise<void> = Promise.resolve();
   private _configMutationEpoch = 0;
   private _configMutationPaused = false;
@@ -346,6 +356,9 @@ export class Session extends TypedEmitter<SessionEvents> {
   private _agentOwnershipEpoch = 0;
   /** Monotonic identity for async continuations crossing an agent replacement. */
   get agentGeneration(): number { return this._agentGeneration; }
+  /** Monotonic identity for the currently published local action snapshot. */
+  get agentActionEpoch(): number { return this._agentActionEpoch; }
+  get agentActionsSuspended(): boolean { return this._agentActionsSuspended; }
   /** Monotonic identity for durable config snapshots. */
   get configRevision(): number { return this._configRevision; }
   /** Setting agentInstance wires the agent→session event relay and commands buffer.
@@ -356,6 +369,8 @@ export class Session extends TypedEmitter<SessionEvents> {
     this._agentOwnershipEpoch += 1;
     this._agentInstance = agent;
     this._agentGeneration += 1;
+    this._agentActionEpoch += 1;
+    this.hydrateCurrentAgentActions();
     this.wireAgentRelay();
     this.wireCommandsBuffer();
     this.wireElicitationHandler();
@@ -384,10 +399,14 @@ export class Session extends TypedEmitter<SessionEvents> {
   middlewareChain?: MiddlewareChain;
   /** Latest commands emitted by the agent — buffered before bridge connects so they're not lost */
   latestCommands: AgentCommand[] | null = null;
+  /** Null until an authoritative names-only inventory accompanies an ACP command snapshot. */
+  latestSkillNames: string[] | null = null;
   /** Adapters currently attached to this session (including primary) */
   attachedAdapters: string[] = [];
   /** Per-adapter thread IDs: adapterId → threadId */
   threadIds: Map<string, string> = new Map();
+  /** Per-adapter mutation counters used to reject stale control/switch continuations. */
+  private attachmentGenerations = new Map<string, number>();
   /** Active turn context — sealed on prompt dequeue, cleared on turn end */
   activeTurnContext: TurnContext | null = null;
 
@@ -461,6 +480,7 @@ export class Session extends TypedEmitter<SessionEvents> {
    */
   beginTermination(): void {
     if (this._lifecycleState !== 'live') return;
+    this.suspendAgentActions();
     this._lifecycleState = 'terminating';
     this.invalidateAutoNaming();
     this._agentOwnershipEpoch += 1;
@@ -516,7 +536,9 @@ export class Session extends TypedEmitter<SessionEvents> {
   private wireAgentRelay(): void {
     this.agentRelayCleanup?.();
     const instance = this._agentInstance;
+    const actionEpoch = this._agentActionEpoch;
     const handler = (event: AgentEvent) => {
+      if (event.type === "commands_update" && !this.isAgentActionOwnerCurrent(instance, actionEpoch)) return;
       this.emit(SessionEv.AGENT_EVENT, event);
     };
     instance.on(SessionEv.AGENT_EVENT, handler);
@@ -640,9 +662,15 @@ export class Session extends TypedEmitter<SessionEvents> {
     // Remove previous listener (if switching agents) to avoid leaks
     this.commandsBufferCleanup?.();
     const instance = this._agentInstance;
+    const actionEpoch = this._agentActionEpoch;
     const handler = (event: AgentEvent) => {
-      if (event.type === "commands_update") {
+      if (event.type === "commands_update" && this.isAgentActionOwnerCurrent(instance, actionEpoch)) {
         this.latestCommands = event.commands;
+        this.latestSkillNames = instance.skillDiscoveryStrategy != null
+          && instance.skillInventoryReady === true
+          && Array.isArray(instance.latestSkillNames)
+          ? [...instance.latestSkillNames]
+          : null;
       }
     };
     instance.on(SessionEv.AGENT_EVENT, handler);
@@ -1266,6 +1294,104 @@ export class Session extends TypedEmitter<SessionEvents> {
         this._activePromptPhase = null;
       }
     }
+  }
+
+  /** Resolve a completed local control response without queueing a model turn. */
+  resolveAgentActionControl(
+    actionName: string,
+    expectedEpoch: number = this._agentActionEpoch,
+  ): AgentActionControlResponse | null {
+    if (!this.isAgentActionEpochCurrent(expectedEpoch)) return null;
+    const key = canonicalAgentActionKey(actionName);
+    if (!key) return null;
+    const command = this.latestCommands?.find((candidate) => candidate.action?.key === key);
+    if (command?.action?.handling !== "local-skills" || this.latestSkillNames === null) return null;
+    return buildSkillsControlResponse(this.latestSkillNames);
+  }
+
+  captureAttachmentLease(adapterId: string, threadId: string): SessionAttachmentLease | null {
+    if (!this.attachedAdapters.includes(adapterId)) return null;
+    const currentThreadId = this.threadIds.get(adapterId)
+      ?? (this.channelId === adapterId ? this.threadId : undefined);
+    if (currentThreadId !== threadId) return null;
+    return Object.freeze({
+      adapterId,
+      threadId,
+      generation: this.attachmentGenerations.get(adapterId) ?? 0,
+    });
+  }
+
+  isAttachmentLeaseCurrent(lease: SessionAttachmentLease): boolean {
+    return this.attachedAdapters.includes(lease.adapterId)
+      && (this.threadIds.get(lease.adapterId)
+        ?? (this.channelId === lease.adapterId ? this.threadId : undefined)) === lease.threadId
+      && (this.attachmentGenerations.get(lease.adapterId) ?? 0) === lease.generation;
+  }
+
+  attachAdapterBinding(adapterId: string, threadId: string): void {
+    this.attachmentGenerations.set(
+      adapterId,
+      (this.attachmentGenerations.get(adapterId) ?? 0) + 1,
+    );
+    this.threadIds.set(adapterId, threadId);
+    if (!this.attachedAdapters.includes(adapterId)) this.attachedAdapters.push(adapterId);
+  }
+
+  detachAdapterBinding(adapterId: string): boolean {
+    if (!this.attachedAdapters.includes(adapterId)) return false;
+    this.attachmentGenerations.set(
+      adapterId,
+      (this.attachmentGenerations.get(adapterId) ?? 0) + 1,
+    );
+    this.attachedAdapters = this.attachedAdapters.filter((candidate) => candidate !== adapterId);
+    this.threadIds.delete(adapterId);
+    return true;
+  }
+
+  /** Hide every old action while an in-place replacement is in progress. */
+  suspendAgentActions(): void {
+    this._agentActionEpoch += 1;
+    this._agentActionsSuspended = true;
+    this.latestCommands = [];
+    this.latestSkillNames = null;
+  }
+
+  /** Deliberately publish the current process snapshot under a fresh epoch. */
+  restoreCurrentAgentActions(): void {
+    this._agentActionEpoch += 1;
+    this._agentActionsSuspended = false;
+    this.hydrateCurrentAgentActions();
+    this.wireAgentRelay();
+    this.wireCommandsBuffer();
+    this.emit(SessionEv.AGENT_EVENT, {
+      type: "commands_update",
+      commands: this.latestCommands ?? [],
+    });
+  }
+
+  isAgentActionEpochCurrent(epoch: number): boolean {
+    return !this.isTerminating
+      && !this._agentActionsSuspended
+      && this._agentActionEpoch === epoch;
+  }
+
+  private isAgentActionOwnerCurrent(instance: AgentInstance, epoch: number): boolean {
+    return this.agentInstance === instance && this.isAgentActionEpochCurrent(epoch);
+  }
+
+  private hydrateCurrentAgentActions(): void {
+    if (this._agentActionsSuspended) {
+      this.latestCommands = [];
+      this.latestSkillNames = null;
+      return;
+    }
+    const agent = this.agentInstance;
+    this.latestCommands = Array.isArray(agent.latestCommands) ? [...agent.latestCommands] : null;
+    this.latestSkillNames = agent.skillDiscoveryStrategy != null
+      && agent.skillInventoryReady === true
+      && Array.isArray(agent.latestSkillNames)
+      ? [...agent.latestSkillNames]
+      : null;
   }
 
   /**
@@ -2083,6 +2209,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     if (agentName === this.agentName) {
       throw new Error(`Already using ${agentName}`);
     }
+    if (!this._agentActionsSuspended) this.suspendAgentActions();
     // Switching is a synchronous config mutation boundary: queued work must not
     // reach the old agent while replacement teardown is in progress.
     this.invalidateAutoNaming();
@@ -2122,7 +2249,6 @@ export class Session extends TypedEmitter<SessionEvents> {
       // Hydrate ACP state from the new agent's spawn response
       this.agentCapabilities = undefined;
       this.replaceConfigOptions([]);
-      this.latestCommands = null;
       this.applySpawnResponse(newAgent.initialSessionResponse, newAgent.agentCapabilities);
       installed = true;
     } finally {
@@ -2137,6 +2263,11 @@ export class Session extends TypedEmitter<SessionEvents> {
     agentName: string,
     createAgent: () => Promise<AgentInstance>,
   ): Promise<void> {
+    // A switch can fail after the replacement runtime was already installed
+    // (for example while reconnecting bridges or committing durable state).
+    // Retire that provisional runtime before installing the authoritative one.
+    await this.destroyAgent(this.agentInstance);
+    this.assertReplacementAllowed();
     const rollbackAgent = await this.createReplacementAgent(createAgent);
     let installed = false;
     try {
@@ -2154,6 +2285,7 @@ export class Session extends TypedEmitter<SessionEvents> {
     } finally {
       if (!installed) this.observeReplacementCleanup(rollbackAgent);
     }
+
   }
 
   /** Tear down the session: reject pending permissions, clear queue, destroy agent subprocess. */

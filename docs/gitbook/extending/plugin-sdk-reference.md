@@ -176,8 +176,21 @@ import { SendQueue, DraftManager, ToolCallTracker, ActivityTracker } from '@n1cr
 Import from the `/testing` subpath:
 
 ```typescript
-import { createTestContext, createTestInstallContext, mockServices } from '@n1creator/openacp-plugin-sdk/testing'
+import {
+  createTestContext,
+  createTestInstallContext,
+  mockServices,
+  runAdapterConformanceTests,
+} from '@n1creator/openacp-plugin-sdk/testing'
 ```
+
+The testing subpath uses the Vitest runner supplied by the plugin project. Add
+Vitest 3 or 4 to the project's development dependencies before importing it.
+
+`runAdapterConformanceTests(factory, cleanup?)` registers the standard channel
+adapter contract against that runner. The same helper is available directly
+from `@n1creator/openacp-cli/testing` for adapter packages that do not otherwise
+depend on the plugin SDK.
 
 ---
 

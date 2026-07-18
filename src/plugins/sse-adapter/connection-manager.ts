@@ -115,6 +115,36 @@ export class ConnectionManager {
       .filter((c): c is SSEConnection => c !== undefined);
   }
 
+  /** Identity check for an immutable connection snapshot. */
+  isConnectionCurrent(connection: SSEConnection): boolean {
+    return this.connections.get(connection.id) === connection
+      && !connection.response.writableEnded;
+  }
+
+  /** Write only to the captured connection objects; newly registered peers are excluded. */
+  sendToConnections(connections: readonly SSEConnection[], serializedEvent: string): number {
+    let delivered = 0;
+    for (const conn of connections) {
+      if (!this.isConnectionCurrent(conn)) continue;
+      try {
+        const ok = conn.response.write(serializedEvent);
+        delivered += 1;
+        if (!ok) {
+          if (conn.backpressured) {
+            conn.response.end();
+            this.removeConnection(conn.id);
+          } else {
+            conn.backpressured = true;
+            conn.response.once('drain', () => { conn.backpressured = false; });
+          }
+        }
+      } catch {
+        this.removeConnection(conn.id);
+      }
+    }
+    return delivered;
+  }
+
   /**
    * Writes a serialized SSE event to all connections for the given session.
    *

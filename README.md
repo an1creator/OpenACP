@@ -69,13 +69,13 @@ Platform-specific setup is in the maintained [Telegram](https://github.com/an1cr
 ### Agents and sessions
 
 - Run modern Codex and Cursor ACP processes alongside Claude Code, Gemini CLI, and other ACP-compatible agents.
-- Launch npx and uvx adapters from the exact reviewed registry version; binary downloads support registry zip, tar, and raw-executable targets, verify published SHA-256 digests, and replace the installed runtime transactionally. If removal of the replaced runtime is temporarily blocked, installation still reports success with a cleanup-pending warning and retries only a safely marked artifact; otherwise it gives a manual-cleanup warning.
+- Launch npx and uvx adapters from the exact reviewed registry version and environment. Local command, argument, or environment overrides still run as generic ACP agents but cannot unlock registry-specific controls. Binary downloads support registry zip, tar, and raw-executable targets, verify published SHA-256 digests, and replace the installed runtime transactionally. If removal of the replaced runtime is temporarily blocked, installation still reports success with a cleanup-pending warning and retries only a safely marked artifact; otherwise it gives a manual-cleanup warning.
 - Read model, mode, and reasoning choices from each agent at runtime instead of maintaining a hard-coded model list.
 - Keep one persistent session per topic, thread, or API session; resume it after process restarts.
-- Switch agents with `/switch`, transfer work between terminal and chat with `/handoff`, and cancel safely with `/cancel`.
+- Switch agents with `/switch`, transfer work between terminal and chat with `/handoff`, and cancel safely with `/cancel`. Agent switches suspend old controls immediately, preserve explicit connector detaches, and activate the new runtime controls only after the runtime, bridges, and stored session identity commit as one recoverable operation.
 - Review permission requests through connector controls or configure narrowly scoped approval behavior.
 - Answer ACP form requests in Telegram or through authenticated REST/SSE clients; values are validated, returned only to the requesting agent, and never written to session history.
-- Use agent-advertised commands from connector action buttons; system slash commands keep precedence when names overlap.
+- Use the standard session actions (`compact`, `goal`, `logout`, `mcp`, `plan`, `review`, `review-branch`, `review-commit`, `skills`, and `status`) from connector buttons when the current agent advertises them. System slash commands keep precedence regardless of letter case. With an attested official Codex adapter installation, `/skills` returns a compact names-only inventory without starting or disturbing a model turn; invoke a listed skill with `$name` as usual. OpenACP filters only its connector action UI and does not change the command or skill inventory visible to the model inside Codex.
 
 ### Connectors and automation
 

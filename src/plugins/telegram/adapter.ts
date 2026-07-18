@@ -10,13 +10,18 @@ import type {
   FileServiceInterface,
   ElicitationRequest,
   ElicitationResolvedEvent,
+  AgentActionControlDeliveryContext,
+  AgentActionControlTargetBinding,
 } from "../../core/index.js";
 import { createChildLogger } from "../../core/utils/log.js";
 import type { DebugTracer } from "../../core/utils/debug-tracer.js";
 const log = createChildLogger({ module: "telegram" });
 import type { TelegramChannelConfig } from "./types.js";
 import { TelegramElicitationHandler } from "./elicitation.js";
-import type { CommandRegistry } from "../../core/command-registry.js";
+import {
+  normalizeCommandLookupName,
+  type CommandRegistry,
+} from "../../core/command-registry.js";
 import type { CommandResponse } from "../../core/plugin/types.js";
 import {
   ensureTopics,
@@ -32,6 +37,7 @@ import {
   setupIntegrateCallbacks,
   buildMenuKeyboard,
   formatAgentCommandText,
+  formatAgentCommandInvocation,
   normalizeAgentCommandName,
   resolveAgentCommandCallback,
   STATIC_COMMANDS,
@@ -206,6 +212,10 @@ export class TelegramAdapter extends MessagingAdapter {
   }>();
   /** Pending skill commands queued when session.threadId was not yet set */
   private _pendingSkillCommands = new Map<string, AgentCommand[]>();
+  /** Serializes command-pin snapshots with their pending ForceReply state. */
+  private agentActionStateOperations = new Map<string, Promise<void>>();
+  /** Serializes standalone local-control messages without touching live agent output. */
+  private agentActionControlOperations = new Map<string, Promise<unknown>>();
   /** Control message IDs per session (for updating status text/buttons) */
   private controlMsgIds = new Map<string, number>();
   /** Last usage message ID per session — replaced on each new prompt cycle */
@@ -613,14 +623,15 @@ export class TelegramAdapter extends MessagingAdapter {
       ) {
         return next();
       }
-      const commandName =
-        atIdx === -1 ? rawCommand : rawCommand.slice(0, atIdx);
+      const commandName = normalizeCommandLookupName(
+        atIdx === -1 ? rawCommand : rawCommand.slice(0, atIdx),
+      );
       const def = registry.get(commandName);
       if (!def) {
         if (!await this.authorizeAgentCommandPrincipal(ctx)) return;
         const topicId = ctx.message.message_thread_id;
         const session = topicId != null
-          ? await this.core.getOrResumeSession('telegram', String(topicId))
+          ? this.core.sessionManager.getSessionByThread('telegram', String(topicId))
           : undefined;
         const agentCommand = session?.latestCommands?.find(
           (command) => normalizeAgentCommandName(command.name) === normalizeAgentCommandName(commandName),
@@ -814,6 +825,12 @@ export class TelegramAdapter extends MessagingAdapter {
         : undefined;
       if (!session || !command) {
         await ctx.answerCallbackQuery({ text: 'This agent command is no longer available.' }).catch(() => {});
+        return;
+      }
+
+      if (command.action?.handling === 'local-skills') {
+        await ctx.answerCallbackQuery().catch(() => {});
+        await this.forwardAgentCommand(ctx, session.id, command, undefined, 'button');
         return;
       }
 
@@ -1504,6 +1521,8 @@ export class TelegramAdapter extends MessagingAdapter {
     this.sendQueue.clear();
     this.pendingCommandInputs.clear();
     this.pendingAgentCommandInputs.clear();
+    this.agentActionStateOperations.clear();
+    this.agentActionControlOperations.clear();
     this.elicitationHandler?.clear();
     this.callbackCache.clear();
     clearProxyDraftsForChannel('telegram');
@@ -1697,7 +1716,26 @@ export class TelegramAdapter extends MessagingAdapter {
     const userId = ctx.from?.id;
     if (threadId == null || userId == null) return;
 
-    const text = formatAgentCommandText(command.name, input);
+    if (command.action?.handling === 'local-skills') {
+      this.getTracer(sessionId)?.log('telegram', {
+        action: 'incoming:agent-command-control',
+        sessionId,
+        userId: String(userId),
+        command: command.action.key,
+        source,
+      });
+      await this.core.handleAgentActionControl({
+        sessionId,
+        adapterId: 'telegram',
+        threadId: String(threadId),
+        userId: String(userId),
+        actionName: command.action.key,
+        principal: { type: 'connector', channelId: 'telegram', userId: String(userId) },
+      });
+      return;
+    }
+
+    const text = formatAgentCommandInvocation(command, input);
     this.getTracer(sessionId)?.log('telegram', {
       action: 'incoming:agent-command',
       sessionId,
@@ -2516,28 +2554,108 @@ export class TelegramAdapter extends MessagingAdapter {
   ): Promise<void> {
     if (sessionId === this.core.assistantManager?.get('telegram')?.id) return;
 
-    const session = this.core.sessionManager.getSession(sessionId);
-    if (!session) return;
-    const threadId = Number(session.threadId);
-    if (!threadId) {
-      // Queue for later — flushed when threadId is assigned via flushPendingSkillCommands()
-      this._pendingSkillCommands.set(sessionId, commands);
-      return;
-    }
+    await this.runAgentActionStateExclusive(sessionId, async () => {
+      const session = this.core.sessionManager.getSession(sessionId);
+      if (!session) return;
+      this.clearPendingAgentCommandInputs(sessionId);
+      const threadId = Number(session.threadIds.get('telegram') ?? session.threadId);
+      if (!threadId) {
+        // Queue for later — flushed when threadId is assigned via flushPendingSkillCommands()
+        this._pendingSkillCommands.set(sessionId, commands);
+        return;
+      }
 
-    await this.skillManager.send(sessionId, threadId, commands);
+      this._pendingSkillCommands.delete(sessionId);
+      await this.skillManager.send(sessionId, threadId, commands);
+    });
   }
 
   /** Flush any skill commands that were queued before threadId was available */
   async flushPendingSkillCommands(sessionId: string): Promise<void> {
-    const commands = this._pendingSkillCommands.get(sessionId);
-    if (!commands) return;
-    this._pendingSkillCommands.delete(sessionId);
+    await this.runAgentActionStateExclusive(sessionId, async () => {
+      const commands = this._pendingSkillCommands.get(sessionId);
+      if (!commands) return;
+      this._pendingSkillCommands.delete(sessionId);
+      const session = this.core.sessionManager.getSession(sessionId);
+      if (!session) return;
+      this.clearPendingAgentCommandInputs(sessionId);
+      const threadId = Number(session.threadIds.get('telegram') ?? session.threadId);
+      if (!threadId) return;
+      await this.skillManager.send(sessionId, threadId, commands);
+    });
+  }
+
+  /** Reserve this exact Telegram topic for one local-control multipart response. */
+  bindAgentActionControlTarget(
+    context: AgentActionControlDeliveryContext,
+  ): AgentActionControlTargetBinding | null {
+    const sessionId = context.target.sessionId;
+    const threadId = Number(context.target.threadId);
+    if (context.target.adapterId !== 'telegram' || !threadId) return null;
+
+    const previous = this.agentActionControlOperations.get(sessionId) ?? Promise.resolve();
+    const entered = previous.catch(() => {}).then(() => undefined);
+    let releaseReservation!: () => void;
+    const reservation = new Promise<void>((resolve) => { releaseReservation = resolve; });
+    const current = entered.then(() => reservation);
+    this.agentActionControlOperations.set(sessionId, current);
+    let released = false;
+    void current.finally(() => {
+      if (this.agentActionControlOperations.get(sessionId) === current) {
+        this.agentActionControlOperations.delete(sessionId);
+      }
+    });
+
+    return {
+      target: context.target,
+      isCurrent: () => !released && context.isCurrent(),
+      sendPart: async (_response, part) => {
+        await entered;
+        if (released || !context.isCurrent()) return "stale";
+        await this.bot.api.sendMessage(this.telegramConfig.chatId, part, {
+          message_thread_id: threadId,
+          disable_notification: true,
+        });
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        releaseReservation();
+      },
+    };
+  }
+
+  private async runAgentActionStateExclusive(
+    sessionId: string,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const previous = this.agentActionStateOperations.get(sessionId) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(operation);
+    this.agentActionStateOperations.set(sessionId, current);
+    try {
+      await current;
+    } finally {
+      if (this.agentActionStateOperations.get(sessionId) === current) {
+        this.agentActionStateOperations.delete(sessionId);
+      }
+    }
+  }
+
+  private clearPendingAgentCommandInputs(sessionId: string): void {
     const session = this.core.sessionManager.getSession(sessionId);
-    if (!session) return;
-    const threadId = Number(session.threadId);
-    if (!threadId) return;
-    await this.skillManager.send(sessionId, threadId, commands);
+    const record = this.core.sessionManager.getSessionRecord(sessionId);
+    const persistedTopicId = (record?.platform as TelegramPlatformData | undefined)?.topicId;
+    const topicIds = new Set([
+      session?.threadIds.get('telegram'),
+      session?.channelId === 'telegram' ? session.threadId : undefined,
+      this._sessionThreadIds.get(sessionId)?.toString(),
+      persistedTopicId?.toString(),
+    ].filter((value): value is string => Boolean(value)));
+    for (const key of this.pendingAgentCommandInputs.keys()) {
+      if ([...topicIds].some((topicId) => key.endsWith(`:${topicId}`))) {
+        this.pendingAgentCommandInputs.delete(key);
+      }
+    }
   }
 
   private async resolveSessionId(threadId: number): Promise<string | undefined> {
@@ -2649,8 +2767,16 @@ export class TelegramAdapter extends MessagingAdapter {
    * when a session with registered skill commands ends.
    */
   async cleanupSkillCommands(sessionId: string): Promise<void> {
-    this._pendingSkillCommands.delete(sessionId);
-    await this.skillManager.cleanup(sessionId);
+    await this.cleanupAgentActionState(sessionId);
+  }
+
+  /** Atomically retire action pins and invalidate pending ForceReply prompts. */
+  async cleanupAgentActionState(sessionId: string): Promise<void> {
+    await this.runAgentActionStateExclusive(sessionId, async () => {
+      this._pendingSkillCommands.delete(sessionId);
+      this.clearPendingAgentCommandInputs(sessionId);
+      await this.skillManager.cleanup(sessionId);
+    });
   }
 
   /**
@@ -2662,12 +2788,7 @@ export class TelegramAdapter extends MessagingAdapter {
    */
   async cleanupSessionState(sessionId: string): Promise<void> {
     this._pendingSkillCommands.delete(sessionId);
-    const topicId = this.core.sessionManager.getSession(sessionId)?.threadId;
-    if (topicId) {
-      for (const key of this.pendingAgentCommandInputs.keys()) {
-        if (key.endsWith(`:${topicId}`)) this.pendingAgentCommandInputs.delete(key);
-      }
-    }
+    this.clearPendingAgentCommandInputs(sessionId);
     // Finalize and clean up draft state
     await this.draftManager.finalize(sessionId, this.core.assistantManager?.get('telegram')?.id);
     this.draftManager.cleanup(sessionId);

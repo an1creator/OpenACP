@@ -4,6 +4,7 @@ import type { AgentCommand } from "../../../core/index.js";
 import type { MenuRegistry } from "../../../core/menu-registry.js";
 import { createHash } from "node:crypto";
 import { escapeHtml } from "../formatting.js";
+import { canonicalAgentActionKey } from "../../../core/agents/agent-action-policy.js";
 
 /**
  * Build the main OpenACP menu keyboard from the MenuRegistry.
@@ -87,9 +88,8 @@ const TELEGRAM_MSG_LIMIT = 4096;
  * limit, it is split into multiple messages (cut at line boundaries).
  */
 export function buildSkillMessages(commands: AgentCommand[]): string[] {
-  const sorted = [...commands].sort((a, b) => a.name.localeCompare(b.name));
   const header = "🛠 <b>Agent commands</b>\n<i>These actions are sent to the current ACP agent.</i>\n";
-  const lines = sorted.map((command) => {
+  const lines = commands.map((command) => {
     const name = escapeHtml(formatAgentCommandText(command.name).slice(0, 128));
     const description = command.description.trim().slice(0, 512);
     return `<code>${name}</code>${description ? ` — ${escapeHtml(description)}` : ""}`;
@@ -113,7 +113,7 @@ export function buildSkillMessages(commands: AgentCommand[]): string[] {
 
 /** Return a command name without an optional ACP-style leading slash. */
 export function normalizeAgentCommandName(name: string): string {
-  return name.trim().replace(/^\/+/, "");
+  return canonicalAgentActionKey(name) ?? "";
 }
 
 /** Format an advertised ACP command with exactly one leading slash. */
@@ -121,6 +121,14 @@ export function formatAgentCommandText(name: string, input?: string): string {
   const command = `/${normalizeAgentCommandName(name)}`;
   const suffix = input?.trim();
   return suffix ? `${command} ${suffix}` : command;
+}
+
+/** Format the exact trusted ACP invocation while adding a slash only when absent. */
+export function formatAgentCommandInvocation(command: AgentCommand, input?: string): string {
+  const advertised = command.action?.invocation?.trim() || command.name.trim();
+  const invocation = advertised.startsWith("/") ? advertised : `/${advertised}`;
+  const suffix = input?.trim();
+  return suffix ? `${invocation} ${suffix}` : invocation;
 }
 
 /** Build a callback namespace that cannot collide with CommandRegistry callbacks. */
@@ -159,7 +167,7 @@ export function resolveAgentCommandCallback(
 /** Build buttons whose `a/` callback namespace means "send to ACP agent". */
 export function buildSkillKeyboard(commands: readonly AgentCommand[]): InlineKeyboard {
   const keyboard = new InlineKeyboard();
-  for (const command of [...commands].sort((a, b) => a.name.localeCompare(b.name))) {
+  for (const command of commands) {
     keyboard
       .text(formatAgentCommandText(command.name).slice(0, 64), encodeAgentCommandCallback(command.name))
       .row();

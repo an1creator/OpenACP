@@ -33,6 +33,7 @@ function mockCatalog(installed: Record<string, any> = {}) {
       if (installed[name]) {
         return {
           name,
+          ...installed[name],
           command: installed[name].command ?? 'mock-agent',
           args: installed[name].args ?? [],
           env: installed[name].env ?? {},
@@ -105,6 +106,7 @@ describe('AgentManager warm-pool', () => {
         expect.objectContaining({ name: 'claude' }),
         '/workspace',
         [],
+        expect.any(Object),
       )
     })
 
@@ -576,6 +578,183 @@ describe('AgentManager warm-pool', () => {
       const next = await manager.spawn('claude', '/workspace')
       expect((next as any).claimForSession).toHaveBeenCalled()
       expect(AgentInstance.spawn).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('resolved definition fingerprint', () => {
+    function installedCodex() {
+      return {
+        command: 'npx',
+        args: ['@agentclientprotocol/codex-acp@1.2.3', '--stdio'],
+        env: { A: '1', B: '2' },
+        registryId: 'codex-acp',
+        installedVersion: '1.2.3',
+        registryPackage: '@agentclientprotocol/codex-acp@1.2.3',
+        registryEnvironment: { A: '1', B: '2' },
+        distribution: 'npx',
+        registryRuntimeAttested: true,
+        initTimeoutMs: 12_000,
+        workingDirectory: '/catalog-default',
+      }
+    }
+
+    it('retires an in-flight candidate when the catalog changes before publication', async () => {
+      const installed = { codex: installedCodex() }
+      const catalog = mockCatalog(installed)
+      const manager = new AgentManager(catalog)
+      const candidate = fakeWarmInstance()
+      let finishPrewarm!: (instance: any) => void
+      vi.mocked(AgentInstance.spawnSubprocess).mockImplementationOnce(
+        () => new Promise<any>((resolve) => { finishPrewarm = resolve }),
+      )
+
+      manager.prewarm('codex', '/workspace')
+      await vi.waitFor(() => expect(AgentInstance.spawnSubprocess).toHaveBeenCalledOnce())
+      installed.codex = {
+        ...installedCodex(),
+        command: '/opt/custom-wrapper',
+        args: ['--custom'],
+        env: { WRAPPER_MODE: '1' },
+        distribution: 'custom',
+        registryRuntimeAttested: false,
+      } as any
+      finishPrewarm(candidate)
+
+      await vi.waitFor(() => expect(candidate.destroy).toHaveBeenCalledOnce())
+      expect(candidate.claimForSession).not.toHaveBeenCalled()
+      expect(manager.getWarmPoolResourceStatus()).toEqual({ state: 'empty', capacity: 1 })
+
+      await manager.spawn('codex', '/workspace')
+      expect(AgentInstance.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({ command: '/opt/custom-wrapper', args: ['--custom'] }),
+        '/workspace', undefined, undefined, expect.any(Object),
+      )
+    })
+
+    it.each([
+      ['command', (definition: any) => { definition.command = '/opt/wrapper' }],
+      ['argument order', (definition: any) => { definition.args = [...definition.args].reverse() }],
+      ['environment value', (definition: any) => { definition.env = { ...definition.env, A: 'changed' } }],
+      ['registry identity', (definition: any) => { definition.registryId = 'other' }],
+      ['installed version', (definition: any) => { definition.installedVersion = '9.9.9' }],
+      ['registry package', (definition: any) => { definition.registryPackage = '@other/pkg@1.0.0' }],
+      ['distribution', (definition: any) => { definition.distribution = 'custom' }],
+      ['attestation', (definition: any) => { definition.registryRuntimeAttested = false }],
+      ['registry environment', (definition: any) => { definition.registryEnvironment = { A: 'other' } }],
+      ['init timeout', (definition: any) => { definition.initTimeoutMs += 1 }],
+      ['definition working directory', (definition: any) => { definition.workingDirectory = '/other' }],
+      ['definition name', (definition: any) => { definition.name = 'renamed-codex' }],
+    ])('does not claim a warm process after %s changes', async (_label, mutate) => {
+      const installed = { codex: installedCodex() }
+      const catalog = mockCatalog(installed)
+      const manager = new AgentManager(catalog)
+      const warm = fakeWarmInstance()
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warm as any)
+      manager.prewarm('codex', '/workspace')
+      await vi.waitFor(() => expect(manager.getWarmPoolResourceStatus().state).toBe('ready'))
+
+      mutate(installed.codex)
+      await manager.spawn('codex', '/workspace')
+
+      expect(warm.claimForSession).not.toHaveBeenCalled()
+      await vi.waitFor(() => expect(warm.destroy).toHaveBeenCalledOnce())
+      expect(AgentInstance.spawn).toHaveBeenCalledOnce()
+    })
+
+    it('treats environment object key order as cosmetic while preserving argument order', async () => {
+      const installed = { codex: installedCodex() }
+      const manager = new AgentManager(mockCatalog(installed))
+      const warm = fakeWarmInstance()
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warm as any)
+      manager.prewarm('codex', '/workspace')
+      await vi.waitFor(() => expect(manager.getWarmPoolResourceStatus().state).toBe('ready'))
+
+      installed.codex.env = { B: '2', A: '1' }
+      installed.codex.registryEnvironment = { B: '2', A: '1' }
+      await manager.spawn('codex', '/workspace')
+
+      expect(warm.claimForSession).toHaveBeenCalledOnce()
+      expect(AgentInstance.spawn).not.toHaveBeenCalled()
+    })
+
+    it('retires the candidate when resolution disappears before claim', async () => {
+      const installed: Record<string, any> = { codex: installedCodex() }
+      const manager = new AgentManager(mockCatalog(installed))
+      const warm = fakeWarmInstance()
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warm as any)
+      manager.prewarm('codex', '/workspace')
+      await vi.waitFor(() => expect(manager.getWarmPoolResourceStatus().state).toBe('ready'))
+      delete installed.codex
+
+      await expect(manager.spawn('codex', '/workspace')).rejects.toThrow(/not installed/)
+      await vi.waitFor(() => expect(warm.destroy).toHaveBeenCalledOnce())
+      expect(warm.claimForSession).not.toHaveBeenCalled()
+    })
+
+    it('revalidates after an awaited claim and destroys a process changed mid-claim', async () => {
+      const installed = { codex: installedCodex() }
+      const manager = new AgentManager(mockCatalog(installed))
+      let finishClaim!: () => void
+      const warm = fakeWarmInstance({
+        claimForSession: vi.fn(() => new Promise<void>((resolve) => { finishClaim = resolve })),
+      })
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warm as any)
+      manager.prewarm('codex', '/workspace')
+      await vi.waitFor(() => expect(manager.getWarmPoolResourceStatus().state).toBe('ready'))
+
+      const pending = manager.spawn('codex', '/workspace')
+      await vi.waitFor(() => expect(warm.claimForSession).toHaveBeenCalledOnce())
+      installed.codex.command = '/opt/replaced-during-claim'
+      finishClaim()
+      await pending
+
+      expect(warm.destroy).toHaveBeenCalledOnce()
+      expect(AgentInstance.spawn).toHaveBeenCalledWith(
+        expect.objectContaining({ command: '/opt/replaced-during-claim' }),
+        '/workspace', undefined, undefined, expect.any(Object),
+      )
+    })
+
+    it('retains failed mismatch cleanup and never hands that process to a later claim', async () => {
+      const installed = { codex: installedCodex() }
+      const manager = new AgentManager(mockCatalog(installed))
+      const warm = fakeWarmInstance({
+        destroy: vi.fn().mockRejectedValue(new Error('cannot retire stale warm process')),
+      })
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warm as any)
+      manager.prewarm('codex', '/workspace')
+      await vi.waitFor(() => expect(manager.getWarmPoolResourceStatus().state).toBe('ready'))
+      installed.codex.env = { A: 'changed' }
+
+      await manager.spawn('codex', '/workspace')
+      await vi.waitFor(() => expect(manager.getWarmPoolResourceStatus().state).toBe('failed'))
+      installed.codex.env = { A: '1', B: '2' }
+      await manager.spawn('codex', '/workspace')
+
+      expect(warm.claimForSession).not.toHaveBeenCalled()
+      expect(AgentInstance.spawn).toHaveBeenCalledTimes(2)
+    })
+
+    it('allows only one concurrent claimant and sends the other request to a fresh snapshot', async () => {
+      const installed = { codex: installedCodex() }
+      const manager = new AgentManager(mockCatalog(installed))
+      let finishClaim!: () => void
+      const warm = fakeWarmInstance({
+        claimForSession: vi.fn(() => new Promise<void>((resolve) => { finishClaim = resolve })),
+      })
+      vi.mocked(AgentInstance.spawnSubprocess).mockResolvedValueOnce(warm as any)
+      manager.prewarm('codex', '/workspace')
+      await vi.waitFor(() => expect(manager.getWarmPoolResourceStatus().state).toBe('ready'))
+
+      const first = manager.spawn('codex', '/workspace')
+      await vi.waitFor(() => expect(warm.claimForSession).toHaveBeenCalledOnce())
+      const second = manager.spawn('codex', '/workspace')
+      await second
+      finishClaim()
+      await first
+
+      expect(warm.claimForSession).toHaveBeenCalledOnce()
+      expect(AgentInstance.spawn).toHaveBeenCalledOnce()
     })
   })
 

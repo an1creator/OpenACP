@@ -2,7 +2,11 @@ import type { AgentManager } from "./agents/agent-manager.js";
 import type { SessionManager } from "./sessions/session-manager.js";
 import type { ConfigManager } from "./config/config.js";
 import type { SessionBridge } from "./sessions/session-bridge.js";
-import { SessionTerminatingError, type Session } from "./sessions/session.js";
+import {
+  SessionTerminatingError,
+  type Session,
+  type SessionAttachmentLease,
+} from "./sessions/session.js";
 import type { IChannelAdapter } from "./channel.js";
 import type { EventBus } from "./event-bus.js";
 import type { MiddlewareChain } from "./plugin/middleware-chain.js";
@@ -57,6 +61,37 @@ export class AgentSwitchHandler {
     }
   }
 
+  private captureAttachmentLeases(session: Session): Array<{
+    adapterId: string;
+    lease: SessionAttachmentLease;
+  }> {
+    return [...new Set(session.attachedAdapters)].map((adapterId) => {
+      const threadId = session.threadIds.get(adapterId)
+        ?? (session.channelId === adapterId ? session.threadId : undefined);
+      const lease = threadId === undefined
+        ? null
+        : session.captureAttachmentLease(adapterId, threadId);
+      if (!lease) {
+        throw new Error(`Attached adapter "${adapterId}" has no coherent session binding`);
+      }
+      return { adapterId, lease };
+    });
+  }
+
+  private reconnectCurrentAttachments(
+    session: Session,
+    attachments: Array<{ adapterId: string; lease: SessionAttachmentLease }>,
+  ): void {
+    for (const { adapterId, lease } of attachments) {
+      if (!session.isAttachmentLeaseCurrent(lease)) continue;
+      const adapter = this.deps.adapters.get(adapterId);
+      if (!adapter) {
+        throw new Error(`Attached adapter "${adapterId}" became unavailable during agent switch`);
+      }
+      this.deps.createBridge(session, adapter, adapterId).connect();
+    }
+  }
+
   /**
    * Switch a session to a different agent. Returns whether the previous
    * agent session was resumed or a new one was spawned.
@@ -74,7 +109,7 @@ export class AgentSwitchHandler {
   }
 
   private async doSwitch(sessionId: string, toAgent: string): Promise<{ resumed: boolean }> {
-    const { sessionManager, agentManager, configManager, eventBus, adapters, createBridge } = this.deps;
+    const { sessionManager, agentManager, configManager, eventBus, adapters } = this.deps;
 
     const session = sessionManager.getSession(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
@@ -83,6 +118,9 @@ export class AgentSwitchHandler {
     if (!agentDef) throw new Error(`Agent "${toAgent}" is not installed`);
 
     const fromAgent = session.agentName;
+    if (toAgent === fromAgent) {
+      throw new Error(`Session is already using agent "${toAgent}"`);
+    }
 
     // 1. Middleware: agent:beforeSwitch (blocking)
     const middlewareChain = this.deps.getMiddlewareChain();
@@ -115,20 +153,74 @@ export class AgentSwitchHandler {
       status: "starting",
     });
 
-    // 3. Disconnect ALL bridges for this session
+    // 3. Disconnect ALL bridges and retire action UI on every unique attached adapter.
+    //    The in-memory snapshot is suspended first so stale callbacks cannot route
+    //    while cleanup or a replacement spawn is still pending.
+    const attachmentLeases = this.captureAttachmentLeases(session);
     const hadBridges = this.deps.disconnectSessionBridges(sessionId) > 0;
+    session.suspendAgentActions();
 
-    const switchAdapter = adapters.get(session.channelId);
-    if (switchAdapter?.sendSkillCommands) {
-      await switchAdapter.sendSkillCommands(session.id, []);
-      this.assertSwitchTargetLive(sessionId, session);
+    const cleanupErrors: unknown[] = [];
+    for (const { adapterId, lease } of attachmentLeases) {
+      // A concurrent explicit detach owns this adapter now. It must stay detached
+      // and must never be recreated by this older switch transaction.
+      if (!session.isAttachmentLeaseCurrent(lease)) continue;
+      const adapter = adapters.get(adapterId);
+      if (!adapter) {
+        cleanupErrors.push(new Error(`Attached adapter "${adapterId}" is unavailable during switch cleanup`));
+        continue;
+      }
+      try {
+        if (adapter.cleanupAgentActionState) {
+          await adapter.cleanupAgentActionState(session.id);
+        } else if (adapter.cleanupSkillCommands) {
+          await adapter.cleanupSkillCommands(session.id);
+        } else if (adapter.sendSkillCommands) {
+          await adapter.sendSkillCommands(session.id, []);
+        }
+      } catch (error) {
+        cleanupErrors.push(error);
+        log.warn({ sessionId, adapterId, err: error }, "Failed to clean adapter agent actions");
+      }
+      try {
+        await adapter.cleanupSessionState?.(session.id);
+      } catch (error) {
+        cleanupErrors.push(error);
+        log.warn({ sessionId, adapterId, err: error }, "Failed to clean adapter session state");
+      }
     }
-    if (switchAdapter?.cleanupSessionState) {
-      await switchAdapter.cleanupSessionState(session.id);
-      this.assertSwitchTargetLive(sessionId, session);
+    this.assertSwitchTargetLive(sessionId, session);
+
+    if (cleanupErrors.length > 0) {
+      session.restoreCurrentAgentActions();
+      if (hadBridges) {
+        try {
+          this.reconnectCurrentAttachments(session, attachmentLeases);
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      }
+      const cleanupError = new AggregateError(cleanupErrors, "Failed to clean adapter state before agent switch");
+      const failedEvent: AgentEvent = {
+        type: "system_message",
+        message: `Failed to switch to ${toAgent}: ${cleanupError.message}`,
+      };
+      session.emit(SessionEv.AGENT_EVENT, failedEvent);
+      eventBus.emit(BusEvent.AGENT_EVENT, { sessionId, turnId: '', event: failedEvent });
+      eventBus.emit(BusEvent.SESSION_AGENT_SWITCH, {
+        sessionId,
+        fromAgent,
+        toAgent,
+        status: "failed",
+        error: cleanupError.message,
+      });
+      throw cleanupError;
     }
 
     const fromAgentSessionId = session.agentSessionId;
+    const fromPromptCount = session.promptCount;
+    const fromFirstAgent = session.firstAgent;
+    const fromSwitchHistory = structuredClone(session.agentSwitchHistory);
 
     // 4. Switch agent on session (with rollback on failure).
     //    switchAgent() replaces the session's agent instance atomically — if the
@@ -181,6 +273,20 @@ export class AgentSwitchHandler {
         return instance;
       });
       this.assertSwitchTargetLive(sessionId, session);
+
+      // Runtime activation is provisional until both bridge ownership and the
+      // durable session record commit. Any failure below enters the same rollback.
+      if (hadBridges) this.reconnectCurrentAttachments(session, attachmentLeases);
+      this.assertSwitchTargetLive(sessionId, session);
+      await sessionManager.patchRecord(sessionId, {
+        agentName: toAgent,
+        agentSessionId: session.agentSessionId,
+        firstAgent: session.firstAgent,
+        currentPromptCount: 0,
+        agentSwitchHistory: session.agentSwitchHistory,
+      }, { expectedSession: session });
+      this.assertSwitchTargetLive(sessionId, session);
+      session.restoreCurrentAgentActions();
     } catch (err) {
       // Cancellation/destroy is a terminal boundary, not a switch failure. Never
       // resurrect the old agent, reconnect bridges, emit switch results, or patch
@@ -205,8 +311,9 @@ export class AgentSwitchHandler {
         error: errorMessage,
       });
 
-      // Rollback
+      // Rollback runtime and durable identity before making old bridges visible.
       try {
+        this.deps.disconnectSessionBridges(sessionId);
         await session.restoreAgentAfterFailedSwitch(fromAgent, async () => {
           try {
             return await agentManager.resume(fromAgent, session.workingDirectory, fromAgentSessionId);
@@ -216,15 +323,16 @@ export class AgentSwitchHandler {
           }
         });
         this.assertSwitchTargetLive(sessionId, session);
-        // Reconnect only resources that the switch actually detached.
-        if (hadBridges) {
-          for (const adapterId of session.attachedAdapters) {
-            const adapter = adapters.get(adapterId);
-            if (adapter) {
-              createBridge(session, adapter, adapterId).connect();
-            }
-          }
-        }
+        await sessionManager.patchRecord(sessionId, {
+          agentName: fromAgent,
+          agentSessionId: session.agentSessionId,
+          firstAgent: fromFirstAgent,
+          currentPromptCount: fromPromptCount,
+          agentSwitchHistory: fromSwitchHistory,
+        }, { expectedSession: session });
+        this.assertSwitchTargetLive(sessionId, session);
+        session.restoreCurrentAgentActions();
+        if (hadBridges) this.reconnectCurrentAttachments(session, attachmentLeases);
         log.warn({ sessionId, fromAgent, toAgent, err }, "Agent switch failed, rolled back to previous agent");
       } catch (rollbackErr) {
         if (!this.isSwitchTargetLive(sessionId, session)) {
@@ -234,34 +342,29 @@ export class AgentSwitchHandler {
             : new SessionTerminatingError(sessionId);
         }
         session.fail(`Switch failed and rollback failed: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`);
+        this.deps.disconnectSessionBridges(sessionId);
+        try {
+          await session.destroy();
+        } catch (destroyError) {
+          log.error({ sessionId, destroyError }, "Failed to terminate divergent runtime after rollback failure");
+        }
+        try {
+          await sessionManager.patchRecord(sessionId, {
+            status: "error",
+            agentName: session.agentName,
+            agentSessionId: session.agentSessionId,
+            firstAgent: session.firstAgent,
+            currentPromptCount: session.promptCount,
+            agentSwitchHistory: session.agentSwitchHistory,
+          }, { expectedSession: session });
+        } catch (durabilityError) {
+          log.error({ sessionId, durabilityError }, "Failed to persist terminal switch rollback failure");
+        }
         log.error({ sessionId, fromAgent, toAgent, err, rollbackErr }, "Agent switch failed and rollback also failed");
+        throw new AggregateError([err, rollbackErr], "Agent switch failed and rollback failed");
       }
       throw err;
     }
-
-    // 5. Reconnect bridges for ALL attached adapters
-    if (hadBridges) {
-      this.assertSwitchTargetLive(sessionId, session);
-      for (const adapterId of session.attachedAdapters) {
-        const adapter = adapters.get(adapterId);
-        if (adapter) {
-          createBridge(session, adapter, adapterId).connect();
-        } else {
-          log.warn({ sessionId, adapterId }, "Adapter not available during switch reconnect, skipping bridge");
-        }
-      }
-    }
-
-    // 6. Persist
-    this.assertSwitchTargetLive(sessionId, session);
-    await sessionManager.patchRecord(sessionId, {
-      agentName: toAgent,
-      agentSessionId: session.agentSessionId,
-      firstAgent: session.firstAgent,
-      currentPromptCount: 0,
-      agentSwitchHistory: session.agentSwitchHistory,
-    }, { expectedSession: session });
-    this.assertSwitchTargetLive(sessionId, session);
 
     // Success is externally visible only after bridge ownership and durable state
     // both commit. A cancellation while persistence is pending must not announce a

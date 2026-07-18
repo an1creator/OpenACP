@@ -5,6 +5,9 @@ import type {
 } from "../channel.js";
 import type {
   OutgoingMessage,
+  AgentActionControlDeliveryContext,
+  AgentActionControlDeliveryTarget,
+  AgentActionControlTargetBinding,
   PermissionRequest,
   NotificationMessage,
 } from "../types.js";
@@ -80,6 +83,27 @@ export abstract class MessagingAdapter implements IChannelAdapter {
     const verbosity = this.getVerbosity();
     if (!this.shouldDisplay(content, verbosity)) return;
     await this.dispatchMessage(sessionId, content, verbosity);
+  }
+
+  /** Override only when the platform can send to this exact target without resolving sessionId again. */
+  protected sendAgentActionMessageToTarget?(
+    target: Readonly<AgentActionControlDeliveryTarget>,
+    content: OutgoingMessage,
+  ): Promise<void>;
+
+  bindAgentActionControlTarget(
+    context: AgentActionControlDeliveryContext,
+  ): AgentActionControlTargetBinding | null {
+    const sendToTarget = this.sendAgentActionMessageToTarget;
+    if (!sendToTarget) return null;
+    return {
+      target: context.target,
+      isCurrent: () => context.isCurrent(),
+      sendPart: async (_response, part) => {
+        if (!context.isCurrent()) return "stale";
+        await sendToTarget.call(this, context.target, { type: "text", text: part });
+      },
+    };
   }
 
   /**

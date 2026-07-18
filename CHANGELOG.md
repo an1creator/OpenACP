@@ -1,5 +1,29 @@
 ## Unreleased
 
+## 2026.718.4 - 2026-07-18
+
+### Changed
+
+- Limit connector action UI to the intersection of each agent's advertised
+  commands and the global ten-action vocabulary. An attested official Codex
+  installation resolves `/skills` locally as a bounded names-only inventory
+  without starting a model turn; this does not change Codex's model-visible
+  command or skill inventory.
+- Bind action snapshots and local responses to agent, attachment, and action
+  epochs with immutable transport targets. Agent switches now retire stale UI,
+  preserve explicit concurrent detaches, and commit runtime, bridges, and stored
+  identity as one recoverable operation.
+- Fingerprint the complete resolved agent definition, subprocess environment,
+  workspace, and allowed paths before publishing or claiming a warm runtime.
+- Refresh the reviewed offline ACP registry snapshot with current Dirac,
+  fast-agent, GLM, Grok, Harn, and Qwen Code releases.
+
+### Fixed
+
+- Restore the public CLI and plugin SDK `/testing` exports from one shared
+  adapter-conformance implementation and verify both packed contracts in a
+  clean consumer project.
+
 ## 2026.718.3 - 2026-07-18
 
 ### Added

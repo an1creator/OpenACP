@@ -1,4 +1,4 @@
-import { runAdapterConformanceTests } from '../../../core/adapter-primitives/__tests__/adapter-conformance.js'
+import { runAdapterConformanceTests } from '../../../testing/adapter-conformance.js'
 import { MessagingAdapter } from '../../../core/adapter-primitives/messaging-adapter.js'
 import { BaseRenderer } from '../../../core/adapter-primitives/rendering/renderer.js'
 import type { AdapterCapabilities } from '../../../core/channel.js'

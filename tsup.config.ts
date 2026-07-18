@@ -12,6 +12,9 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   dts: true,
+  // The public testing subpath integrates with the consumer's Vitest runner.
+  // Keep Vitest external so one package never bundles a second runner instance.
+  external: ['vitest'],
   clean: true,
   outDir: 'dist-publish/dist',
 })

@@ -1,6 +1,6 @@
 {
   "name": "@n1creator/openacp-plugin-sdk",
-  "version": "2026.718.3",
+  "version": "2026.718.4",
   "description": "SDK for building OpenACP plugins — types, base classes, and testing utilities",
   "type": "module",
   "exports": {
@@ -30,7 +30,13 @@
     "test": "vitest run"
   },
   "peerDependencies": {
-    "@n1creator/openacp-cli": ">=2026.718.3"
+    "@n1creator/openacp-cli": ">=2026.718.4",
+    "vitest": ">=3 <5"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=22"

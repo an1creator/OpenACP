@@ -1,10 +1,14 @@
-import { describe, it, expect, afterEach } from 'vitest'
-import type { IChannelAdapter } from '../../channel.js'
+import { afterEach, describe, expect, it } from 'vitest'
+import type { IChannelAdapter } from '../core/channel.js'
 
+/**
+ * Register the stable OpenACP adapter conformance suite with the consumer's
+ * Vitest runner.
+ */
 export function runAdapterConformanceTests(
   createAdapter: () => IChannelAdapter | Promise<IChannelAdapter>,
   cleanup?: () => Promise<void>,
-) {
+): void {
   let adapter: IChannelAdapter
 
   afterEach(async () => {

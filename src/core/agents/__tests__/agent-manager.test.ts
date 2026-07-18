@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { AgentManager } from '../agent-manager.js'
+import { AgentInstance } from '../agent-instance.js'
 
 function mockCatalog(installed: Record<string, any> = {}) {
   return {
@@ -79,6 +80,39 @@ describe('AgentManager', () => {
       await expect(manager.spawn('claude', '/workspace')).rejects.toThrow(
         /openacp agents install claude/,
       )
+    })
+
+    it('passes the exact attested catalog definition to the subprocess boundary', async () => {
+      const definition = {
+        name: 'codex',
+        registryId: 'codex-acp',
+        distribution: 'npx',
+        registryPackage: '@agentclientprotocol/codex-acp@1.1.4',
+        installedVersion: '1.1.4',
+        registryRuntimeAttested: true,
+        registryEnvironment: { CODEX_MODE: 'reviewed' },
+        command: 'npx',
+        args: ['@agentclientprotocol/codex-acp@1.1.4'],
+        env: { CODEX_MODE: 'reviewed' },
+      }
+      const catalog = {
+        resolve: vi.fn(() => definition),
+        getInstalledEntries: vi.fn(() => ({ codex: definition })),
+      } as any
+      const spawned = {} as AgentInstance
+      const spawn = vi.spyOn(AgentInstance, 'spawn').mockResolvedValue(spawned)
+
+      try {
+        const manager = new AgentManager(catalog)
+        await expect(manager.spawn('codex', '/workspace')).resolves.toBe(spawned)
+        expect(spawn).toHaveBeenCalledWith(
+          definition, '/workspace', undefined, undefined, expect.any(Object),
+        )
+        expect(spawn.mock.calls[0]?.[0]).toEqual(definition)
+        expect(spawn.mock.calls[0]?.[0]).not.toBe(definition)
+      } finally {
+        spawn.mockRestore()
+      }
     })
   })
 

@@ -23,4 +23,4 @@
  * runAdapterConformanceTests(() => new MyAdapter(mockConfig))
  * ```
  */
-export { runAdapterConformanceTests } from './core/adapter-primitives/__tests__/adapter-conformance.js'
+export { runAdapterConformanceTests } from './testing/adapter-conformance.js'

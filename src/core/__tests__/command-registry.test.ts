@@ -151,6 +151,26 @@ describe('CommandRegistry', () => {
     expect(callArgs[0].raw).toBe('some args')
   })
 
+  it('case-folds safe short and qualified lookups without changing arguments', async () => {
+    const systemHandler = vi.fn(async () => ({ type: 'text' as const, text: 'system' }))
+    const pluginHandler = vi.fn(async () => ({ type: 'text' as const, text: 'plugin' }))
+    registry.register(makeDef({ name: 'status', category: 'system', handler: systemHandler }))
+    registry.register(
+      makeDef({ name: 'Review_Item', pluginName: '@openacp/MyPlugin', handler: pluginHandler }),
+      '@openacp/MyPlugin',
+    )
+
+    await registry.execute('/STATUS Keep This CASE', makeArgs())
+    await registry.execute('/MYPLUGIN:REVIEW_ITEM --Path /Case/Sensitive', makeArgs())
+
+    expect(systemHandler).toHaveBeenCalledOnce()
+    expect(systemHandler.mock.calls[0]?.[0].raw).toBe('Keep This CASE')
+    expect(pluginHandler).toHaveBeenCalledOnce()
+    expect(pluginHandler.mock.calls[0]?.[0].raw).toBe('--Path /Case/Sensitive')
+    expect(registry.get('STATUS')?.category).toBe('system')
+    expect(registry.get('MYPLUGIN:REVIEW_ITEM')?.pluginName).toBe('@openacp/MyPlugin')
+  })
+
   // 11. execute: returns error for unknown command
   it('execute returns error for unknown command', async () => {
     const result = await registry.execute('/unknown', makeArgs())

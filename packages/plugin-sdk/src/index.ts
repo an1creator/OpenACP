@@ -45,11 +45,15 @@ export type {
   IChannelAdapter, AdapterCapabilities, OutgoingMessage, PermissionRequest,
   PermissionOption, NotificationMessage, AgentCommand, ElicitationRequest,
   ElicitationResponse, ElicitationContentValue, ElicitationResolvedEvent,
+  AgentActionControlResponse, AgentActionControlDeliveryTarget,
+  AgentActionControlDeliveryContext, AgentActionControlTargetBinding,
+  AgentActionControlDeliveryResult,
   MessagingAdapterConfig, IRenderer, RenderedMessage,
 } from '@n1creator/openacp-cli'
 
 // --- Adapter base classes (runtime) ---
 export { MessagingAdapter, StreamAdapter, BaseRenderer } from '@n1creator/openacp-cli'
+export { deliverAgentActionControlParts } from '@n1creator/openacp-cli'
 
 // --- Adapter primitives (runtime) ---
 export { SendQueue, DraftManager, ToolCallTracker, ActivityTracker } from '@n1creator/openacp-cli'

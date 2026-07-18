@@ -10,6 +10,20 @@ import semver from "semver";
 export type RegistryRunnerType = "npx" | "uvx";
 export type RunnerVersionOrder = -1 | 0 | 1 | "unknown";
 
+/** Compare a configured runtime environment with its reviewed registry definition. */
+export function environmentRecordsEqual(
+  installed: Readonly<Record<string, string>> | undefined,
+  reviewed: Readonly<Record<string, string>> | undefined,
+): boolean {
+  const installedEntries = Object.entries(installed ?? {}).sort(([left], [right]) => left.localeCompare(right));
+  const reviewedEntries = Object.entries(reviewed ?? {}).sort(([left], [right]) => left.localeCompare(right));
+  return installedEntries.length === reviewedEntries.length
+    && installedEntries.every(([key, value], index) => {
+      const expected = reviewedEntries[index];
+      return expected?.[0] === key && expected[1] === value;
+    });
+}
+
 /**
  * Validate that a package-runner argument selects exactly the registry version.
  *

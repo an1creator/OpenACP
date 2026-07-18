@@ -1,5 +1,11 @@
 import type { CommandDef, CommandArgs, CommandResponse } from './plugin/types.js'
 
+/** ASCII-only case folding for short and namespace-qualified command lookup. */
+export function normalizeCommandLookupName(name: string): string {
+  if (!/^[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?$/.test(name)) return name
+  return name.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+}
+
 /**
  * Internal representation of a registered command, extending CommandDef with
  * a `scope` derived from the plugin name for namespace-qualified lookups.
@@ -49,12 +55,14 @@ export class CommandRegistry {
       cmd.scope = CommandRegistry.extractScope(pluginName)
     }
 
-    const qualifiedName = cmd.scope ? `${cmd.scope}:${cmd.name}` : undefined
+    const commandName = normalizeCommandLookupName(cmd.name)
+    const scope = cmd.scope ? normalizeCommandLookupName(cmd.scope) : undefined
+    const qualifiedName = scope ? `${scope}:${commandName}` : undefined
 
     // Check if this is an adapter plugin overriding an existing command
-    if (cmd.scope && CommandRegistry.ADAPTER_SCOPES.has(cmd.scope) && this.commands.has(cmd.name)) {
+    if (scope && CommandRegistry.ADAPTER_SCOPES.has(scope) && this.commands.has(commandName)) {
       // Store as adapter override
-      this.overrides.set(`${cmd.scope}:${cmd.name}`, cmd)
+      this.overrides.set(`${scope}:${commandName}`, cmd)
       return
     }
 
@@ -64,8 +72,8 @@ export class CommandRegistry {
     }
 
     // Short name logic
-    if (this.commands.has(cmd.name)) {
-      const existing = this.commands.get(cmd.name)!
+    if (this.commands.has(commandName)) {
+      const existing = this.commands.get(commandName)!
       // System commands always win the short name
       if (existing.category === 'system') {
         // Plugin gets qualified name only (already registered above)
@@ -76,25 +84,28 @@ export class CommandRegistry {
     }
 
     // No conflict — register short name
-    this.commands.set(cmd.name, cmd)
+    this.commands.set(commandName, cmd)
   }
 
   /** Retrieve a command by name (short or qualified). */
   get(name: string): RegisteredCommand | undefined {
-    return this.commands.get(name)
+    return this.commands.get(normalizeCommandLookupName(name))
   }
 
   /** Remove a command by name (short or qualified). Also removes its qualified name entry. */
   unregister(name: string): void {
-    const cmd = this.commands.get(name)
+    const lookupName = normalizeCommandLookupName(name)
+    const cmd = this.commands.get(lookupName)
     if (!cmd) return
-    this.commands.delete(name)
+    this.commands.delete(lookupName)
     if (cmd.scope) {
       // If we deleted by short name, also delete qualified name
-      this.commands.delete(`${cmd.scope}:${cmd.name}`)
+      const scope = normalizeCommandLookupName(cmd.scope)
+      const commandName = normalizeCommandLookupName(cmd.name)
+      this.commands.delete(`${scope}:${commandName}`)
       // If we deleted by qualified name, only delete short name if it points to the same command
-      if (this.commands.get(cmd.name) === cmd) {
-        this.commands.delete(cmd.name)
+      if (this.commands.get(commandName) === cmd) {
+        this.commands.delete(commandName)
       }
     }
   }
@@ -151,17 +162,18 @@ export class CommandRegistry {
     const spaceIdx = trimmed.indexOf(' ')
     const rawCmd = spaceIdx === -1 ? trimmed.slice(1) : trimmed.slice(1, spaceIdx)
     // Strip bot mention suffix: "/help@MyBot" → "help"
-    const cmdName = rawCmd.split("@")[0]
+    const originalCmdName = rawCmd.split("@")[0]
+    const cmdName = normalizeCommandLookupName(originalCmdName)
     const rawArgs = spaceIdx === -1 ? '' : trimmed.slice(spaceIdx + 1)
 
     // Adapter-specific overrides take precedence (e.g. Telegram's /new with topic creation)
-    const overrideKey = `${baseArgs.channelId}:${cmdName}`
+    const overrideKey = `${normalizeCommandLookupName(baseArgs.channelId)}:${cmdName}`
     const override = this.overrides.get(overrideKey)
 
     const cmd = override ?? this.commands.get(cmdName)
 
     if (!cmd) {
-      return { type: 'error', message: `Unknown command: /${cmdName}` }
+      return { type: 'error', message: `Unknown command: /${originalCmdName}` }
     }
 
     const args: CommandArgs = {

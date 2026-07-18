@@ -189,6 +189,7 @@ export { buildMenuKeyboard } from "./menu.js";
 export { buildSkillMessages } from "./menu.js";
 export {
   buildSkillKeyboard,
+  formatAgentCommandInvocation,
   formatAgentCommandText,
   normalizeAgentCommandName,
   resolveAgentCommandCallback,

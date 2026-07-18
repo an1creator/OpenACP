@@ -1,4 +1,4 @@
-import type { OutgoingMessage, PermissionRequest, NotificationMessage, AgentCommand, ElicitationRequest, ElicitationResolvedEvent } from './types.js'
+import type { OutgoingMessage, PermissionRequest, NotificationMessage, AgentActionControlDeliveryContext, AgentActionControlDeliveryResult, AgentActionControlResponse, AgentActionControlTargetBinding, AgentActionControlDeliveryTarget, AgentCommand, ElicitationRequest, ElicitationResolvedEvent } from './types.js'
 
 /**
  * Configuration for an adapter channel (Telegram, Slack, etc.).
@@ -66,6 +66,18 @@ export interface IChannelAdapter {
 
   // --- Skill commands — optional, for agents that expose interactive commands ---
   sendSkillCommands?(sessionId: string, commands: AgentCommand[]): Promise<void>
+  /** Bind one delivery to an immutable platform target before any part is written. */
+  bindAgentActionControlTarget?(
+    context: AgentActionControlDeliveryContext,
+  ): AgentActionControlTargetBinding | null
+  /** @deprecated Core requires bindAgentActionControlTarget and no longer invokes this method. */
+  sendAgentActionControlResponse?(
+    sessionId: string,
+    response: AgentActionControlResponse,
+    context: AgentActionControlDeliveryContext,
+  ): Promise<AgentActionControlDeliveryResult>
+  /** Clear pinned actions and pending action input owned by this adapter. */
+  cleanupAgentActionState?(sessionId: string): Promise<void>
   cleanupSkillCommands?(sessionId: string): Promise<void>
   /** Flush skill commands that were queued before threadId was available. */
   flushPendingSkillCommands?(sessionId: string): Promise<void>
@@ -119,6 +131,25 @@ export abstract class ChannelAdapter<TCore = unknown> implements IChannelAdapter
   async deleteSessionThread(_sessionId: string): Promise<void> {}
 
   async sendSkillCommands(_sessionId: string, _commands: AgentCommand[]): Promise<void> {}
+  /** Override only when the platform can send to this exact target without resolving sessionId again. */
+  protected sendAgentActionMessageToTarget?(
+    target: Readonly<AgentActionControlDeliveryTarget>,
+    content: OutgoingMessage,
+  ): Promise<void>
+  bindAgentActionControlTarget(
+    context: AgentActionControlDeliveryContext,
+  ): AgentActionControlTargetBinding | null {
+    const sendToTarget = this.sendAgentActionMessageToTarget;
+    if (!sendToTarget) return null;
+    return {
+      target: context.target,
+      isCurrent: () => context.isCurrent(),
+      sendPart: async (_response, part) => {
+        if (!context.isCurrent()) return "stale";
+        await sendToTarget.call(this, context.target, { type: "text", text: part });
+      },
+    };
+  }
   async cleanupSkillCommands(_sessionId: string): Promise<void> {}
   async cleanupSessionState(_sessionId: string): Promise<void> {}
   async archiveSessionTopic(_sessionId: string): Promise<void> {}

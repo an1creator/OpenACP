@@ -3,12 +3,15 @@ import { SSEAdapter } from '../adapter.js';
 import type { ConnectionManager } from '../connection-manager.js';
 import type { EventBuffer } from '../event-buffer.js';
 import type { OutgoingMessage, PermissionRequest, NotificationMessage, ElicitationRequest } from '../../../core/types.js';
+import { deliverAgentActionControlParts } from '../../../core/agent-action-delivery.js';
 
 function createMockConnectionManager(): ConnectionManager {
   return {
     addConnection: vi.fn(),
     removeConnection: vi.fn(),
     getConnectionsBySession: vi.fn().mockReturnValue([]),
+    isConnectionCurrent: vi.fn().mockReturnValue(true),
+    sendToConnections: vi.fn((connections: unknown[]) => connections.length),
     broadcast: vi.fn(),
     broadcastWhere: vi.fn(),
     disconnectByToken: vi.fn(),
@@ -85,6 +88,50 @@ describe('SSEAdapter', () => {
         'sess-1',
         expect.stringContaining('event: agent:event'),
       );
+    });
+  });
+
+  describe('agent action target binding', () => {
+    it('writes only to the captured connection snapshot and never buffers for future connections', async () => {
+      const oldConnection = { id: 'old', sessionId: 'sess-1', response: { writableEnded: false } } as any;
+      const newConnection = { id: 'new', sessionId: 'sess-1', response: { writableEnded: false } } as any;
+      vi.mocked(connMgr.getConnectionsBySession).mockReturnValue([oldConnection]);
+      let current = true;
+      const context = {
+        target: Object.freeze({
+          sessionId: 'sess-1', adapterId: 'sse', threadId: 'sess-1',
+          attachmentGeneration: 1, agentGeneration: 1, actionEpoch: 1,
+        }),
+        isCurrent: () => current,
+      };
+      const response = {
+        type: 'agent_action_control' as const,
+        action: 'skills',
+        status: 'completed' as const,
+        chunks: ['one'],
+      };
+      const binding = adapter.bindAgentActionControlTarget(context)!;
+      vi.mocked(connMgr.getConnectionsBySession).mockReturnValue([newConnection]);
+
+      const result = await deliverAgentActionControlParts(
+        response,
+        response.chunks,
+        { target: context.target, isCurrent: () => current && binding.isCurrent() },
+        (part, index) => binding.sendPart(response, part, index),
+      );
+
+      expect(result).toMatchObject({ status: 'completed', deliveredParts: 1 });
+      expect(connMgr.sendToConnections).toHaveBeenCalledWith(
+        [oldConnection],
+        expect.stringContaining('event: agent_action_control'),
+      );
+      expect(connMgr.sendToConnections).not.toHaveBeenCalledWith(
+        expect.arrayContaining([newConnection]),
+        expect.anything(),
+      );
+      expect(eventBuf.push).not.toHaveBeenCalled();
+      expect(connMgr.broadcast).not.toHaveBeenCalled();
+      current = false;
     });
   });
 

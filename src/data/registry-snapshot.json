@@ -487,7 +487,7 @@
     {
       "id": "dirac",
       "name": "Dirac",
-      "version": "0.4.18",
+      "version": "0.4.19",
       "description": "Reduces API costs by more than 50%, produces better and faster work. Uses Hash anchored parallel edits, AST manipulation and a whole lot of neat optimizations. Fully Open Source.",
       "repository": "https://github.com/dirac-run/dirac",
       "website": "https://dirac.run",
@@ -498,7 +498,7 @@
       "icon": "https://cdn.agentclientprotocol.com/registry/v1/latest/dirac.svg",
       "distribution": {
         "npx": {
-          "package": "dirac-cli@0.4.18",
+          "package": "dirac-cli@0.4.19",
           "args": [
             "--acp"
           ]
@@ -534,7 +534,7 @@
     {
       "id": "fast-agent",
       "name": "fast-agent",
-      "version": "0.9.14",
+      "version": "0.9.15",
       "description": "Code and build agents with comprehensive multi-provider support",
       "repository": "https://github.com/evalstate/fast-agent",
       "website": "https://fast-agent.ai",
@@ -544,7 +544,7 @@
       "license": "Apache 2.0",
       "distribution": {
         "uvx": {
-          "package": "fast-agent-acp==0.9.14",
+          "package": "fast-agent-acp==0.9.15",
           "args": [
             "-x"
           ]
@@ -597,7 +597,7 @@
     {
       "id": "glm-acp-agent",
       "name": "GLM Agent",
-      "version": "1.1.4",
+      "version": "1.2.0",
       "description": "ACP agent powered by Zhipu AI's GLM Coding Plan models (glm-5.1, glm-5-turbo, glm-4.7, glm-4.5-air). Supports streaming, tool calls, mid-session model switching, image input via Z.AI Coding Plan Vision MCP, and session load/fork/resume with on-disk persistence.",
       "repository": "https://github.com/stefandevo/glm-acp-agent",
       "authors": [
@@ -607,7 +607,7 @@
       "icon": "https://cdn.agentclientprotocol.com/registry/v1/latest/glm-acp-agent.svg",
       "distribution": {
         "npx": {
-          "package": "glm-acp-agent@1.1.4"
+          "package": "glm-acp-agent@1.2.0"
         }
       }
     },
@@ -671,7 +671,7 @@
     {
       "id": "grok-build",
       "name": "Grok Build",
-      "version": "0.2.104",
+      "version": "0.2.105",
       "description": "xAI's coding agent and CLI",
       "website": "https://x.ai/cli",
       "authors": [
@@ -680,7 +680,7 @@
       "license": "proprietary",
       "distribution": {
         "npx": {
-          "package": "@xai-official/grok@0.2.104",
+          "package": "@xai-official/grok@0.2.105",
           "args": [
             "agent",
             "stdio"
@@ -692,7 +692,7 @@
     {
       "id": "harn",
       "name": "Harn",
-      "version": "0.10.23",
+      "version": "0.10.24",
       "description": "Harn runs .harn agent pipelines as a native ACP coding agent over stdio.",
       "repository": "https://github.com/burin-labs/harn",
       "website": "https://harnlang.com",
@@ -703,49 +703,49 @@
       "distribution": {
         "binary": {
           "darwin-aarch64": {
-            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-aarch64-apple-darwin.tar.gz",
+            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-aarch64-apple-darwin.tar.gz",
             "cmd": "./harn",
             "args": [
               "serve",
               "acp"
             ],
-            "sha256": "fccf097942c678aba14325f7fbfe06ccd08b41de7229ed987f4837b14d640cbb"
+            "sha256": "03c380383a0c6193b63bceff23ab4e8008bd8a2830f9a34e9aa88f47ed46f5e9"
           },
           "darwin-x86_64": {
-            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-x86_64-apple-darwin.tar.gz",
+            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-x86_64-apple-darwin.tar.gz",
             "cmd": "./harn",
             "args": [
               "serve",
               "acp"
             ],
-            "sha256": "c871cb53064f0f5962068572dae37a679ad6765f6f74042a52473da24f585f32"
+            "sha256": "8e72b6477ba38bd58774f8397fa2bf2a252e7e1814a67de5a95566e8aa123db3"
           },
           "linux-aarch64": {
-            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-aarch64-unknown-linux-gnu.tar.gz",
+            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-aarch64-unknown-linux-gnu.tar.gz",
             "cmd": "./harn",
             "args": [
               "serve",
               "acp"
             ],
-            "sha256": "a7bc1cdf1447105105d975aa1d0442bbed9e48b4df8a394dc23fda835abef149"
+            "sha256": "687b52eeeb462e9577fcc182ff1ece5da47bc64e8853e662b2b09fd676ca0bd9"
           },
           "linux-x86_64": {
-            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-x86_64-unknown-linux-gnu.tar.gz",
+            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-x86_64-unknown-linux-gnu.tar.gz",
             "cmd": "./harn",
             "args": [
               "serve",
               "acp"
             ],
-            "sha256": "a3c5d9ab75b154a846e6962a84b0acd8cd056890d8d5b40d2cd5f7f50d11bc87"
+            "sha256": "a9180f9a6eb7ddbf2a9198f44c44324503be47638e6c23cf77976ea1574ec37c"
           },
           "windows-x86_64": {
-            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-x86_64-pc-windows-msvc.zip",
+            "archive": "https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-x86_64-pc-windows-msvc.zip",
             "cmd": "harn.exe",
             "args": [
               "serve",
               "acp"
             ],
-            "sha256": "05eea0438b8c619258cef7fd3ccf644bfe09d8b5cbf323c45f3addaaf8e6bcb8"
+            "sha256": "b9f8ffa096417de8d4d87da527cbf838a829521c92556ccf598bd045e3369639"
           }
         }
       },
@@ -1170,7 +1170,7 @@
     {
       "id": "qwen-code",
       "name": "Qwen Code",
-      "version": "0.19.11",
+      "version": "0.19.12",
       "description": "Alibaba's Qwen coding assistant",
       "repository": "https://github.com/QwenLM/qwen-code",
       "website": "https://qwenlm.github.io/qwen-code-docs/en/users/overview",
@@ -1180,7 +1180,7 @@
       "license": "Apache-2.0",
       "distribution": {
         "npx": {
-          "package": "@qwen-code/qwen-code@0.19.11",
+          "package": "@qwen-code/qwen-code@0.19.12",
           "args": [
             "--acp",
             "--experimental-skills"

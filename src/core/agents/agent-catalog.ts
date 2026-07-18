@@ -11,6 +11,7 @@ import {
 import { getAgentAlias, checkDependencies, checkRuntimeAvailable, commandExists } from "./agent-dependencies.js";
 import {
   compareRunnerVersions,
+  environmentRecordsEqual,
   isImmutableRunnerPackageSpec,
   type RunnerVersionOrder,
 } from "./agent-runner-spec.js";
@@ -416,10 +417,36 @@ export class AgentCatalog {
   resolve(key: string): AgentDefinition | undefined {
     const agent = this.store.getAgent(key);
     if (!agent) return undefined;
+    const registryAgent = agent.registryId
+      ? this.registryAgents.find((candidate) => candidate.id === agent.registryId)
+      : undefined;
+    const registryDistribution = registryAgent ? resolveDistribution(registryAgent) : null;
+    const registryRuntimeAttested = registryAgent != null
+      && registryDistribution != null
+      && registryDistribution.type !== "binary"
+      && registryDistribution.type === agent.distribution
+      && (agent.distribution === "npx" || agent.distribution === "uvx")
+      && agent.registryId === registryAgent.id
+      && agent.command === agent.distribution
+      && typeof agent.args[0] === "string"
+      && isImmutableRunnerPackageSpec(agent.distribution, agent.args[0], agent.version)
+      && isImmutableRunnerPackageSpec(registryDistribution.type, registryDistribution.package, registryAgent.version)
+      && arraysEqual(agent.args.slice(1), registryDistribution.args)
+      && environmentRecordsEqual(agent.env, registryDistribution.env);
+    const registryPackage = registryRuntimeAttested
+      && registryDistribution != null
+      ? registryDistribution.package
+      : undefined;
     return {
       name: key,
       command: agent.command,
       args: agent.args,
+      registryId: agent.registryId,
+      distribution: agent.distribution,
+      registryPackage,
+      installedVersion: agent.version,
+      registryRuntimeAttested,
+      registryEnvironment: registryDistribution?.env ? { ...registryDistribution.env } : {},
       workingDirectory: agent.workingDirectory,
       env: agent.env,
       initTimeoutMs: agent.initTimeoutMs,

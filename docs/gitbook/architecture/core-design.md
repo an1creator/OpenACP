@@ -187,6 +187,13 @@ entry has a five-minute TTL enforced by a background reaper. Shutdown invalidate
 in-flight prewarm work and joins any concurrent claim or cleanup. The manager
 retains ownership through bounded destroy retries and reports pending or failed
 cleanup instead of exposing the slot as empty while the process may still live.
+Each entry stores a canonical, directly compared fingerprint of the complete
+resolved agent definition, effective subprocess environment, workspace, and
+allowed paths used to create it. Object-key order is ignored, while argument
+order and every definition value remain significant. AgentManager resolves and
+compares the current fingerprint before publishing a prewarm, immediately before
+claim, and again after an awaited claim. A changed or unavailable definition is
+retired through the same owned cleanup path and is never handed to a session.
 
 `AgentInstance.destroy()` completes only after the child has exited (or was
 already exited). SIGTERM is followed by a bounded SIGKILL wait; signal failure

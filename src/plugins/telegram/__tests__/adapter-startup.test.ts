@@ -12,6 +12,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
+import { deliverAgentActionControlParts } from '../../../core/agent-action-delivery.js'
 
 const logSpies = vi.hoisted(() => ({
   trace: vi.fn(), debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn(),
@@ -770,13 +771,22 @@ describe('TelegramAdapter startup sequence', () => {
     const { TelegramAdapter } = await import('../adapter.js')
     const core = makeMockCore() as any
     const registry = new CommandRegistry()
+    const statusHandler = vi.fn(async () => ({ type: 'text' as const, text: 'SYSTEM_STATUS' }))
     registry.register({
       name: 'status', description: 'System status', category: 'system',
-      handler: async () => ({ type: 'text', text: 'SYSTEM_STATUS' }),
+      handler: statusHandler,
+    })
+    registry.register({
+      name: 'skills', description: 'System skills', category: 'system',
+      handler: async () => ({ type: 'text', text: 'SYSTEM_SKILLS' }),
     })
     const commands = [
       { name: 'status', description: 'Agent status', _meta: { owner: 'agent' } },
-      { name: '/review', description: 'Review', input: { hint: 'Scope' }, _meta: { owner: 'agent' } },
+      { name: 'skills', description: 'Agent skills', _meta: { owner: 'agent' } },
+      {
+        name: 'review', description: 'Review', input: { hint: 'Scope' }, _meta: { owner: 'agent' },
+        action: { key: 'review', invocation: '/ReViEw', handling: 'agent', acceptsInput: true },
+      },
     ]
     const session = { id: 'session-1', latestCommands: commands }
     const security = { checkAccess: vi.fn().mockResolvedValue({ allowed: true }) }
@@ -807,10 +817,24 @@ describe('TelegramAdapter startup sequence', () => {
 
     await textHandler({
       ...baseContext,
-      message: { text: '/review current branch', message_thread_id: 321 },
+      message: { text: '/STATUS Keep Args', message_thread_id: 321 },
+    }, vi.fn().mockResolvedValue(undefined))
+    expect(core.handleMessage).not.toHaveBeenCalled()
+    expect(statusHandler).toHaveBeenCalledTimes(2)
+    expect(statusHandler.mock.calls[1]?.[0].raw).toBe('Keep Args')
+
+    await textHandler({
+      ...baseContext,
+      message: { text: '/skills', message_thread_id: 321 },
+    }, vi.fn().mockResolvedValue(undefined))
+    expect(core.handleMessage).not.toHaveBeenCalled()
+
+    await textHandler({
+      ...baseContext,
+      message: { text: '/REVIEW current branch', message_thread_id: 321 },
     }, vi.fn().mockResolvedValue(undefined))
     expect(core.handleMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ text: '/review current branch' }),
+      expect.objectContaining({ text: '/ReViEw current branch' }),
       expect.objectContaining({
         agentCommand: expect.objectContaining({ name: 'review', source: 'typed', _meta: { owner: 'agent' } }),
       }),
@@ -861,7 +885,7 @@ describe('TelegramAdapter startup sequence', () => {
       },
     }, vi.fn().mockResolvedValue(undefined))
     expect(core.handleMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ text: '/review /home/project' }),
+      expect.objectContaining({ text: '/ReViEw /home/project' }),
       expect.objectContaining({
         agentCommand: expect.objectContaining({
           name: 'review', source: 'button', input: { hint: 'Scope' }, _meta: { owner: 'agent' },
@@ -869,6 +893,146 @@ describe('TelegramAdapter startup sequence', () => {
       }),
     )
     expect((adapter as any).pendingAgentCommandInputs.size).toBe(0)
+  })
+
+  it('routes local skills as a no-input completed control and delivers multipart output immediately', async () => {
+    const { CommandRegistry } = await import('../../../core/command-registry.js')
+    const { encodeAgentCommandCallback } = await import('../commands/menu.js')
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore() as any
+    const registry = new CommandRegistry()
+    const skills = {
+      name: 'skills', description: 'List available skills.',
+      action: { key: 'skills', invocation: '/SkIlLs', handling: 'local-skills', acceptsInput: false },
+    }
+    const session = {
+      id: 'session-1', channelId: 'telegram', threadId: '321',
+      threadIds: new Map([['telegram', '321']]), attachedAdapters: ['telegram'],
+      agentGeneration: 1, attachmentGeneration: 0,
+      agentActionEpoch: 1, agentActionsSuspended: false, isTerminating: false,
+      isAgentActionEpochCurrent(epoch: number) {
+        return !this.isTerminating && !this.agentActionsSuspended && this.agentActionEpoch === epoch
+      },
+      captureAttachmentLease(adapterId: string, threadId: string) {
+        return this.attachedAdapters.includes(adapterId) && this.threadIds.get(adapterId) === threadId
+          ? { adapterId, threadId, generation: this.attachmentGeneration }
+          : null
+      },
+      isAttachmentLeaseCurrent(lease: { adapterId: string; threadId: string; generation: number }) {
+        return this.attachedAdapters.includes(lease.adapterId)
+          && this.threadIds.get(lease.adapterId) === lease.threadId
+          && this.attachmentGeneration === lease.generation
+      },
+      latestCommands: [skills],
+    }
+    const security = { checkAccess: vi.fn().mockResolvedValue({ allowed: true }) }
+    core.sessionManager.getSessionByThread = vi.fn().mockReturnValue(session)
+    core.sessionManager.getSession = vi.fn().mockReturnValue(session)
+    core.getOrResumeSession = vi.fn()
+    core.handleMessage = vi.fn()
+    core.handleAgentActionControl = vi.fn().mockResolvedValue({
+      type: 'agent_action_control', action: 'skills', status: 'completed', chunks: ['atcode'],
+    })
+    core.lifecycleManager.serviceRegistry.get = vi.fn(
+      (name: string) => name === 'command-registry' ? registry : name === 'security' ? security : null,
+    )
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+    core.adapters = new Map([['telegram', adapter]])
+    await adapter.start()
+    const bot = MockBot.instances.at(-1)!
+    const textHandler = bot.onHandlers.find(({ filter, handler }) =>
+      filter === 'message:text' && handler.toString().includes('pendingCommandInputs'))!.handler
+    const baseContext = {
+      chat: { id: makeTelegramConfig().chatId }, from: { id: 77, first_name: 'Agent' },
+      me: { username: 'testbot' }, reply: vi.fn(), replyWithChatAction: vi.fn(),
+    }
+
+    await textHandler({
+      ...baseContext, message: { text: '/SKILLS ignored input', message_thread_id: 321 },
+    }, vi.fn())
+    expect(core.handleAgentActionControl).toHaveBeenLastCalledWith({
+      sessionId: 'session-1', adapterId: 'telegram', threadId: '321',
+      userId: '77', actionName: 'skills',
+      principal: { type: 'connector', channelId: 'telegram', userId: '77' },
+    })
+    expect(core.handleMessage).not.toHaveBeenCalled()
+    expect(core.getOrResumeSession).not.toHaveBeenCalled()
+
+    const callback = bot.callbackHandlers.find(({ filter }) => String(filter) === '/^a\\//')!.handler
+    await callback({
+      ...baseContext,
+      callbackQuery: { data: encodeAgentCommandCallback('skills'), message: { message_thread_id: 321 } },
+      answerCallbackQuery: vi.fn().mockResolvedValue(undefined),
+    })
+    expect(core.handleAgentActionControl).toHaveBeenCalledTimes(2)
+    expect((adapter as any).pendingAgentCommandInputs.size).toBe(0)
+
+    bot.api.sendMessage.mockClear()
+    const finalize = vi.spyOn((adapter as any).draftManager, 'finalize')
+    const drainTracker = vi.spyOn(adapter as any, 'drainAndResetTracker')
+    const activeTracker = { marker: 'active tool card' }
+    ;(adapter as any).sessionTrackers.set('session-1', activeTracker)
+    const deliveryContext = {
+      target: {
+        sessionId: 'session-1', adapterId: 'telegram', threadId: '321',
+        attachmentGeneration: 0, agentGeneration: 1, actionEpoch: 1,
+      },
+      isCurrent: () => core.adapters.get('telegram') === adapter
+        && session.isAttachmentLeaseCurrent({ adapterId: 'telegram', threadId: '321', generation: 0 })
+        && session.isAgentActionEpochCurrent(1),
+    }
+    const deliverControl = async (response: {
+      type: 'agent_action_control'; action: string; status: 'completed'; chunks: string[];
+    }) => {
+      const binding = adapter.bindAgentActionControlTarget(deliveryContext)!
+      try {
+        return await deliverAgentActionControlParts(
+          response,
+          response.chunks,
+          { target: deliveryContext.target, isCurrent: () => deliveryContext.isCurrent() && binding.isCurrent() },
+          (part, index) => binding.sendPart(response, part, index),
+        )
+      } finally {
+        binding.release?.()
+      }
+    }
+    expect(await deliverControl({
+      type: 'agent_action_control', action: 'skills', status: 'completed', chunks: ['one', 'two'],
+    })).toMatchObject({ status: 'completed', deliveredParts: 2, totalParts: 2 })
+    expect(bot.api.sendMessage.mock.calls).toEqual([
+      [makeTelegramConfig().chatId, 'one', { message_thread_id: 321, disable_notification: true }],
+      [makeTelegramConfig().chatId, 'two', { message_thread_id: 321, disable_notification: true }],
+    ])
+    expect(finalize).not.toHaveBeenCalled()
+    expect(drainTracker).not.toHaveBeenCalled()
+    expect((adapter as any).sessionTrackers.get('session-1')).toBe(activeTracker)
+
+    bot.api.sendMessage.mockClear()
+    bot.api.sendMessage.mockImplementationOnce(async () => {
+      session.attachedAdapters = []
+      session.attachmentGeneration += 1
+      return {} as any
+    })
+    expect(await deliverControl({
+      type: 'agent_action_control', action: 'skills', status: 'completed', chunks: ['first', 'second'],
+    })).toMatchObject({
+      status: 'partial', deliveredParts: 1, totalParts: 2, reason: 'stale-target',
+    })
+    expect(bot.api.sendMessage).toHaveBeenCalledTimes(1)
+    session.attachedAdapters = ['telegram']
+    session.attachmentGeneration = 0
+
+    let releaseQueuedControl!: () => void
+    const queuedBeforeReplacement = new Promise<void>((resolve) => { releaseQueuedControl = resolve })
+    ;(adapter as any).agentActionControlOperations.set('session-1', queuedBeforeReplacement)
+    bot.api.sendMessage.mockClear()
+    const staleDelivery = deliverControl({
+      type: 'agent_action_control', action: 'skills', status: 'completed', chunks: ['stale'],
+    })
+    core.adapters.set('telegram', {} as any)
+    releaseQueuedControl()
+    expect(await staleDelivery).toMatchObject({ status: 'dropped', deliveredParts: 0, reason: 'stale-target' })
+    expect(bot.api.sendMessage).not.toHaveBeenCalled()
   })
 
   it('authorizes agent-command callbacks before session resume or command metadata rendering', async () => {

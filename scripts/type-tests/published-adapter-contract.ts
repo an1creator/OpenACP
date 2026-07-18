@@ -1,5 +1,6 @@
 import type { IChannelAdapter as CliChannelAdapter } from '@n1creator/openacp-cli'
 import type { IChannelAdapter as SdkChannelAdapter } from '@n1creator/openacp-plugin-sdk'
+import type { AgentActionControlDeliveryContext } from '@n1creator/openacp-plugin-sdk'
 
 const legacyAdapter = {
   name: 'legacy',
@@ -20,6 +21,19 @@ const legacyAdapter = {
   async renameSessionThread() {},
 } satisfies CliChannelAdapter & SdkChannelAdapter
 
+const targetBoundAdapter = {
+  ...legacyAdapter,
+  bindAgentActionControlTarget(context: AgentActionControlDeliveryContext) {
+    return {
+      target: context.target,
+      isCurrent: () => context.isCurrent(),
+      async sendPart() {
+        if (!context.isCurrent()) return 'stale' as const
+      },
+    }
+  },
+} satisfies CliChannelAdapter & SdkChannelAdapter
+
 const transactionalThreadAdapter = {
   ...legacyAdapter,
   async deleteSessionThreadById(threadId: string) {
@@ -34,3 +48,4 @@ function cleanupPreCreatedThread(adapter: CliChannelAdapter & SdkChannelAdapter)
 }
 
 cleanupPreCreatedThread(transactionalThreadAdapter)
+void targetBoundAdapter

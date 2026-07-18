@@ -25,6 +25,14 @@ interface WarmEntry {
   instance: AgentInstance;
   createdAt: number;
   policyGeneration: number;
+  /** Canonical JSON identity of the exact definition/environment/path boundary used to spawn. */
+  definitionFingerprint: string;
+}
+
+interface ResolvedWarmRuntime {
+  definition: AgentDefinition;
+  environment: Record<string, string>;
+  fingerprint: string;
 }
 
 interface WarmCleanup {
@@ -59,6 +67,44 @@ function pathListsEqual(a: readonly string[], b: readonly string[]): boolean {
     if (sa[i] !== sb[i]) return false;
   }
   return true;
+}
+
+/**
+ * Canonical JSON serialization is compared directly rather than hashed, so
+ * equality has no digest-collision failure mode. Object-key order is cosmetic;
+ * array order (notably runner arguments) remains significant.
+ */
+function canonicalJson(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('Agent definition contains a non-finite number');
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(',')}}`;
+  }
+  throw new Error('Agent definition contains a non-serializable value');
+}
+
+function createDefinitionFingerprint(
+  definition: AgentDefinition,
+  workingDir: string,
+  allowedPaths: readonly string[],
+  environment: Readonly<Record<string, string>>,
+): string {
+  return canonicalJson({
+    definition,
+    workingDir,
+    allowedPaths: [...allowedPaths].sort(),
+    environment,
+  });
 }
 
 /**
@@ -99,6 +145,31 @@ export class AgentManager {
     if (!this.proxyService) return undefined
     const filtered = filterEnv(process.env as Record<string, string>, agentDef.env)
     return this.proxyService.buildAgentEnv(routeName, filtered)
+  }
+
+  /** Resolve, snapshot, and fingerprint the exact subprocess inputs without logging their values. */
+  private resolveWarmRuntime(
+    agentName: string,
+    workingDir: string,
+    allowedPaths: readonly string[],
+  ): ResolvedWarmRuntime | null {
+    try {
+      const resolved = this.catalog.resolve(agentName);
+      if (!resolved) return null;
+      const definition = structuredClone(resolved);
+      const environment = structuredClone(
+        this.childEnv(definition, agentName)
+          ?? filterEnv(process.env as Record<string, string>, definition.env),
+      );
+      return {
+        definition,
+        environment,
+        fingerprint: createDefinitionFingerprint(definition, workingDir, allowedPaths, environment),
+      };
+    } catch {
+      log.warn({ agentName }, 'Agent definition could not be fingerprinted');
+      return null;
+    }
   }
 
   private clearWarmExpiryTimer(): void {
@@ -248,13 +319,11 @@ export class AgentManager {
 
   /** Return definitions for all installed agents. */
   getAvailableAgents(): AgentDefinition[] {
-    const installed = this.catalog.getInstalledEntries();
-    return Object.entries(installed).map(([key, agent]) => ({
-      name: key,
-      command: agent.command,
-      args: agent.args,
-      env: agent.env,
-    }));
+    return Object.keys(this.catalog.getInstalledEntries())
+      .flatMap((key) => {
+        const definition = this.catalog.resolve(key);
+        return definition ? [definition] : [];
+      });
   }
 
   /** Look up a single agent definition by its short name (e.g., "claude", "gemini"). */
@@ -280,12 +349,18 @@ export class AgentManager {
       );
       return;
     }
+    const runtime = this.resolveWarmRuntime(agentName, workingDir, allowedPaths);
+    if (!runtime) {
+      log.debug({ agentName }, "prewarm: agent not installed or definition invalid, skipping");
+      return;
+    }
     if (this.warmEntry) {
       const e = this.warmEntry;
       if (
         e.agentName === agentName &&
         e.workingDir === workingDir &&
-        pathListsEqual(e.allowedPaths, allowedPaths)
+        pathListsEqual(e.allowedPaths, allowedPaths) &&
+        e.definitionFingerprint === runtime.fingerprint
       ) {
         return; // exact match — no-op
       }
@@ -299,19 +374,16 @@ export class AgentManager {
       });
       return;
     }
-    const agentDef = this.catalog.resolve(agentName);
-    if (!agentDef) {
-      log.debug({ agentName }, "prewarm: agent not installed, skipping");
-      return;
-    }
     const policyGeneration = this.currentPolicyGeneration()
     const warmGeneration = this.warmGeneration
     this.warming = (async () => {
       try {
-        const environment = this.childEnv(agentDef, agentName)
-        const instance = environment
-          ? await AgentInstance.spawnSubprocess(agentDef, workingDir, [...allowedPaths], environment)
-          : await AgentInstance.spawnSubprocess(agentDef, workingDir, [...allowedPaths]);
+        const instance = await AgentInstance.spawnSubprocess(
+          runtime.definition,
+          workingDir,
+          [...allowedPaths],
+          runtime.environment,
+        );
         const entry: WarmEntry = {
           agentName,
           workingDir,
@@ -319,16 +391,29 @@ export class AgentManager {
           instance,
           createdAt: Date.now(),
           policyGeneration,
+          definitionFingerprint: runtime.fingerprint,
         };
+        const currentRuntime = this.resolveWarmRuntime(agentName, workingDir, allowedPaths);
+        const lifecycleInvalidated = this.warmPoolClosing
+          || this.warmGeneration !== warmGeneration
+          || this.currentPolicyGeneration() !== policyGeneration;
         // Invalidated candidates cross the same owned cleanup boundary; shutdown
         // can retry a rejected destroy instead of orphaning the process.
         if (
-          this.warmPoolClosing ||
-          this.warmGeneration !== warmGeneration ||
-          this.currentPolicyGeneration() !== policyGeneration
+          lifecycleInvalidated ||
+          currentRuntime?.fingerprint !== entry.definitionFingerprint
         ) {
           this.warmEntry = entry;
-          await this.beginWarmCleanup(entry, 'prewarm-invalidated', !this.warmPoolClosing);
+          const reason = lifecycleInvalidated
+            ? 'prewarm-invalidated'
+            : currentRuntime
+              ? 'definition-changed-during-prewarm'
+              : 'definition-unavailable-after-prewarm';
+          await this.beginWarmCleanup(
+            entry,
+            reason,
+            !this.warmPoolClosing,
+          );
           return;
         }
         this.warmEntry = entry;
@@ -426,6 +511,15 @@ export class AgentManager {
       void this.beginWarmCleanup(entry, 'allowed-paths-mismatch');
       return null;
     }
+    const currentRuntime = this.resolveWarmRuntime(agentName, workingDir, allowedPaths);
+    if (!currentRuntime || currentRuntime.fingerprint !== entry.definitionFingerprint) {
+      this.clearWarmExpiryTimer();
+      void this.beginWarmCleanup(
+        entry,
+        currentRuntime ? 'definition-changed-before-claim' : 'definition-unavailable-before-claim',
+      );
+      return null;
+    }
     if (Date.now() - entry.createdAt > WARM_TTL_MS) {
       log.debug({ agentName, workingDir }, "Warm-pool: TTL expired — discarding warm");
       this.clearWarmExpiryTimer();
@@ -462,20 +556,19 @@ export class AgentManager {
     workingDirectory: string,
     allowedPaths?: string[],
   ): Promise<AgentInstance> {
-    const agentDef = this.getAgent(agentName);
-    if (!agentDef) {
-      throw new Error(
-        `Agent "${agentName}" is not installed. Run "openacp agents install ${agentName}" to add it.`,
-      );
-    }
+    const requestedPaths = allowedPaths ?? [];
 
     // Fast path: claim the warm instance if it matches (agent + workingDir + allowedPaths).
-    const warmEntry = this.takeWarm(agentName, workingDirectory, allowedPaths ?? []);
+    const warmEntry = this.takeWarm(agentName, workingDirectory, requestedPaths);
     if (warmEntry) {
       const warm = warmEntry.instance;
       const claimOperation = (async () => {
         try {
           await warm.claimForSession(workingDirectory);
+          const currentRuntime = this.resolveWarmRuntime(agentName, workingDirectory, requestedPaths);
+          if (!currentRuntime || currentRuntime.fingerprint !== warmEntry.definitionFingerprint) {
+            throw new Error('Agent definition changed while claiming the warm process');
+          }
           if (this.warmEntry === warmEntry) this.warmEntry = null;
           if (this.warmClaiming === warmEntry) this.warmClaiming = null;
         } catch (error) {
@@ -488,7 +581,7 @@ export class AgentManager {
       try {
         await claimOperation;
         // Refill in background for the next caller.
-        this.prewarm(agentName, workingDirectory, allowedPaths ?? []);
+        this.prewarm(agentName, workingDirectory, requestedPaths);
         return warm;
       } catch (err) {
         log.warn({ err, agentName }, "Warm claim failed — falling back to fresh spawn");
@@ -498,10 +591,19 @@ export class AgentManager {
       }
     }
 
-    const environment = this.childEnv(agentDef, agentName)
-    return environment
-      ? AgentInstance.spawn(agentDef, workingDirectory, undefined, allowedPaths, environment)
-      : AgentInstance.spawn(agentDef, workingDirectory, undefined, allowedPaths);
+    const freshRuntime = this.resolveWarmRuntime(agentName, workingDirectory, requestedPaths);
+    if (!freshRuntime) {
+      throw new Error(
+        `Agent "${agentName}" is not installed. Run "openacp agents install ${agentName}" to add it.`,
+      );
+    }
+    return AgentInstance.spawn(
+      freshRuntime.definition,
+      workingDirectory,
+      undefined,
+      allowedPaths,
+      freshRuntime.environment,
+    );
   }
 
   /**

@@ -4,6 +4,9 @@ import type {
 } from '../channel.js'
 import type {
   OutgoingMessage,
+  AgentActionControlDeliveryContext,
+  AgentActionControlDeliveryTarget,
+  AgentActionControlTargetBinding,
   PermissionRequest,
   NotificationMessage,
 } from '../types.js'
@@ -50,6 +53,32 @@ export abstract class StreamAdapter implements IChannelAdapter {
       payload: content,
       timestamp: Date.now(),
     })
+  }
+
+  /** Override only when the stream implementation has captured an exact connection target. */
+  protected emitToAgentActionTarget?(
+    target: Readonly<AgentActionControlDeliveryTarget>,
+    event: StreamEvent,
+  ): Promise<void>;
+
+  bindAgentActionControlTarget(
+    context: AgentActionControlDeliveryContext,
+  ): AgentActionControlTargetBinding | null {
+    const emitToTarget = this.emitToAgentActionTarget;
+    if (!emitToTarget) return null;
+    return {
+      target: context.target,
+      isCurrent: () => context.isCurrent(),
+      sendPart: async (response, part) => {
+        if (!context.isCurrent()) return "stale";
+        await emitToTarget.call(this, context.target, {
+          type: response.type,
+          sessionId: context.target.sessionId,
+          payload: { ...response, chunks: [part] },
+          timestamp: Date.now(),
+        });
+      },
+    };
   }
 
   /** Emits a permission request event so the client can render approve/deny UI. */

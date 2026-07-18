@@ -32,6 +32,7 @@ import { StderrCapture } from "../utils/stderr-capture.js";
 import { TypedEmitter } from "../utils/typed-emitter.js";
 import type {
   AgentDefinition,
+  AgentCommand,
   AgentEvent,
   Attachment,
   ConfigOption,
@@ -55,6 +56,10 @@ import { createDebugTracer, type DebugTracer } from "../utils/debug-tracer.js";
 import { createChildLogger } from "../utils/log.js";
 import { redactNetworkSecrets } from "../security/network-redaction.js";
 import { Hook, SessionEv } from "../events.js";
+import {
+  normalizeAgentActionUpdate,
+  type SkillDiscoveryStrategy,
+} from "./agent-action-policy.js";
 const log = createChildLogger({ module: "agent-instance" });
 
 /** Internal acknowledgement marker for successful legacy config RPC fallbacks. */
@@ -321,6 +326,14 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
 
   sessionId!: string;
   agentName: string;
+  /** Latest safe action snapshot, including updates published during ACP session creation. */
+  latestCommands: AgentCommand[] | null = null;
+  /** Names-only inventory captured from per-skill ACP commands. */
+  latestSkillNames: string[] = [];
+  /** Profile-owned convention for a trustworthy names-only inventory. */
+  skillDiscoveryStrategy: SkillDiscoveryStrategy | null = null;
+  /** Distinguishes an authoritative empty inventory from a snapshot not received yet. */
+  skillInventoryReady = false;
   promptCapabilities?: { image?: boolean; audio?: boolean };
   agentCapabilities?: import("../types.js").AgentCapabilities;
   /** Preserved from newSession/resumeSession response for ACP state propagation */
@@ -346,9 +359,9 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
   onElicitationRequest: (request: CreateElicitationRequest) => Promise<CreateElicitationResponse> =
     async () => ({ action: "cancel" });
 
-  private constructor(agentName: string) {
+  private constructor(private readonly agentDefinition: AgentDefinition) {
     super();
-    this.agentName = agentName;
+    this.agentName = agentDefinition.name;
   }
 
   private static reserveInitializationCleanupCapacity(instance: AgentInstance): void {
@@ -573,7 +586,7 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
     environment?: Record<string, string>,
     retainInitializationCleanupCapacity = false,
   ): Promise<AgentInstance> {
-    const instance = new AgentInstance(agentDef.name);
+    const instance = new AgentInstance(agentDef);
     AgentInstance.reserveInitializationCleanupCapacity(instance);
     try {
     const resolved = resolveAgentCommand(agentDef.command);
@@ -1061,12 +1074,21 @@ export class AgentInstance extends TypedEmitter<AgentInstanceEvents> {
               cost: update.cost ?? undefined,
             };
             break;
-          case "available_commands_update":
+          case "available_commands_update": {
+            const normalized = normalizeAgentActionUpdate(
+              self.agentDefinition,
+              update.availableCommands,
+            );
+            self.latestCommands = normalized.commands;
+            self.latestSkillNames = normalized.skillNames;
+            self.skillDiscoveryStrategy = normalized.skillDiscoveryStrategy;
+            self.skillInventoryReady = normalized.skillDiscoveryStrategy !== null;
             event = {
               type: "commands_update",
-              commands: update.availableCommands,
+              commands: normalized.commands,
             };
             break;
+          }
           case "session_info_update": {
             const si = update as unknown as SdkSessionInfoUpdate;
             event = {

@@ -1,5 +1,5 @@
 import type { IChannelAdapter, AdapterCapabilities } from '../../core/channel.js';
-import type { OutgoingMessage, PermissionRequest, NotificationMessage, ElicitationRequest, ElicitationResolvedEvent, ElicitationOwner } from '../../core/types.js';
+import type { OutgoingMessage, PermissionRequest, NotificationMessage, AgentActionControlDeliveryContext, AgentActionControlTargetBinding, ElicitationRequest, ElicitationResolvedEvent, ElicitationOwner } from '../../core/types.js';
 import type { ConnectionManager, SSEConnection } from './connection-manager.js';
 import type { EventBuffer } from './event-buffer.js';
 import {
@@ -96,6 +96,35 @@ export class SSEAdapter implements IChannelAdapter {
     const serialized = serializeOutgoingMessage(sessionId, eventId, content);
     this.eventBuffer.push(sessionId, { id: eventId, data: serialized });
     this.connectionManager.broadcast(sessionId, serialized);
+  }
+
+  /** Capture the exact current streams; later connections never receive this response or its replay. */
+  bindAgentActionControlTarget(
+    context: AgentActionControlDeliveryContext,
+  ): AgentActionControlTargetBinding | null {
+    if (context.target.adapterId !== this.name) return null;
+    const connections = this.connectionManager
+      .getConnectionsBySession(context.target.sessionId)
+      .filter((connection) => connection.sessionId === context.target.sessionId);
+    if (connections.length === 0) return null;
+    return {
+      target: context.target,
+      isCurrent: () => context.isCurrent()
+        && connections.some((connection) => connection.sessionId === context.target.sessionId
+          && this.connectionManager.isConnectionCurrent(connection)),
+      sendPart: async (response, part) => {
+        if (!context.isCurrent()) return "stale";
+        const liveConnections = connections.filter((connection) =>
+          connection.sessionId === context.target.sessionId
+          && this.connectionManager.isConnectionCurrent(connection));
+        if (liveConnections.length === 0) return "stale";
+        const eventId = generateEventId();
+        const serialized = serializeSSE(response.type, eventId, { ...response, chunks: [part] });
+        return this.connectionManager.sendToConnections(liveConnections, serialized) > 0
+          ? undefined
+          : "stale";
+      },
+    };
   }
 
   /** Relay an already-sanitized core bus event for a headless session. */

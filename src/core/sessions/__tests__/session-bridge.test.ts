@@ -142,6 +142,29 @@ describe("SessionBridge", () => {
       );
     });
 
+    it("replays a safe command snapshot published before Session construction", () => {
+      const commands = [{ name: "skills", description: "List available skills." }];
+      Object.assign(agent, {
+        latestCommands: commands,
+        latestSkillNames: ["atcode"],
+        skillInventoryReady: true,
+        skillDiscoveryStrategy: "dollar-prefixed",
+      });
+      session = createSession(agent);
+      bridge = new SessionBridge(session, adapter, deps);
+
+      bridge.connect();
+
+      expect(session.latestSkillNames).toEqual(["atcode"]);
+      expect(adapter.sendSkillCommands).toHaveBeenCalledWith(session.id, commands);
+    });
+
+    it("clears stale connector commands when a resumed agent has no fresh snapshot", () => {
+      bridge.connect();
+
+      expect(adapter.sendSkillCommands).toHaveBeenCalledWith(session.id, []);
+    });
+
     it("handles session_end: finish session + cleanup + notify", async () => {
       bridge.connect();
       session.activate();

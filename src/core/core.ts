@@ -22,7 +22,10 @@ import type {
   MessagePrincipal,
   MessageIngressBlockCode,
   MessageIngressControl,
+  AgentActionControlDeliveryContext,
+  AgentActionControlDeliveryResult,
 } from "./types.js";
+import { deliverAgentActionControlParts } from "./agent-action-delivery.js";
 import type { TunnelService } from "../plugins/tunnel/tunnel-service.js";
 import { getAgentCapabilities } from "./agents/agent-registry.js";
 import { AgentSwitchHandler } from "./agent-switch-handler.js";
@@ -61,6 +64,15 @@ export type MessageDispatchOutcome =
       code: MessageIngressBlockCode;
       reason: string;
     };
+
+export interface AgentActionControlRequest {
+  sessionId: string;
+  adapterId: string;
+  threadId: string;
+  userId: string;
+  actionName: string;
+  principal?: MessagePrincipal;
+}
 
 function blockedDispatchOutcome(
   turnId: string,
@@ -422,6 +434,139 @@ export class OpenACPCore {
   }
 
   // --- Message Routing ---
+
+  /**
+   * Resolve and deliver a connector-local agent action without entering the
+   * prompt, middleware, turn, history, naming, usage, or event pipelines.
+   *
+   * This path intentionally uses only the live in-memory session. Connector
+   * ownership and the exact attached thread are checked again in core so a
+   * stale button cannot lazy-resume or target a different conversation.
+   */
+  async handleAgentActionControl(
+    request: AgentActionControlRequest,
+  ): Promise<AgentActionControlDeliveryResult | null> {
+    const target = {
+      sessionId: String(request.sessionId),
+      adapterId: String(request.adapterId),
+      threadId: String(request.threadId),
+      userId: String(request.userId),
+      actionName: String(request.actionName),
+      principal: request.principal
+        ? structuredClone(request.principal)
+        : {
+            type: "connector" as const,
+            channelId: String(request.adapterId),
+            userId: String(request.userId),
+          },
+    };
+    if (
+      target.principal.type === "connector"
+      && (target.principal.channelId !== target.adapterId || target.principal.userId !== target.userId)
+    ) return null;
+    if (
+      target.principal.type === "api"
+      && target.principal.credential === "jwt"
+      && target.principal.tokenId !== target.userId
+    ) return null;
+
+    const session = this.sessionManager.getSession(target.sessionId);
+    if (!session || session.isTerminating) return null;
+    this.sessionManager.assertCurrentLiveSession(session);
+
+    const attachmentLease = session.captureAttachmentLease(target.adapterId, target.threadId);
+    if (!attachmentLease) return null;
+    const agentInstance = session.agentInstance;
+    const agentGeneration = session.agentGeneration;
+    const actionEpoch = session.agentActionEpoch;
+    if (!session.isAgentActionEpochCurrent(actionEpoch)) return null;
+    const adapter = this.adapters.get(target.adapterId);
+    if (!adapter) return null;
+    const securityUserId = target.principal.type === "connector"
+      ? target.principal.userId
+      : target.principal.credential === "jwt"
+        ? target.principal.linkedUserId ?? target.principal.tokenId
+        : "api-master";
+    const access = target.principal.type === "api" && target.principal.credential === "secret"
+      ? await this.securityGuard.checkAccess({ userId: securityUserId }, { skipUserAllowlist: true })
+      : await this.securityGuard.checkAccess({ userId: securityUserId });
+    if (!access.allowed) return null;
+    if (
+      this.sessionManager.getSession(target.sessionId) !== session
+      || session.isTerminating
+      || session.agentInstance !== agentInstance
+      || session.agentGeneration !== agentGeneration
+      || !session.isAgentActionEpochCurrent(actionEpoch)
+      || !session.isAttachmentLeaseCurrent(attachmentLease)
+      || this.adapters.get(target.adapterId) !== adapter
+    ) return null;
+    this.sessionManager.assertCurrentLiveSession(session);
+
+    const response = session.resolveAgentActionControl(target.actionName, actionEpoch);
+    if (!response) return null;
+    const deliveryTarget = Object.freeze({
+      sessionId: session.id,
+      adapterId: target.adapterId,
+      threadId: target.threadId,
+      attachmentGeneration: attachmentLease.generation,
+      agentGeneration,
+      actionEpoch,
+    });
+    const deliveryContext: AgentActionControlDeliveryContext = Object.freeze({
+      target: deliveryTarget,
+      isCurrent: () => this.sessionManager.getSession(target.sessionId) === session
+        && !session.isTerminating
+        && session.agentInstance === agentInstance
+        && session.agentGeneration === agentGeneration
+        && session.isAgentActionEpochCurrent(actionEpoch)
+        && session.isAttachmentLeaseCurrent(attachmentLease)
+        && this.adapters.get(target.adapterId) === adapter,
+    });
+    let binding;
+    try {
+      binding = adapter.bindAgentActionControlTarget?.(deliveryContext) ?? null;
+    } catch {
+      return {
+        type: "agent_action_control_delivery",
+        action: response.action,
+        status: "failed",
+        deliveredParts: 0,
+        totalParts: response.chunks.length,
+        reason: "connector-error",
+      };
+    }
+    if (!binding || binding.target !== deliveryTarget) {
+      return {
+        type: "agent_action_control_delivery",
+        action: response.action,
+        status: "dropped",
+        deliveredParts: 0,
+        totalParts: response.chunks.length,
+        reason: "target-binding-unavailable",
+      };
+    }
+    const boundContext: AgentActionControlDeliveryContext = Object.freeze({
+      target: deliveryTarget,
+      isCurrent: () => {
+        if (!deliveryContext.isCurrent()) return false;
+        try {
+          return binding.isCurrent();
+        } catch {
+          return false;
+        }
+      },
+    });
+    try {
+      return await deliverAgentActionControlParts(
+        response,
+        response.chunks,
+        boundContext,
+        (part, index) => binding.sendPart(response, part, index),
+      );
+    } finally {
+      try { binding.release?.(); } catch { /* release is best-effort and cannot authorize delivery */ }
+    }
+  }
 
   /**
    * Route an incoming platform message to the appropriate session.
@@ -1278,8 +1423,7 @@ export class OpenACPCore {
       session.name ?? `Session ${session.id.slice(0, 6)}`,
     );
     this.sessionManager.assertCurrentLiveSession(session);
-    session.threadIds.set(adapterId, threadId);
-    session.attachedAdapters.push(adapterId);
+    session.attachAdapterBinding(adapterId, threadId);
 
     // Create and connect bridge
     const bridge = this.createBridge(session, adapter, adapterId);
@@ -1332,8 +1476,7 @@ export class OpenACPCore {
     }
 
     // Update session state
-    session.attachedAdapters = session.attachedAdapters.filter(a => a !== adapterId);
-    session.threadIds.delete(adapterId);
+    session.detachAdapterBinding(adapterId);
 
     // Persist
     await this.sessionManager.patchRecord(session.id, {

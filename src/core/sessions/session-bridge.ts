@@ -457,10 +457,14 @@ export class SessionBridge {
       });
     });
 
-    // Replay any commands_update that arrived before the bridge connected
-    if (this.session.latestCommands !== null) {
-      this.session.emit(SessionEv.AGENT_EVENT, { type: "commands_update", commands: this.session.latestCommands });
-    }
+    // Replay a pre-connection snapshot. If no authoritative snapshot arrived,
+    // explicitly clear connector state so restart/resume cannot resurrect a
+    // persisted command dump from an older agent process.
+    const currentCommands = this.session.latestCommands ?? [];
+    log.debug({ commands: currentCommands }, "Commands available");
+    Promise.resolve(this.adapter.sendSkillCommands?.(this.session.id, currentCommands)).catch((err) => {
+      log.warn({ err, sessionId: this.session.id }, "Failed to replay agent command snapshot");
+    });
 
     // Replay configOptions so the adapter reflects the current agent's options
     if (
@@ -619,7 +623,9 @@ export class SessionBridge {
 
         case "commands_update":
           log.debug({ commands: event.commands }, "Commands available");
-          this.adapter.sendSkillCommands?.(this.session.id, event.commands);
+          Promise.resolve(this.adapter.sendSkillCommands?.(this.session.id, event.commands)).catch((err) => {
+            log.warn({ err, sessionId: this.session.id }, "Failed to update agent command snapshot");
+          });
           break;
 
         case "system_message":

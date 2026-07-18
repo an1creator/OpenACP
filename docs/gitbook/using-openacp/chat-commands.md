@@ -2,7 +2,9 @@
 
 OpenACP responds to commands sent in supported chat platforms. This page covers the built-in Telegram and Discord command surfaces; external adapters can expose a smaller set.
 
-Agents may also advertise their own ACP commands at runtime. Telegram displays these as pinned agent-action buttons and routes a tap directly to the current agent with exactly one leading `/`. These actions use a separate namespace from built-in commands, so typing `/status` still invokes OpenACP even when the current agent advertises a command named `status`.
+Agents may also advertise ACP commands at runtime. OpenACP exposes only the advertised commands that belong to its standard session-action set: `compact`, `goal`, `logout`, `mcp`, `plan`, `review`, `review-branch`, `review-commit`, `skills`, and `status`. Telegram displays the resulting actions as pinned buttons. Agent actions preserve the advertised invocation, including case and an existing leading `/`; OpenACP adds `/` only when it is absent. These actions use a separate namespace from built-in commands, so typing `/status` or `/STATUS` still invokes OpenACP even when the current agent advertises a command named `status`. Arguments retain their original text.
+
+Codex skill entries such as `$atcode` are intentionally omitted from the button list. After an attested official Codex adapter installation publishes its current action snapshot, use `/skills` to display a compact, names-only inventory, then invoke a listed skill with `$name`. This local response does not start an agent turn, enter conversation history, or interrupt an active streamed response and its tool progress. An empty inventory returns `No skills available.`. Custom wrappers and mismatched or legacy package records are treated as generic ACP agents rather than trusted Codex installations. Before a trusted snapshot is available, `/skills` remains an ordinary agent prompt. For other ACP agents, an advertised `/skills` action is handled by the agent normally.
 
 ## Platform comparison
 

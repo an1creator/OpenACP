@@ -259,6 +259,9 @@ describe('Agent Switch — Session-level integration', () => {
       commands: [{ name: '/test', description: 'test cmd' }],
     });
 
+    expect(session.latestCommands).toEqual([]);
+    newAgent.latestCommands = [{ name: '/test', description: 'test cmd' }];
+    session.restoreCurrentAgentActions();
     expect(session.latestCommands).toEqual([{ name: '/test', description: 'test cmd' }]);
   });
 });

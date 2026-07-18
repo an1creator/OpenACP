@@ -104,10 +104,20 @@ const publishPkg = {
       types: './dist/index.d.ts',
       import: './dist/index.js',
     },
+    './testing': {
+      types: './dist/testing.d.ts',
+      import: './dist/testing.js',
+    },
   },
   files: ['dist/', 'README.md'],
   engines: { node: '>=22' },
   dependencies: publishDeps,
+  peerDependencies: {
+    vitest: '>=3 <5',
+  },
+  peerDependenciesMeta: {
+    vitest: { optional: true },
+  },
   repository: {
     type: 'git',
     url: 'git+https://github.com/an1creator/OpenACP.git',

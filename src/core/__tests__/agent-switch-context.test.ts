@@ -56,7 +56,10 @@ function makeDeps(sessionOverride?: Session) {
     agentManager,
     configManager: { get: vi.fn().mockReturnValue({ agentSwitch: { labelHistory: true } }) },
     eventBus: { emit: vi.fn() },
-    adapters: new Map(),
+    adapters: new Map([['telegram', {
+      cleanupAgentActionState: vi.fn().mockResolvedValue(undefined),
+      cleanupSessionState: vi.fn().mockResolvedValue(undefined),
+    }]]),
     createBridge: vi.fn().mockReturnValue({ connect: vi.fn(), disconnect: vi.fn() }),
     disconnectSessionBridges: vi.fn().mockReturnValue(0),
     getMiddlewareChain: vi.fn().mockReturnValue(undefined),

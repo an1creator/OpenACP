@@ -133,6 +133,22 @@ async sendMessage(sessionId: string, content: OutgoingMessage): Promise<void> {
 
 `OutgoingMessage.type` can be: `text`, `thought`, `tool_call`, `tool_update`, `plan`, `usage`, `session_end`, `error`, `attachment`, `system_message`. You decide which types to surface in your UI.
 
+### Local agent-control responses
+
+Short connector-neutral responses such as the local skills inventory require an immutable transport binding. `sendMessage(sessionId, ...)` is not a safe fallback because an asynchronous adapter may resolve that session to a different thread before it writes. An adapter that cannot bind an exact target drops the response before sending data.
+
+When extending `ChannelAdapter` or `MessagingAdapter`, implement the target-bound primitive:
+
+```typescript
+protected async sendAgentActionMessageToTarget(target, content) {
+  await this.client.sendText(target.threadId, content.text)
+}
+```
+
+The base class exposes this through `bindAgentActionControlTarget()`. Direct `IChannelAdapter` implementations can implement that binder themselves and return an `AgentActionControlTargetBinding`. Its `target` must be the exact object supplied by core, and `sendPart()` must return `"stale"` without writing if authorization changes while it waits for transport capacity.
+
+The target contains the exact session, adapter, thread, attachment generation, agent generation, and action epoch captured by core. Core revalidates it before and after every part and returns `completed`, `partial`, `dropped`, or `failed` with delivered-part counts. The transport must use the captured thread or connection identity directly; never resolve it again from `sessionId`. SSE-style adapters must capture the current connection objects and must not buffer this response for future connections. A detach, remap, adapter replacement, agent switch, or termination stops remaining parts.
+
 ---
 
 ## Step 5 — Implement sendPermissionRequest()

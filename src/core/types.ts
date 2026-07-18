@@ -201,11 +201,69 @@ export interface NotificationMessage {
 
 /** A command exposed by the agent, surfaced as interactive buttons in the chat UI. */
 export interface AgentCommand {
+  /** Canonical OpenACP action key used for ordering and UI lookup. */
   name: string;
   description: string;
   input?: unknown;
+  /** Trusted policy metadata created by OpenACP at the ACP boundary. */
+  action?: {
+    key: string;
+    /** Exact advertised ACP invocation, preserving slash and case. */
+    invocation: string;
+    handling: "agent" | "local-skills";
+    acceptsInput: boolean;
+  };
   /** Opaque ACP extension metadata; adapters must preserve it without interpretation. */
   _meta?: Record<string, unknown> | null;
+}
+
+/** Completed connector-neutral response for a local agent control action. */
+export interface AgentActionControlResponse {
+  type: "agent_action_control";
+  action: string;
+  status: "completed";
+  chunks: string[];
+}
+
+/** Immutable routing identity for one local agent-action delivery attempt. */
+export interface AgentActionControlDeliveryTarget {
+  readonly sessionId: string;
+  readonly adapterId: string;
+  readonly threadId: string;
+  readonly attachmentGeneration: number;
+  readonly agentGeneration: number;
+  readonly actionEpoch: number;
+}
+
+/** Revalidation boundary adapters must check immediately before every network part. */
+export interface AgentActionControlDeliveryContext {
+  readonly target: Readonly<AgentActionControlDeliveryTarget>;
+  isCurrent(): boolean;
+}
+
+/** Target-bound transport reserved for one immutable local-control delivery. */
+export interface AgentActionControlTargetBinding {
+  /** Must be the exact target object supplied to bindAgentActionControlTarget(). */
+  readonly target: Readonly<AgentActionControlDeliveryTarget>;
+  /** Adapter-owned identity (for example an SSE connection snapshot) is still usable. */
+  isCurrent(): boolean;
+  /** Return stale without writing when authorization changed while awaiting transport capacity. */
+  sendPart(
+    response: AgentActionControlResponse,
+    part: string,
+    index: number,
+  ): Promise<void | "stale">;
+  /** Release an optional per-target transport reservation. Must not throw. */
+  release?(): void;
+}
+
+export interface AgentActionControlDeliveryResult {
+  type: "agent_action_control_delivery";
+  action: string;
+  status: "completed" | "partial" | "dropped" | "failed";
+  deliveredParts: number;
+  totalParts: number;
+  reason?: "stale-target" | "connector-error" | "target-binding-unavailable";
 }
 
 /**
@@ -296,6 +354,18 @@ export interface AgentDefinition {
   name: string;
   command: string;
   args: string[];
+  /** Trusted identity copied from the installed-agent store, never inferred from process arguments. */
+  registryId?: string | null;
+  /** Trusted installed distribution copied from the installed-agent store. */
+  distribution?: AgentDistribution;
+  /** Package declared by the matching registry entry, when available. */
+  registryPackage?: string;
+  /** Installed version used to validate the persisted runner package spec. */
+  installedVersion?: string;
+  /** True only when catalog runtime command/args match the validated registry distribution. */
+  registryRuntimeAttested?: boolean;
+  /** Reviewed registry environment used to attest the exact subprocess definition. */
+  registryEnvironment?: Record<string, string>;
   workingDirectory?: string;
   env?: Record<string, string>;
   /** Override the default init timeout (ms) for this agent's ACP handshake. */

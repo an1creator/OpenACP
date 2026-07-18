@@ -200,6 +200,146 @@ function assertPackagedSpeechRuntime(files: PackRecord[]): void {
   }
 }
 
+function assertPackagedTestingContract(source: typeof publishDirs[number], files: PackRecord[]): void {
+  for (const required of ['dist/testing.js', 'dist/testing.d.ts']) {
+    if (!files.some((file) => file.path === required)) {
+      throw new Error(`${source} npm pack omits its public testing entry: ${required}`)
+    }
+  }
+
+  if (source !== 'dist-publish-sdk') return
+  const duplicateFiles = files.filter((file) =>
+    /(?:^|\/)adapter-conformance\.(?:js|d\.ts|js\.map)$/.test(file.path),
+  )
+  if (duplicateFiles.length > 0) {
+    throw new Error(`Plugin SDK npm pack contains a duplicate conformance implementation: ${duplicateFiles.map((file) => file.path).join(', ')}`)
+  }
+  for (const relative of filesBelow(path.join(root, source))) {
+    if (!/\.(?:js|d\.ts|js\.map)$/.test(relative)) continue
+    const content = fs.readFileSync(path.join(root, source, relative), 'utf8')
+    if (content.includes('IChannelAdapter conformance')) {
+      throw new Error(`Plugin SDK npm pack contains duplicate conformance suite code in ${relative}`)
+    }
+  }
+}
+
+function installedVersion(packageName: string): string {
+  const manifest = JSON.parse(fs.readFileSync(
+    path.join(root, 'node_modules', ...packageName.split('/'), 'package.json'),
+    'utf8',
+  )) as { version?: unknown }
+  if (typeof manifest.version !== 'string' || manifest.version.length === 0) {
+    throw new Error(`Cannot resolve installed ${packageName} version for packed consumer verification`)
+  }
+  return manifest.version
+}
+
+function assertPackedTestingConsumer(cliTarball: string, sdkTarball: string): void {
+  const consumer = fs.mkdtempSync(path.join(os.tmpdir(), 'openacp-testing-consumer-'))
+  const npmrc = path.join(consumer, '.npmrc')
+  const inheritedEnv = Object.fromEntries(Object.entries(process.env).filter(
+    ([key]) => !key.toLowerCase().startsWith('npm_config_'),
+  ))
+  const env = {
+    ...inheritedEnv,
+    HOME: consumer,
+    npm_config_userconfig: npmrc,
+    npm_config_cache: path.join(consumer, '.npm-cache'),
+    npm_config_update_notifier: 'false',
+    npm_config_loglevel: 'error',
+  }
+
+  try {
+    fs.writeFileSync(npmrc, '')
+    fs.writeFileSync(path.join(consumer, 'package.json'), `${JSON.stringify({
+      name: 'openacp-packed-testing-consumer',
+      private: true,
+      type: 'module',
+    }, null, 2)}\n`)
+
+    execFileSync('npm', [
+      'install', '--ignore-scripts', '--no-audit', '--no-fund', '--package-lock=false',
+      cliTarball,
+      sdkTarball,
+      `vitest@${installedVersion('vitest')}`,
+      `typescript@${installedVersion('typescript')}`,
+      `@types/node@${installedVersion('@types/node')}`,
+    ], { cwd: consumer, env, encoding: 'utf8' })
+
+    fs.writeFileSync(path.join(consumer, 'runtime.mjs'), `
+import * as cliRoot from '@n1creator/openacp-cli'
+import * as cliTesting from '@n1creator/openacp-cli/testing'
+import * as sdkTesting from '@n1creator/openacp-plugin-sdk/testing'
+
+const exactKeys = (value, expected, label) => {
+  const actual = Object.keys(value).sort()
+  const wanted = [...expected].sort()
+  if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+    throw new Error(label + ' exports ' + JSON.stringify(actual) + '; expected ' + JSON.stringify(wanted))
+  }
+}
+
+exactKeys(cliTesting, ['runAdapterConformanceTests'], 'CLI testing')
+exactKeys(sdkTesting, [
+  'createTestContext', 'createTestInstallContext', 'mockServices', 'runAdapterConformanceTests',
+], 'Plugin SDK testing')
+if (sdkTesting.runAdapterConformanceTests !== cliTesting.runAdapterConformanceTests) {
+  throw new Error('Plugin SDK testing does not re-export the packed CLI conformance helper')
+}
+for (const testingOnly of [
+  'runAdapterConformanceTests', 'createTestContext', 'createTestInstallContext', 'mockServices',
+]) {
+  if (testingOnly in cliRoot) throw new Error('CLI root unexpectedly exports testing-only symbol ' + testingOnly)
+}
+`)
+
+    fs.writeFileSync(path.join(consumer, 'contract.ts'), `
+import type { IChannelAdapter } from '@n1creator/openacp-cli'
+import { runAdapterConformanceTests as cliConformance } from '@n1creator/openacp-cli/testing'
+import {
+  createTestContext,
+  createTestInstallContext,
+  mockServices,
+  runAdapterConformanceTests as sdkConformance,
+} from '@n1creator/openacp-plugin-sdk/testing'
+
+declare const adapter: IChannelAdapter
+const factory = (): IChannelAdapter => adapter
+cliConformance(factory)
+sdkConformance(factory)
+const sameSignature: typeof cliConformance = sdkConformance
+const pluginContext = createTestContext({ pluginName: 'packed-consumer' })
+const installContext = createTestInstallContext({ pluginName: 'packed-consumer' })
+const security = mockServices.security()
+void [sameSignature, pluginContext, installContext, security]
+`)
+    fs.writeFileSync(path.join(consumer, 'tsconfig.json'), `${JSON.stringify({
+      compilerOptions: {
+        target: 'ES2022',
+        module: 'NodeNext',
+        moduleResolution: 'NodeNext',
+        strict: true,
+        noEmit: true,
+        // Validate consumer imports and inferred helper signatures without
+        // making this contract gate responsible for unrelated dependency d.ts files.
+        skipLibCheck: true,
+        types: ['node'],
+      },
+      include: ['contract.ts'],
+    }, null, 2)}\n`)
+
+    execFileSync(process.execPath, [path.join(consumer, 'runtime.mjs')], {
+      cwd: consumer, env, encoding: 'utf8',
+    })
+    execFileSync(process.execPath, [
+      path.join(consumer, 'node_modules', 'typescript', 'bin', 'tsc'),
+      '--project', path.join(consumer, 'tsconfig.json'),
+    ], { cwd: consumer, env, encoding: 'utf8' })
+  } finally {
+    fs.rmSync(consumer, { recursive: true, force: true })
+  }
+}
+
 function assertPackagedRegistrySnapshot(): void {
   const sourcePath = path.join(root, 'src', 'data', 'registry-snapshot.json')
   const packagedPath = path.join(root, 'dist-publish', 'dist', 'data', 'registry-snapshot.json')
@@ -211,7 +351,7 @@ function assertPackagedRegistrySnapshot(): void {
   const sourceHash = createHash('sha256').update(source).digest('hex')
   // Pin the manually reviewed time-of-commit snapshot. Build and verification
   // deliberately do not query the live registry, which may drift after CI.
-  if (sourceHash !== '11850b8fef1032661534c3f611e9793f7af5e0f2b4cf856a72eca0394f48702b') {
+  if (sourceHash !== 'a326e997f4d154bb0003d4a4aaac22e3282c5a4370d59f20b5c13b440ef9f147') {
     throw new Error('ACP registry snapshot differs from the reviewed time-of-commit official release snapshot')
   }
 
@@ -231,7 +371,7 @@ function assertPackagedRegistrySnapshot(): void {
   const expected = new Map([
     ['auggie', ['0.33.0', '@augmentcode/auggie@0.33.0']],
     ['codex-acp', ['1.1.4', '@agentclientprotocol/codex-acp@1.1.4']],
-    ['grok-build', ['0.2.104', '@xai-official/grok@0.2.104']],
+    ['grok-build', ['0.2.105', '@xai-official/grok@0.2.105']],
     ['factory-droid', ['0.175.0', 'droid@0.175.0']],
   ])
   for (const [id, [version, packageName]] of expected) {
@@ -243,13 +383,13 @@ function assertPackagedRegistrySnapshot(): void {
 
   const harn = registry.agents.find((candidate) => candidate.id === 'harn')
   const expectedHarnTargets = new Map([
-    ['darwin-aarch64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-aarch64-apple-darwin.tar.gz', './harn', 'fccf097942c678aba14325f7fbfe06ccd08b41de7229ed987f4837b14d640cbb']],
-    ['darwin-x86_64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-x86_64-apple-darwin.tar.gz', './harn', 'c871cb53064f0f5962068572dae37a679ad6765f6f74042a52473da24f585f32']],
-    ['linux-aarch64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-aarch64-unknown-linux-gnu.tar.gz', './harn', 'a7bc1cdf1447105105d975aa1d0442bbed9e48b4df8a394dc23fda835abef149']],
-    ['linux-x86_64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-x86_64-unknown-linux-gnu.tar.gz', './harn', 'a3c5d9ab75b154a846e6962a84b0acd8cd056890d8d5b40d2cd5f7f50d11bc87']],
-    ['windows-x86_64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-x86_64-pc-windows-msvc.zip', 'harn.exe', '05eea0438b8c619258cef7fd3ccf644bfe09d8b5cbf323c45f3addaaf8e6bcb8']],
+    ['darwin-aarch64', ['https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-aarch64-apple-darwin.tar.gz', './harn', '03c380383a0c6193b63bceff23ab4e8008bd8a2830f9a34e9aa88f47ed46f5e9']],
+    ['darwin-x86_64', ['https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-x86_64-apple-darwin.tar.gz', './harn', '8e72b6477ba38bd58774f8397fa2bf2a252e7e1814a67de5a95566e8aa123db3']],
+    ['linux-aarch64', ['https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-aarch64-unknown-linux-gnu.tar.gz', './harn', '687b52eeeb462e9577fcc182ff1ece5da47bc64e8853e662b2b09fd676ca0bd9']],
+    ['linux-x86_64', ['https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-x86_64-unknown-linux-gnu.tar.gz', './harn', 'a9180f9a6eb7ddbf2a9198f44c44324503be47638e6c23cf77976ea1574ec37c']],
+    ['windows-x86_64', ['https://github.com/burin-labs/harn/releases/download/v0.10.24/harn-x86_64-pc-windows-msvc.zip', 'harn.exe', 'b9f8ffa096417de8d4d87da527cbf838a829521c92556ccf598bd045e3369639']],
   ])
-  if (harn?.version !== '0.10.23') {
+  if (harn?.version !== '0.10.24') {
     throw new Error('ACP registry snapshot has unexpected harn release metadata')
   }
   for (const [platform, [archive, cmd, sha256]] of expectedHarnTargets) {
@@ -652,6 +792,7 @@ try {
     const manifest = packManifest(`./${name}`)
     assertPackAllowlist(name, manifest)
     if (name === 'dist-publish') assertPackagedSpeechRuntime(manifest)
+    assertPackagedTestingContract(name, manifest)
     return [name, manifest]
   }))
   const firstTarballs = Object.fromEntries(publishDirs.map((name) => [
@@ -671,6 +812,7 @@ try {
     const manifest = packManifest(`./${name}`)
     assertPackAllowlist(name, manifest)
     if (name === 'dist-publish') assertPackagedSpeechRuntime(manifest)
+    assertPackagedTestingContract(name, manifest)
     return [name, manifest]
   }))
   const releaseTarballs = {} as Record<typeof publishDirs[number], PackedArtifact>
@@ -702,6 +844,11 @@ try {
       throw new Error(`${name} repeated builds produced different npm tarball bytes`)
     }
   }
+
+  assertPackedTestingConsumer(
+    releaseTarballs['dist-publish'].tarball,
+    releaseTarballs['dist-publish-sdk'].tarball,
+  )
 
   const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version as string
   const npmVersion = execFileSync('npm', ['--version'], { cwd: root, encoding: 'utf8' }).trim()

@@ -47,6 +47,25 @@ done
 Node.js 20 is intentionally absent: Claude Agent ACP 0.59.0 requires Node.js
 22, so Node.js 20 is outside the supported product and release matrix.
 
+### ACP registry snapshot gate
+
+Before finalizing a release commit, fetch the official ACP registry manually,
+validate its structure, and compare agent IDs, names, versions, distributions,
+packages, commands, arguments, environment, binary URLs, and checksums with
+`src/data/registry-snapshot.json`. The committed file is a reviewed
+time-of-commit release input. `verify:publish-artifacts` guarantees that the
+source and packaged copies are byte-identical and match the reviewed hash,
+count, and critical entries; it intentionally makes no network request and
+does not guarantee perpetual equality with the live CDN.
+
+An observed pre-tag change to Codex ACP, Claude Agent ACP, or security-critical
+package, command, binary URL, or checksum metadata blocks the tag until the
+snapshot and its release assertions are reviewed, updated, and pass CI. Other
+reviewed agent version or distribution changes are updated in the same release
+commit. Once that commit and CI have passed, later unrelated CDN drift is
+report-only and does not block that tag; review it for the next release. Never
+add a live-registry fetch to the build or artifact verifier.
+
 The root and SDK versions must match the release tag. Version format is
 `YYYY.MMDD.patch`, with the patch counter restarting at `1` on each new calendar
 day. `CHANGELOG.md` must contain a heading beginning with the exact version (for

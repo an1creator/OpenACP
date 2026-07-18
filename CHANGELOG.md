@@ -17,8 +17,9 @@
   same `synthesize()`, `transcribe()`, and provider-registration contract and
   no longer advertise an STT unregister method that the runtime does not have.
 - Refresh the bundled offline ACP catalog from the official public registry,
-  including `@agentclientprotocol/codex-acp` 1.1.4 and Claude Agent ACP 0.59.0.
-  Update compatible Fastify Swagger, grammY, and tsx patch/minor dependencies.
+  including `@agentclientprotocol/codex-acp` 1.1.4, Claude Agent ACP 0.59.0,
+  and Harn 0.10.23 with current binary checksums. Update compatible Fastify
+  Swagger, grammY, and tsx patch/minor dependencies.
 - Raise the supported runtime from Node.js 20 to Node.js 22 because Claude
   Agent ACP 0.59.0 requires Node.js 22. Installers default to Node.js 24, and
   release gates cover Node.js 22 and 24; Node.js 20 is no longer supported.

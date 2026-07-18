@@ -209,12 +209,21 @@ function assertPackagedRegistrySnapshot(): void {
     throw new Error('Packaged ACP registry snapshot differs byte-for-byte from source')
   }
   const sourceHash = createHash('sha256').update(source).digest('hex')
-  if (sourceHash !== '493e1fba107d69a3bedc2201e30c5c4fd6d9fcfdf378b18c7172982d2bd68af1') {
-    throw new Error('ACP registry snapshot differs from the reviewed official release snapshot')
+  // Pin the manually reviewed time-of-commit snapshot. Build and verification
+  // deliberately do not query the live registry, which may drift after CI.
+  if (sourceHash !== '11850b8fef1032661534c3f611e9793f7af5e0f2b4cf856a72eca0394f48702b') {
+    throw new Error('ACP registry snapshot differs from the reviewed time-of-commit official release snapshot')
   }
 
   const registry = JSON.parse(source.toString('utf8')) as {
-    agents?: Array<{ id?: string; version?: string; distribution?: { npx?: { package?: string } } }>
+    agents?: Array<{
+      id?: string
+      version?: string
+      distribution?: {
+        npx?: { package?: string }
+        binary?: Record<string, { archive?: string; cmd?: string; args?: string[]; sha256?: string }>
+      }
+    }>
   }
   if (!Array.isArray(registry.agents) || registry.agents.length !== 38) {
     throw new Error('ACP registry snapshot must contain the reviewed 38-agent release set')
@@ -229,6 +238,25 @@ function assertPackagedRegistrySnapshot(): void {
     const agent = registry.agents.find((candidate) => candidate.id === id)
     if (agent?.version !== version || agent.distribution?.npx?.package !== packageName) {
       throw new Error(`ACP registry snapshot has unexpected ${id} release metadata`)
+    }
+  }
+
+  const harn = registry.agents.find((candidate) => candidate.id === 'harn')
+  const expectedHarnTargets = new Map([
+    ['darwin-aarch64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-aarch64-apple-darwin.tar.gz', './harn', 'fccf097942c678aba14325f7fbfe06ccd08b41de7229ed987f4837b14d640cbb']],
+    ['darwin-x86_64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-x86_64-apple-darwin.tar.gz', './harn', 'c871cb53064f0f5962068572dae37a679ad6765f6f74042a52473da24f585f32']],
+    ['linux-aarch64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-aarch64-unknown-linux-gnu.tar.gz', './harn', 'a7bc1cdf1447105105d975aa1d0442bbed9e48b4df8a394dc23fda835abef149']],
+    ['linux-x86_64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-x86_64-unknown-linux-gnu.tar.gz', './harn', 'a3c5d9ab75b154a846e6962a84b0acd8cd056890d8d5b40d2cd5f7f50d11bc87']],
+    ['windows-x86_64', ['https://github.com/burin-labs/harn/releases/download/v0.10.23/harn-x86_64-pc-windows-msvc.zip', 'harn.exe', '05eea0438b8c619258cef7fd3ccf644bfe09d8b5cbf323c45f3addaaf8e6bcb8']],
+  ])
+  if (harn?.version !== '0.10.23') {
+    throw new Error('ACP registry snapshot has unexpected harn release metadata')
+  }
+  for (const [platform, [archive, cmd, sha256]] of expectedHarnTargets) {
+    const target = harn.distribution?.binary?.[platform]
+    if (target?.archive !== archive || target.cmd !== cmd || target.sha256 !== sha256
+      || JSON.stringify(target.args) !== '["serve","acp"]') {
+      throw new Error(`ACP registry snapshot has unexpected harn ${platform} release metadata`)
     }
   }
 }

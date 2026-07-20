@@ -71,13 +71,20 @@ token, proxy setting, chat/topic ID, or local file path. An explicit session is
 never replaced by a fallback session: a missing, mismatched, archiving,
 terminated, or rebound explicit target fails. Without an explicit session,
 OpenACP requires exactly one deliverable current match for the supplied agent
-session ID; zero or multiple matches return `target_unavailable`. It does not
-choose the newest or most active session. Routing and the adapter/topic lease
-are checked again after file staging and immediately before provider I/O.
+session ID. A caller can set `allowDefaultAssistantFallback` to the boolean
+`true` to use the canonical Telegram Assistant only when that lookup has zero
+matches. The agent session ID remains required, and multiple matches still
+return `target_unavailable`. The resolved `routeKind` reports
+`explicit_session`, `agent_session`, or `default_assistant`; OpenACP never
+chooses the newest or most active session. Routing, canonical Assistant
+ownership, and the adapter/topic lease are checked again after file staging and
+immediately before provider I/O.
 The proof also binds the current agent generation, so replacing the agent
 invalidates an earlier target even when the new process reuses the same
-agent-session ID. A daemon restart invalidates an uncommitted target; resolve a
-new target before a new delivery.
+agent-session ID. It also binds the runtime Session and adapter object
+identities, so an equivalent replacement cannot reuse an outstanding target. A
+daemon restart invalidates an uncommitted target; resolve a new target before a
+new delivery.
 
 The adapter must support both file upload and acknowledged delivery and must be
 operational. If it is unavailable during resolve, or becomes unavailable before

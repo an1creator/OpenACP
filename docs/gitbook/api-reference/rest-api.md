@@ -882,6 +882,8 @@ reverse proxy. A boundary failure returns HTTP 403 with `code` set to
 Captures a short-lived, exact routing target. The JSON body is strict and must
 contain at least one of `explicitSessionId` or `agentSessionId`:
 
+**Explicit session request**
+
 ```json
 {
   "explicitSessionId": "session_abc123",
@@ -897,38 +899,61 @@ agent-session identity. `expectedWorkingDirectory`, when present, must resolve
 to the session working directory. A stale or mismatched explicit session is an
 error and never falls back.
 
+**Opt-in zero-match fallback request**
+
+```json
+{
+  "agentSessionId": "caller-agent-session-with-no-live-match",
+  "expectedWorkingDirectory": "/srv/workspace",
+  "allowDefaultAssistantFallback": true
+}
+```
+
 Without `explicitSessionId`, OpenACP calls the exact live lookup by
 `agentSessionId` and requires exactly one deliverable current match. Zero or
-multiple matches produce the normal nonfatal response below. The lookup includes
-assistant sessions, but OpenACP does not select the newest, busiest, or most
-recently used match.
+multiple matches normally produce the nonfatal response below. Set
+`allowDefaultAssistantFallback` to the boolean `true` to route a zero-match
+lookup to the canonical Telegram Assistant. The flag does not replace the
+required `agentSessionId`, and multiple exact matches never fall back. The
+lookup includes assistant sessions, but OpenACP never selects the newest,
+busiest, or most recently used session.
+
+`agentSessionId` must contain between 1 and 300 characters. The core service
+enforces the same upper bound as the HTTP route.
 
 Resolution also requires the session's primary adapter to advertise file upload,
 implement acknowledged delivery, and be operational. An adapter that reports
 `isOperational() === false` returns retryable `provider_unavailable`; it is not
 treated as an absent session.
 
-**Resolved response (HTTP 200)**
+**Resolved fallback response (HTTP 200)**
 
 ```json
 {
   "status": "resolved",
+  "routeKind": "default_assistant",
   "target": {
     "schemaVersion": 1,
-    "sessionId": "session_abc123",
+    "sessionId": "assistant_session_abc123",
     "adapterId": "telegram",
     "bindingGeneration": "opaque-signed-value"
   }
 }
 ```
 
+`routeKind` is one of `explicit_session`, `agent_session`, or
+`default_assistant` and records why OpenACP selected the target. A
+`default_assistant` target is also bound to the current canonical Assistant;
+replacing that Assistant invalidates the target before provider I/O.
+
 Treat `target` as opaque and return it unchanged to `/deliver`. It contains no
 provider token, proxy configuration, chat/topic ID, or local file path. A new
 delivery normally must use it within the configured target TTL, which defaults
-to five minutes. The opaque proof also binds the current agent generation: an
-in-place agent replacement invalidates it even if the replacement reuses the
-same agent-session ID. A daemon restart invalidates an uncommitted target, so
-resolve again before a new delivery.
+to five minutes. The opaque proof binds the current runtime Session and adapter
+object identities as well as the agent generation. Replacing any of them
+invalidates the target even when all visible IDs, generations, and thread values
+are reused. A daemon restart invalidates an uncommitted target, so resolve again
+before a new delivery.
 
 **No matching assistant (HTTP 200)**
 

@@ -35,6 +35,9 @@ function deliveryInput(target: AttachmentDeliveryTarget, data = Buffer.from("att
 function harness(root: string, options?: {
   deliver?: (request: AttachmentDeliveryRequest) => Promise<any>;
   isOperational?: () => boolean;
+  fileUpload?: boolean;
+  canonicalDefault?: boolean;
+  assistantSession?: boolean;
 }) {
   let live = true;
   let generation = 1;
@@ -44,6 +47,7 @@ function harness(root: string, options?: {
     workingDirectory: "/workspace",
     agentSessionId: "agent-thread-1",
     status: "active",
+    isAssistant: options?.assistantSession ?? options?.canonicalDefault ?? false,
     isTerminating: false,
     archiving: false,
     agentGeneration: 1,
@@ -60,13 +64,18 @@ function harness(root: string, options?: {
         && lease.generation === generation;
     },
   };
+  let currentSession = session;
   const manager = {
-    getSession: vi.fn((id: string) => id === session.id && live ? session : undefined),
-    getSessionByAgentSessionId: vi.fn((id: string) => id === session.agentSessionId && live ? session : undefined),
-    getCurrentLiveSessionsByAgentSessionId: vi.fn(
-      (id: string) => id === session.agentSessionId && live ? [session] : [],
+    getSession: vi.fn((id: string) => id === currentSession.id && live ? currentSession : undefined),
+    getSessionByAgentSessionId: vi.fn(
+      (id: string) => id === currentSession.agentSessionId && live ? currentSession : undefined,
     ),
-    isCurrentLiveSession: vi.fn((candidate: unknown) => live && candidate === session && !session.isTerminating),
+    getCurrentLiveSessionsByAgentSessionId: vi.fn(
+      (id: string) => id === currentSession.agentSessionId && live ? [currentSession] : [],
+    ),
+    isCurrentLiveSession: vi.fn(
+      (candidate: unknown) => live && candidate === currentSession && !currentSession.isTerminating,
+    ),
   };
   const defaultDeliver = vi.fn(async (request: AttachmentDeliveryRequest) => ({
     status: "provider_accepted" as const,
@@ -80,7 +89,7 @@ function harness(root: string, options?: {
     name: "telegram",
     capabilities: {
       streaming: true, richFormatting: true, threads: true,
-      reactions: true, fileUpload: true, voice: true,
+      reactions: true, fileUpload: options?.fileUpload ?? true, voice: true,
     },
     deliverAttachment,
     ...(options?.isOperational ? { isOperational: options.isOperational } : {}),
@@ -93,12 +102,16 @@ function harness(root: string, options?: {
     size: data.length,
   }));
   const removeStagedFile = vi.fn(async () => undefined);
+  let defaultAssistant: typeof session | null = options?.canonicalDefault ? session : null;
+  const resolveDefaultAssistant = vi.fn(() => defaultAssistant);
+  const adapters = new Map<string, IChannelAdapter>([["telegram", adapter]]);
   const service = new AttachmentDeliveryService({
     sessionManager: manager as any,
-    adapters: new Map([["telegram", adapter]]),
+    adapters,
     fileService: { saveFile },
     journalPath: path.join(root, "receipts.json"),
     removeStagedFile,
+    resolveDefaultAssistant,
   }, {
     targetSecret: Buffer.alloc(32, 7),
     now: () => Date.UTC(2026, 6, 20, 12),
@@ -112,7 +125,28 @@ function harness(root: string, options?: {
     deliverAttachment,
     saveFile,
     removeStagedFile,
+    resolveDefaultAssistant,
+    adapters,
     setLive(value: boolean) { live = value; },
+    setCurrentSession(value: typeof session) { currentSession = value; },
+    setDefaultAssistant(value: typeof session | null) { defaultAssistant = value; },
+    replaceSessionAndDefaultWithEquivalent() {
+      const replacement = {
+        ...session,
+        threadIds: new Map(session.threadIds),
+      };
+      currentSession = replacement;
+      defaultAssistant = replacement;
+      return replacement;
+    },
+    replaceAdapterWithEquivalent() {
+      const replacement = {
+        ...adapter,
+        capabilities: { ...adapter.capabilities },
+      } as IChannelAdapter;
+      adapters.set("telegram", replacement);
+      return replacement;
+    },
     archive() { session.archiving = true; },
     replaceAgentWithSameId() { session.agentGeneration++; },
     rebind(threadId = "84") {
@@ -147,6 +181,7 @@ describe("AttachmentDeliveryService", () => {
     });
     expect(resolved.status).toBe("resolved");
     if (resolved.status !== "resolved") throw new Error("target was not resolved");
+    expect(resolved.routeKind).toBe("agent_session");
     expect(JSON.stringify(resolved.target)).not.toContain("42");
 
     // Simulate the mutable object produced by route deserialization.
@@ -175,16 +210,130 @@ describe("AttachmentDeliveryService", () => {
     await expect(state.service.resolveTarget({
       explicitSessionId: "missing",
       agentSessionId: "agent-thread-1",
+      allowDefaultAssistantFallback: true,
     })).rejects.toMatchObject({ code: "target_stale" });
     await expect(state.service.resolveTarget({
       explicitSessionId: "session-1",
       agentSessionId: "other-agent",
+      allowDefaultAssistantFallback: true,
     })).rejects.toMatchObject({ code: "target_mismatch" });
     expect(state.manager.getCurrentLiveSessionsByAgentSessionId).not.toHaveBeenCalled();
+    expect(state.resolveDefaultAssistant).not.toHaveBeenCalled();
+  });
+
+  it("reports explicit precedence and never consults the canonical Assistant", async () => {
+    const state = harness(root, { canonicalDefault: true });
+    services.push(state.service);
+
+    const resolved = await state.service.resolveTarget({
+      explicitSessionId: "session-1",
+      allowDefaultAssistantFallback: true,
+    });
+
+    expect(resolved).toMatchObject({ status: "resolved", routeKind: "explicit_session" });
+    expect(state.manager.getCurrentLiveSessionsByAgentSessionId).not.toHaveBeenCalled();
+    expect(state.resolveDefaultAssistant).not.toHaveBeenCalled();
+  });
+
+  it("prefers a unique exact agent match over an enabled default fallback", async () => {
+    const state = harness(root, { canonicalDefault: true });
+    services.push(state.service);
+
+    const resolved = await state.service.resolveTarget({
+      agentSessionId: "agent-thread-1",
+      allowDefaultAssistantFallback: true,
+    });
+
+    expect(resolved).toMatchObject({ status: "resolved", routeKind: "agent_session" });
+    expect(state.resolveDefaultAssistant).not.toHaveBeenCalled();
+  });
+
+  it("uses the canonical default Assistant only for an opted-in zero-match lookup", async () => {
+    const state = harness(root, { canonicalDefault: true });
+    services.push(state.service);
+
+    const resolved = await state.service.resolveTarget({
+      agentSessionId: "missing-agent-session",
+      expectedWorkingDirectory: "/workspace",
+      allowDefaultAssistantFallback: true,
+    });
+    expect(resolved).toMatchObject({ status: "resolved", routeKind: "default_assistant" });
+    if (resolved.status !== "resolved") throw new Error("default Assistant was not resolved");
+    expect(resolved.target).not.toHaveProperty("threadId");
+
+    const receipt = await state.service.deliver(deliveryInput(resolved.target));
+    expect(receipt).toMatchObject({
+      status: "provider_accepted",
+      providerMessageId: "telegram-message-9",
+    });
+    expect(state.deliverAttachment).toHaveBeenCalledOnce();
+  });
+
+  it("does not use the default Assistant without opt-in and rejects flag-only requests", async () => {
+    const state = harness(root, { canonicalDefault: true });
+    services.push(state.service);
+
+    await expect(state.service.resolveTarget({ agentSessionId: "missing-agent-session" }))
+      .resolves.toMatchObject({ status: "target_unavailable" });
+    await expect(state.service.resolveTarget({ allowDefaultAssistantFallback: true }))
+      .rejects.toMatchObject({ code: "target_mismatch" });
+    await expect(state.service.resolveTarget({
+      agentSessionId: "missing-agent-session",
+      allowDefaultAssistantFallback: "true",
+    } as any)).rejects.toMatchObject({ code: "target_mismatch" });
+    expect(state.resolveDefaultAssistant).not.toHaveBeenCalled();
+  });
+
+  it("treats a non-Assistant canonical resolver result as unavailable", async () => {
+    const state = harness(root, { canonicalDefault: true, assistantSession: false });
+    services.push(state.service);
+
+    await expect(state.service.resolveTarget({
+      agentSessionId: "missing-agent-session",
+      allowDefaultAssistantFallback: true,
+    })).resolves.toMatchObject({ status: "target_unavailable" });
+    expect(state.saveFile).not.toHaveBeenCalled();
+    expect(state.deliverAttachment).not.toHaveBeenCalled();
+  });
+
+  it.each(["null", "stale", "finished", "cancelled"] as const)(
+    "returns nonfatal unavailable for a %s canonical Assistant",
+    async (condition) => {
+      const state = harness(path.join(root, condition), { canonicalDefault: true });
+      services.push(state.service);
+      if (condition === "null") state.setDefaultAssistant(null);
+      if (condition === "stale") state.setCurrentSession({ ...state.session });
+      if (condition === "finished" || condition === "cancelled") state.session.status = condition;
+
+      await expect(state.service.resolveTarget({
+        agentSessionId: "missing-agent-session",
+        allowDefaultAssistantFallback: true,
+      })).resolves.toEqual({
+        status: "target_unavailable",
+        code: "assistant_not_found",
+        retryable: false,
+        safeMessage: "No active OpenACP target is available.",
+      });
+      expect(state.saveFile).not.toHaveBeenCalled();
+      expect(state.deliverAttachment).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the workspace guard for the canonical default Assistant", async () => {
+    const state = harness(root, { canonicalDefault: true });
+    services.push(state.service);
+
+    await expect(state.service.resolveTarget({
+      agentSessionId: "missing-agent-session",
+      expectedWorkingDirectory: "/different-workspace",
+      allowDefaultAssistantFallback: true,
+    })).rejects.toMatchObject({ code: "target_mismatch" });
+    expect(state.saveFile).not.toHaveBeenCalled();
+    expect(state.deliverAttachment).not.toHaveBeenCalled();
   });
 
   it("returns the nonfatal unavailable result without session heuristics", async () => {
-    const state = harness(root);
+    const state = harness(root, { canonicalDefault: true });
     services.push(state.service);
 
     expect(await state.service.resolveTarget({ agentSessionId: "unknown" })).toEqual({
@@ -197,7 +346,7 @@ describe("AttachmentDeliveryService", () => {
   });
 
   it("returns unavailable for an ambiguous agent-session identity without provider I/O", async () => {
-    const state = harness(root);
+    const state = harness(root, { canonicalDefault: true });
     services.push(state.service);
     const duplicate = {
       ...state.session,
@@ -213,7 +362,10 @@ describe("AttachmentDeliveryService", () => {
       (candidate: unknown) => candidate === state.session || candidate === duplicate,
     );
 
-    await expect(state.service.resolveTarget({ agentSessionId: "agent-thread-1" })).resolves.toEqual({
+    await expect(state.service.resolveTarget({
+      agentSessionId: "agent-thread-1",
+      allowDefaultAssistantFallback: true,
+    })).resolves.toEqual({
       status: "target_unavailable",
       code: "assistant_not_found",
       retryable: false,
@@ -221,16 +373,120 @@ describe("AttachmentDeliveryService", () => {
     });
     expect(state.saveFile).not.toHaveBeenCalled();
     expect(state.deliverAttachment).not.toHaveBeenCalled();
+    expect(state.resolveDefaultAssistant).not.toHaveBeenCalled();
+  });
+
+  it("invalidates a default-Assistant target when canonical ownership changes", async () => {
+    const state = harness(root, { canonicalDefault: true });
+    services.push(state.service);
+    const resolved = await state.service.resolveTarget({
+      agentSessionId: "missing-agent-session",
+      allowDefaultAssistantFallback: true,
+    });
+    if (resolved.status !== "resolved") throw new Error("default Assistant was not resolved");
+    state.setDefaultAssistant({ ...state.session, id: "replacement-assistant" });
+
+    await expect(state.service.deliver(deliveryInput(resolved.target)))
+      .rejects.toMatchObject({ code: "target_stale" });
+    expect(state.saveFile).not.toHaveBeenCalled();
+    expect(state.deliverAttachment).not.toHaveBeenCalled();
+  });
+
+  it("invalidates an equivalent replacement Session object before staging", async () => {
+    const state = harness(root, { canonicalDefault: true });
+    services.push(state.service);
+    const resolved = await state.service.resolveTarget({
+      agentSessionId: "missing-agent-session",
+      allowDefaultAssistantFallback: true,
+    });
+    if (resolved.status !== "resolved") throw new Error("default Assistant was not resolved");
+    const replacement = state.replaceSessionAndDefaultWithEquivalent();
+    expect(replacement).not.toBe(state.session);
+    expect(replacement).toMatchObject({
+      id: state.session.id,
+      agentSessionId: state.session.agentSessionId,
+      agentGeneration: state.session.agentGeneration,
+      threadId: state.session.threadId,
+    });
+
+    await expect(state.service.deliver(deliveryInput(resolved.target)))
+      .rejects.toMatchObject({ code: "target_stale" });
+    expect(state.saveFile).not.toHaveBeenCalled();
+    expect(state.deliverAttachment).not.toHaveBeenCalled();
+  });
+
+  it("invalidates an equivalent replacement adapter object before staging", async () => {
+    const state = harness(root);
+    services.push(state.service);
+    const resolved = await state.service.resolveTarget({ explicitSessionId: "session-1" });
+    if (resolved.status !== "resolved") throw new Error("target was not resolved");
+    const replacement = state.replaceAdapterWithEquivalent();
+    expect(replacement).not.toBe(state.adapter);
+    expect(replacement.name).toBe(state.adapter.name);
+
+    await expect(state.service.deliver(deliveryInput(resolved.target)))
+      .rejects.toMatchObject({ code: "target_stale" });
+    expect(state.saveFile).not.toHaveBeenCalled();
+    expect(state.deliverAttachment).not.toHaveBeenCalled();
+  });
+
+  it("rechecks canonical Assistant ownership after file staging", async () => {
+    const state = harness(root, { canonicalDefault: true });
+    services.push(state.service);
+    const resolved = await state.service.resolveTarget({
+      agentSessionId: "missing-agent-session",
+      allowDefaultAssistantFallback: true,
+    });
+    if (resolved.status !== "resolved") throw new Error("default Assistant was not resolved");
+    state.saveFile.mockImplementationOnce(async (_sessionId, fileName, data, mimeType) => {
+      state.setDefaultAssistant({ ...state.session, id: "replacement-assistant" });
+      return { type: "file", filePath: path.join(root, fileName), fileName, mimeType, size: data.length };
+    });
+
+    await expect(state.service.deliver(deliveryInput(resolved.target)))
+      .rejects.toMatchObject({ code: "target_stale" });
+    expect(state.deliverAttachment).not.toHaveBeenCalled();
+    expect(state.removeStagedFile).toHaveBeenCalledOnce();
+  });
+
+  it("keeps canonical Assistant ownership in the adapter's just-in-time binding", async () => {
+    const gate = deferred<void>();
+    let state!: ReturnType<typeof harness>;
+    state = harness(root, {
+      canonicalDefault: true,
+      deliver: async (request) => {
+        await gate.promise;
+        if (!request.targetBinding.isCurrent()) throw new AttachmentDeliveryError("target_stale");
+        throw new Error("provider I/O must not be reached");
+      },
+    });
+    services.push(state.service);
+    const resolved = await state.service.resolveTarget({
+      agentSessionId: "missing-agent-session",
+      allowDefaultAssistantFallback: true,
+    });
+    if (resolved.status !== "resolved") throw new Error("default Assistant was not resolved");
+
+    const pending = state.service.deliver(deliveryInput(resolved.target));
+    await vi.waitFor(() => expect(state.deliverAttachment).toHaveBeenCalledOnce());
+    state.setDefaultAssistant({ ...state.session, id: "replacement-assistant" });
+    gate.resolve();
+
+    await expect(pending).rejects.toMatchObject({ code: "target_stale" });
+    expect(state.removeStagedFile).toHaveBeenCalledOnce();
   });
 
   it("treats an archiving session as stale for explicit lookup and unavailable for fallback", async () => {
-    const state = harness(root);
+    const state = harness(root, { canonicalDefault: true });
     services.push(state.service);
     state.archive();
 
     await expect(state.service.resolveTarget({ explicitSessionId: "session-1" }))
       .rejects.toMatchObject({ code: "target_stale" });
-    await expect(state.service.resolveTarget({ agentSessionId: "agent-thread-1" }))
+    await expect(state.service.resolveTarget({
+      agentSessionId: "agent-thread-1",
+      allowDefaultAssistantFallback: true,
+    }))
       .resolves.toMatchObject({ status: "target_unavailable" });
     expect(state.saveFile).not.toHaveBeenCalled();
     expect(state.deliverAttachment).not.toHaveBeenCalled();
@@ -425,10 +681,14 @@ describe("AttachmentDeliveryService", () => {
 
   it("does not stage or send when the adapter becomes non-operational after resolution", async () => {
     let operational = false;
-    const state = harness(root, { isOperational: () => operational });
+    const state = harness(root, { isOperational: () => operational, canonicalDefault: true });
     services.push(state.service);
-    await expect(state.service.resolveTarget({ explicitSessionId: "session-1" }))
+    await expect(state.service.resolveTarget({
+      explicitSessionId: "session-1",
+      allowDefaultAssistantFallback: true,
+    }))
       .rejects.toMatchObject({ code: "provider_unavailable", retryable: true });
+    expect(state.resolveDefaultAssistant).not.toHaveBeenCalled();
     operational = true;
     const resolved = await state.service.resolveTarget({ explicitSessionId: "session-1" });
     if (resolved.status !== "resolved") throw new Error("target was not resolved");
@@ -436,6 +696,19 @@ describe("AttachmentDeliveryService", () => {
 
     await expect(state.service.deliver(deliveryInput(resolved.target)))
       .rejects.toMatchObject({ code: "provider_unavailable", retryable: true });
+    expect(state.saveFile).not.toHaveBeenCalled();
+    expect(state.deliverAttachment).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back from an explicit target on an unsupported adapter", async () => {
+    const state = harness(root, { fileUpload: false, canonicalDefault: true });
+    services.push(state.service);
+
+    await expect(state.service.resolveTarget({
+      explicitSessionId: "session-1",
+      allowDefaultAssistantFallback: true,
+    })).rejects.toMatchObject({ code: "unsupported_channel" });
+    expect(state.resolveDefaultAssistant).not.toHaveBeenCalled();
     expect(state.saveFile).not.toHaveBeenCalled();
     expect(state.deliverAttachment).not.toHaveBeenCalled();
   });

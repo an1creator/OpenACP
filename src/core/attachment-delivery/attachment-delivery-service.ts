@@ -26,14 +26,22 @@ const MAX_CLOCK_SKEW_MS = 30_000;
 
 /** Input used to resolve a caller to one exact live OpenACP target. */
 export interface AttachmentTargetResolveRequest {
+  /** Exact OpenACP session selected by an operator-aware caller. */
   explicitSessionId?: string;
+  /** Exact ACP agent-session identity required for non-explicit routing. */
   agentSessionId?: string;
+  /** Optional workspace guard applied to the selected session. */
   expectedWorkingDirectory?: string;
+  /** Permit a zero-match agent lookup to use the canonical default Assistant. */
+  allowDefaultAssistantFallback?: boolean;
 }
+
+/** Auditable reason that a resolved attachment target was selected. */
+export type AttachmentTargetRouteKind = "explicit_session" | "agent_session" | "default_assistant";
 
 /** Successful or nonfatal-unavailable target resolution. */
 export type AttachmentTargetResolution =
-  | { status: "resolved"; target: AttachmentDeliveryTarget }
+  | { status: "resolved"; routeKind: AttachmentTargetRouteKind; target: AttachmentDeliveryTarget }
   | {
       status: "target_unavailable";
       code: "assistant_not_found";
@@ -79,6 +87,8 @@ export interface AttachmentDeliveryServiceDependencies {
   adapters: ReadonlyMap<string, IChannelAdapter>;
   fileService: Pick<FileServiceInterface, "saveFile">;
   journalPath: string;
+  /** Resolves the host's canonical default Assistant without scanning sessions. */
+  resolveDefaultAssistant?: () => Session | null;
   /** Test seam or host-specific staging cleanup implementation. */
   removeStagedFile?: (filePath: string) => Promise<void>;
 }
@@ -99,6 +109,7 @@ interface CapturedTarget {
   lease: SessionAttachmentLease;
   agentSessionId: string;
   agentGeneration: number;
+  requiresDefaultAssistantCurrentness: boolean;
 }
 
 function deliveryLockKey(target: AttachmentDeliveryTarget, deliveryId: string): string {
@@ -128,6 +139,9 @@ export class AttachmentDeliveryService {
   private readonly targetSecret: Buffer;
   private readonly now: () => number;
   private readonly removeStagedFile: (filePath: string) => Promise<void>;
+  // Weak keys bind proofs to runtime identity without retaining retired objects.
+  private readonly sessionObjectNonces = new WeakMap<object, string>();
+  private readonly adapterObjectNonces = new WeakMap<object, string>();
   private readonly deliveryTails = new Map<string, Promise<void>>();
   private readonly activeControllers = new Set<AbortController>();
   private closing = false;
@@ -160,12 +174,13 @@ export class AttachmentDeliveryService {
     this.journal = new AttachmentDeliveryJournal(deps.journalPath);
   }
 
-  /** Resolve an explicit session or exact live agent-session identity. */
+  /** Resolve an explicit, exact agent, or opt-in canonical Assistant target. */
   async resolveTarget(request: AttachmentTargetResolveRequest): Promise<AttachmentTargetResolution> {
     this.assertOpen();
     this.validateResolveRequest(request);
 
     let session: Session | undefined;
+    let routeKind: AttachmentTargetRouteKind;
     if (request.explicitSessionId) {
       session = this.deps.sessionManager.getSession(request.explicitSessionId);
       if (!session || !this.isDeliverableSession(session)) {
@@ -174,12 +189,24 @@ export class AttachmentDeliveryService {
       if (request.agentSessionId && session.agentSessionId !== request.agentSessionId) {
         throw new AttachmentDeliveryError("target_mismatch");
       }
+      routeKind = "explicit_session";
     } else {
       const candidates = this.deps.sessionManager
         .getCurrentLiveSessionsByAgentSessionId(request.agentSessionId!)
         .filter((candidate) => this.isDeliverableSession(candidate));
-      if (candidates.length !== 1) return unavailableResolution();
-      [session] = candidates;
+      if (candidates.length > 1) return unavailableResolution();
+      if (candidates.length === 1) {
+        [session] = candidates;
+        routeKind = "agent_session";
+      } else {
+        if (request.allowDefaultAssistantFallback !== true) return unavailableResolution();
+        const defaultAssistant = this.deps.resolveDefaultAssistant?.();
+        if (!defaultAssistant?.isAssistant || !this.isDeliverableSession(defaultAssistant)) {
+          return unavailableResolution();
+        }
+        session = defaultAssistant;
+        routeKind = "default_assistant";
+      }
     }
 
     if (
@@ -191,7 +218,7 @@ export class AttachmentDeliveryService {
 
     let captured: CapturedTarget;
     try {
-      captured = this.captureCurrentTarget(session);
+      captured = this.captureCurrentTarget(session, routeKind === "default_assistant");
     } catch (error) {
       if (!request.explicitSessionId && error instanceof AttachmentDeliveryError && error.code === "target_stale") {
         return unavailableResolution();
@@ -201,6 +228,7 @@ export class AttachmentDeliveryService {
     const issuedAt = this.now();
     return {
       status: "resolved",
+      routeKind,
       target: Object.freeze({
         schemaVersion: 1,
         sessionId: session.id,
@@ -341,8 +369,14 @@ export class AttachmentDeliveryService {
     return this.closeOperation;
   }
 
-  private captureCurrentTarget(session: Session): CapturedTarget {
+  private captureCurrentTarget(
+    session: Session,
+    requiresDefaultAssistantCurrentness = false,
+  ): CapturedTarget {
     if (!this.isDeliverableSession(session)) throw new AttachmentDeliveryError("target_stale");
+    if (requiresDefaultAssistantCurrentness && !this.isCanonicalDefaultAssistant(session)) {
+      throw new AttachmentDeliveryError("target_stale");
+    }
     const adapterId = session.channelId;
     const adapter = this.deps.adapters.get(adapterId);
     if (!adapter || !adapter.capabilities.fileUpload || typeof adapter.deliverAttachment !== "function") {
@@ -361,6 +395,7 @@ export class AttachmentDeliveryService {
       lease,
       agentSessionId: session.agentSessionId,
       agentGeneration: session.agentGeneration,
+      requiresDefaultAssistantCurrentness,
     };
   }
 
@@ -375,11 +410,19 @@ export class AttachmentDeliveryService {
     if (age < -MAX_CLOCK_SKEW_MS || age > this.targetTtlMs) {
       throw new AttachmentDeliveryError("target_stale");
     }
-    const expected = this.signBinding(captured, issuedAt);
-    if (!this.safeTokenEqual(expected, target.bindingGeneration)) {
-      throw new AttachmentDeliveryError("target_stale");
+    if (this.safeTokenEqual(this.signBinding(captured, issuedAt), target.bindingGeneration)) {
+      return captured;
     }
-    return captured;
+    if (this.isCanonicalDefaultAssistant(session)) {
+      const defaultAssistantCapture: CapturedTarget = {
+        ...captured,
+        requiresDefaultAssistantCurrentness: true,
+      };
+      if (this.safeTokenEqual(this.signBinding(defaultAssistantCapture, issuedAt), target.bindingGeneration)) {
+        return defaultAssistantCapture;
+      }
+    }
+    throw new AttachmentDeliveryError("target_stale");
   }
 
   private isCapturedTargetCurrent(captured: CapturedTarget, target: AttachmentDeliveryTarget): boolean {
@@ -388,6 +431,7 @@ export class AttachmentDeliveryService {
       && this.isDeliverableSession(captured.session)
       && captured.session.agentSessionId === captured.agentSessionId
       && captured.session.agentGeneration === captured.agentGeneration
+      && (!captured.requiresDefaultAssistantCurrentness || this.isCanonicalDefaultAssistant(captured.session))
       && captured.session.channelId === target.adapterId
       && captured.session.isAttachmentLeaseCurrent(captured.lease)
       && this.deps.adapters.get(target.adapterId) === captured.adapter
@@ -398,6 +442,10 @@ export class AttachmentDeliveryService {
 
   private isAdapterOperational(adapter: IChannelAdapter): boolean {
     return adapter.isOperational?.() ?? true;
+  }
+
+  private isCanonicalDefaultAssistant(session: Session): boolean {
+    return session.isAssistant === true && this.deps.resolveDefaultAssistant?.() === session;
   }
 
   private isDeliverableSession(session: Session): boolean {
@@ -418,6 +466,9 @@ export class AttachmentDeliveryService {
       captured.lease.generation,
       captured.agentSessionId,
       captured.agentGeneration,
+      captured.requiresDefaultAssistantCurrentness,
+      this.getObjectNonce(this.sessionObjectNonces, captured.session),
+      this.getObjectNonce(this.adapterObjectNonces, captured.adapter),
     ]);
     const mac = createHmac("sha256", this.targetSecret).update(payload).digest("base64url");
     return `${timestamp}.${mac}`;
@@ -435,6 +486,14 @@ export class AttachmentDeliveryService {
     const leftBuffer = Buffer.from(left);
     const rightBuffer = Buffer.from(right);
     return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+  }
+
+  private getObjectNonce(nonces: WeakMap<object, string>, value: object): string {
+    const existing = nonces.get(value);
+    if (existing) return existing;
+    const nonce = randomBytes(16).toString("base64url");
+    nonces.set(value, nonce);
+    return nonce;
   }
 
   private async invokeAdapter(
@@ -484,6 +543,12 @@ export class AttachmentDeliveryService {
       throw new AttachmentDeliveryError("target_mismatch");
     }
     if (request.agentSessionId !== undefined && !this.validBoundedString(request.agentSessionId, 300)) {
+      throw new AttachmentDeliveryError("target_mismatch");
+    }
+    if (
+      request.allowDefaultAssistantFallback !== undefined
+      && typeof request.allowDefaultAssistantFallback !== "boolean"
+    ) {
       throw new AttachmentDeliveryError("target_mismatch");
     }
     if (!request.explicitSessionId && !request.agentSessionId) {

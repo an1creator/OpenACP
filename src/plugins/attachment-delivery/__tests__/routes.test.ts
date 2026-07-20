@@ -12,6 +12,7 @@ function service(): AttachmentDeliveryRouteService {
   return {
     resolveTarget: vi.fn(async () => ({
       status: 'resolved' as const,
+      routeKind: 'agent_session' as const,
       target: {
         schemaVersion: 1 as const,
         sessionId: 'session-1',
@@ -121,6 +122,7 @@ describe('attachment delivery routes', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toEqual({
       status: 'resolved',
+      routeKind: 'agent_session',
       target: {
         schemaVersion: 1,
         sessionId: 'session-1',
@@ -128,6 +130,83 @@ describe('attachment delivery routes', () => {
         bindingGeneration: 'generation-1',
       },
     })
+  })
+
+  it('forwards strict default-Assistant opt-in and returns its route kind', async () => {
+    const deliveryService = service()
+    vi.mocked(deliveryService.resolveTarget).mockResolvedValueOnce({
+      status: 'resolved',
+      routeKind: 'default_assistant',
+      target: {
+        schemaVersion: 1,
+        sessionId: 'assistant-session',
+        adapterId: 'telegram',
+        bindingGeneration: 'generation-2',
+      },
+    })
+    const app = await appFor(deliveryService)
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/v1/attachment-delivery/v1/resolve',
+      headers: { 'x-test-scopes': 'attachments:send', host: 'localhost' },
+      payload: {
+        agentSessionId: 'missing-agent-session',
+        allowDefaultAssistantFallback: true,
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ status: 'resolved', routeKind: 'default_assistant' })
+    expect(deliveryService.resolveTarget).toHaveBeenCalledWith({
+      agentSessionId: 'missing-agent-session',
+      allowDefaultAssistantFallback: true,
+    })
+  })
+
+  it('rejects a flag-only request and non-boolean opt-in before service resolution', async () => {
+    const deliveryService = service()
+    const app = await appFor(deliveryService)
+
+    for (const payload of [
+      { allowDefaultAssistantFallback: true },
+      { agentSessionId: 'missing-agent-session', allowDefaultAssistantFallback: 'true' },
+    ]) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/v1/attachment-delivery/v1/resolve',
+        headers: { 'x-test-scopes': 'attachments:send', host: 'localhost' },
+        payload,
+      })
+      expect(response.statusCode).toBe(400)
+      expect(response.json()).toMatchObject({ status: 'error', code: 'file_invalid' })
+    }
+    expect(deliveryService.resolveTarget).not.toHaveBeenCalled()
+  })
+
+  it('accepts a 300-character agent session ID and rejects 301 characters', async () => {
+    const deliveryService = service()
+    const app = await appFor(deliveryService)
+    const acceptedId = 'a'.repeat(300)
+    const accepted = await app.inject({
+      method: 'POST',
+      url: '/api/v1/attachment-delivery/v1/resolve',
+      headers: { 'x-test-scopes': 'attachments:send', host: 'localhost' },
+      payload: { agentSessionId: acceptedId },
+    })
+
+    expect(accepted.statusCode).toBe(200)
+    expect(deliveryService.resolveTarget).toHaveBeenCalledWith({ agentSessionId: acceptedId })
+    vi.mocked(deliveryService.resolveTarget).mockClear()
+
+    const rejected = await app.inject({
+      method: 'POST',
+      url: '/api/v1/attachment-delivery/v1/resolve',
+      headers: { 'x-test-scopes': 'attachments:send', host: 'localhost' },
+      payload: { agentSessionId: 'a'.repeat(301) },
+    })
+    expect(rejected.statusCode).toBe(400)
+    expect(rejected.json()).toMatchObject({ status: 'error', code: 'file_invalid' })
+    expect(deliveryService.resolveTarget).not.toHaveBeenCalled()
   })
 
   it('rejects a caller without attachments:send', async () => {

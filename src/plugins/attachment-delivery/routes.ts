@@ -29,10 +29,13 @@ const TargetSchema = z.object({
   bindingGeneration: z.string().min(1).max(200),
 }).strict()
 
+const RouteKindSchema = z.enum(['explicit_session', 'agent_session', 'default_assistant'])
+
 const ResolveBodySchema = z.object({
   explicitSessionId: z.string().regex(SAFE_SESSION_ID).optional(),
-  agentSessionId: z.string().min(1).max(500).optional(),
+  agentSessionId: z.string().min(1).max(300).optional(),
   expectedWorkingDirectory: z.string().min(1).max(4096).optional(),
+  allowDefaultAssistantFallback: z.boolean().optional(),
 }).strict().refine(
   (value) => Boolean(value.explicitSessionId) || Boolean(value.agentSessionId),
   'explicitSessionId or agentSessionId is required',
@@ -76,8 +79,13 @@ export interface AttachmentDeliveryRouteService {
     explicitSessionId?: string
     agentSessionId?: string
     expectedWorkingDirectory?: string
+    allowDefaultAssistantFallback?: boolean
   }): Promise<
-    | { status: 'resolved'; target: AttachmentDeliveryTarget }
+    | {
+        status: 'resolved'
+        routeKind: 'explicit_session' | 'agent_session' | 'default_assistant'
+        target: AttachmentDeliveryTarget
+      }
     | { status: 'target_unavailable'; code: string; retryable: false; safeMessage: string }
   >
   deliver(input: {
@@ -243,7 +251,8 @@ export async function attachmentDeliveryRoutes(
         })
       }
       const target = TargetSchema.parse(result.target)
-      return reply.send({ status: 'resolved', target })
+      const routeKind = RouteKindSchema.parse(result.routeKind)
+      return reply.send({ status: 'resolved', routeKind, target })
     } catch (error) {
       return sendError(reply, safeError(error))
     }

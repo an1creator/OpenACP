@@ -41,7 +41,7 @@ function multipart(metadata: Record<string, unknown>, data: Buffer) {
 }
 
 describe('attachment delivery API integration', () => {
-  it('returns the provider receipt from the exact resolved adapter target', async () => {
+  it('resolves the canonical default Assistant and returns its provider receipt', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'openacp-attachment-integration-'))
     temporaryDirectories.push(root)
     const lease = Object.freeze({ adapterId: 'telegram', threadId: 'topic-42', generation: 7 })
@@ -53,6 +53,7 @@ describe('attachment delivery API integration', () => {
       threadId: 'topic-42',
       threadIds: new Map([['telegram', 'topic-42']]),
       status: 'active',
+      isAssistant: true,
       isTerminating: false,
       archiving: false,
       agentGeneration: 1,
@@ -63,7 +64,7 @@ describe('attachment delivery API integration', () => {
       getSession: vi.fn((id: string) => id === session.id ? session : undefined),
       getSessionByAgentSessionId: vi.fn((id: string) => id === session.agentSessionId ? session : undefined),
       getCurrentLiveSessionsByAgentSessionId: vi.fn(
-        (id: string) => id === session.agentSessionId ? [session] : [],
+        () => [],
       ),
       isCurrentLiveSession: vi.fn((candidate: Session) => candidate === session),
     } as unknown as SessionManager
@@ -95,6 +96,7 @@ describe('attachment delivery API integration', () => {
       adapters: new Map([['telegram', adapter]]),
       fileService: new FileService(path.join(root, 'files')),
       journalPath: path.join(root, 'journal', 'deliveries.json'),
+      resolveDefaultAssistant: () => session,
     }, {
       targetSecret: Buffer.alloc(32, 7),
       deliveryTimeoutMs: 1_000,
@@ -126,9 +128,14 @@ describe('attachment delivery API integration', () => {
         method: 'POST',
         url: '/api/v1/attachment-delivery/v1/resolve',
         headers: { host: '127.0.0.1' },
-        payload: { agentSessionId: 'agent-session-1', expectedWorkingDirectory: '/workspace' },
+        payload: {
+          agentSessionId: 'missing-agent-session',
+          expectedWorkingDirectory: '/workspace',
+          allowDefaultAssistantFallback: true,
+        },
       })
       expect(resolved.statusCode).toBe(200)
+      expect(resolved.json().routeKind).toBe('default_assistant')
       const target = resolved.json().target
       expect(target).toMatchObject({ sessionId: 'session-1', adapterId: 'telegram' })
       expect(target).not.toHaveProperty('threadId')

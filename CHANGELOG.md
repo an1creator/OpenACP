@@ -1,5 +1,14 @@
 ## Unreleased
 
+## 2026.721.1 - 2026-07-21
+
+### Added
+
+- Add an explicit local attachment-delivery opt-in that routes a zero-match
+  agent-session lookup to the canonical Telegram Assistant. Resolved responses
+  now identify `explicit_session`, `agent_session`, or `default_assistant`, and
+  canonical Assistant replacement invalidates an outstanding fallback target.
+
 ## 2026.720.2 - 2026-07-20
 
 ### Added

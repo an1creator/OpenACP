@@ -93,7 +93,11 @@ the acknowledged attachment API. OpenACP keeps provider credentials and chat or
 topic identifiers inside the host, stages the upload through its file service,
 and reports success only after a supporting adapter returns a provider message
 ID. The three versioned routes are loopback-only and require the
-`attachments:send` API scope. See [Files and Media](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/using-openacp/files-and-media.md#acknowledged-delivery-from-local-automation)
+`attachments:send` API scope. When an exact agent-session lookup has zero live
+matches, callers can explicitly opt in to the canonical Telegram Assistant;
+multiple matches never fall back. Each resolved response reports
+`explicit_session`, `agent_session`, or `default_assistant` in `routeKind`.
+See [Files and Media](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/using-openacp/files-and-media.md#acknowledged-delivery-from-local-automation)
 and the [REST API reference](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/api-reference/rest-api.md#acknowledged-attachment-delivery).
 
 ### Native speech-to-text

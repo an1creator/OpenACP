@@ -53,6 +53,7 @@ function createAttachmentDeliveryPlugin(): OpenACPPlugin {
         adapters: core.adapters,
         fileService,
         journalPath: path.join(dataDir, 'delivery-journal.json'),
+        resolveDefaultAssistant: () => core.assistantManager.get('telegram'),
       }, {
         maxFileSizeBytes: config.maxFileSizeBytes,
         deliveryTimeoutMs: config.deliveryTimeoutMs,

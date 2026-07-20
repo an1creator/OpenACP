@@ -1,5 +1,19 @@
 ## Unreleased
 
+## 2026.720.2 - 2026-07-20
+
+### Added
+
+- Carry forward the acknowledged attachment delivery feature documented in
+  `2026.720.1`. That tag was not published to npm because release verification
+  exposed a flaky cross-process test.
+
+### Fixed
+
+- Replace timing-based cross-process proxy-store verification with a
+  deterministic ready/go barrier that proves both writers loaded the same
+  revision before asserting the typed conflict.
+
 ## 2026.720.1 - 2026-07-20
 
 ### Added

@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
 describe('release metadata', () => {
-  const version = '2026.720.1'
-  const previousVersion = '2026.718.4'
+  const version = '2026.720.2'
+  const previousVersion = '2026.720.1'
 
   it('keeps package, SDK peer floor, and changelog on the exact release', () => {
     const cli = JSON.parse(fs.readFileSync('package.json', 'utf8'))
@@ -21,15 +21,15 @@ describe('release metadata', () => {
     expect(sdk.peerDependencies['@n1creator/openacp-cli']).toBe(`>=${version}`)
     expect(sdk.peerDependencies.vitest).toBe('>=3 <5')
     expect(sdk.peerDependenciesMeta.vitest).toEqual({ optional: true })
-    expect(version).toBe(`2026.${Number('0720')}.1`)
+    expect(version).toBe(`2026.${Number('0720')}.2`)
     expect(changelog).toMatch(new RegExp(`^## Unreleased\\r?\\n\\r?\\n## ${version.replaceAll('.', '\\.')} - 2026-07-20$`, 'm'))
     expect(changelog.match(new RegExp(`^## ${version.replaceAll('.', '\\.')} - 2026-07-20$`, 'gm'))).toHaveLength(1)
     expect(changelog.slice(changelog.indexOf(`## ${version}`), changelog.indexOf(`## ${previousVersion}`)).trim()).not.toBe('')
-    const taggedSection = changelog.slice(changelog.indexOf(`## ${previousVersion}`), changelog.indexOf('## 2026.718.3'))
-    expect(createHash('sha256').update(taggedSection).digest('hex')).toBe('66d059a98a3f9d9f4cf5d553495b9b74859ebfb6e50fa539879be42f4583c2ad')
+    const taggedSection = changelog.slice(changelog.indexOf(`## ${previousVersion}`), changelog.indexOf('## 2026.718.4'))
+    expect(createHash('sha256').update(taggedSection).digest('hex')).toBe('e7fb1f5c0697cbb0a65694f429d2fe3c9b0f49d9822a104c2ba5f7fe67ab04d0')
     expect(lockfile).toContain("version: link:../..")
     expect(lockfile).not.toContain(previousVersion)
-    expect(changelog).not.toContain('2026.720.2')
+    expect(changelog).not.toContain('2026.720.3')
 
     const codex = registry.agents.find((agent: { id: string }) => agent.id === 'codex-acp')
     expect(codex).toMatchObject({

@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { spawn } from 'node:child_process'
+import { fork } from 'node:child_process'
 import { PROXY_STORE_VERSION, ProxyRevisionConflictError, ProxyStore, ProxyStoreCorruptError } from '../proxy-store.js'
 import { ProxyService } from '../proxy-service.js'
 
@@ -121,16 +121,91 @@ describe('ProxyStore recovery and concurrency contract', () => {
     const script = path.join(root, 'writer.mjs')
     fs.writeFileSync(script, `import { ProxyStore } from ${JSON.stringify(moduleUrl)};
 const store = new ProxyStore(process.argv[2]); const state = store.load();
-await new Promise(r => setTimeout(r, 100));
-try { store.commit({ ...state, routing: { global: process.argv[3], routes: {} } }, {}, state.revision); console.log('ok') }
-catch (error) { console.log(error.code || error.name) }
+const send = (message) => new Promise((resolve, reject) => process.send(message, (error) => error ? reject(error) : resolve()));
+const go = new Promise((resolve, reject) => {
+  process.once('message', (message) => message?.type === 'go' ? resolve() : reject(new Error('Unexpected parent command')));
+  process.once('disconnect', () => reject(new Error('Parent disconnected before releasing writer')));
+});
+await send({ type: 'ready', revision: state.revision });
+await go;
+let outcome;
+try { store.commit({ ...state, routing: { global: process.argv[3], routes: {} } }, {}, state.revision); outcome = 'ok' }
+catch (error) { outcome = error.code || error.name }
+await send({ type: 'result', outcome });
+process.disconnect();
 `, { mode: 0o600 })
-    const run = (route: string) => new Promise<string>((resolve, reject) => {
-      const child = spawn(process.execPath, ['--import', 'tsx', script, root, route], { stdio: ['ignore', 'pipe', 'pipe'] })
-      let output = ''; let error = ''; child.stdout.on('data', (d) => { output += d }); child.stderr.on('data', (d) => { error += d })
-      child.on('close', (code) => code === 0 ? resolve(output.trim()) : reject(new Error(error)))
-    })
-    const outcomes = await Promise.all([run('direct'), run('inherit')])
-    expect(outcomes.sort()).toEqual(['PROXY_REVISION_CONFLICT', 'ok'])
+    const start = (route: string) => {
+      const child = fork(script, [root, route], { execArgv: ['--import', 'tsx'], silent: true })
+      let stderr = ''
+      let readySeen = false
+      let resultSeen = false
+      let resolveReady!: (revision: number) => void
+      let rejectReady!: (error: Error) => void
+      let resolveResult!: (outcome: string) => void
+      let rejectResult!: (error: Error) => void
+      const ready = new Promise<number>((resolve, reject) => { resolveReady = resolve; rejectReady = reject })
+      const result = new Promise<string>((resolve, reject) => { resolveResult = resolve; rejectResult = reject })
+      const closed = new Promise<void>((resolve) => child.once('close', () => resolve()))
+      child.stderr?.on('data', (data) => { stderr += data })
+      child.on('message', (message: unknown) => {
+        if (typeof message !== 'object' || message === null) return
+        const event = message as { type?: unknown; revision?: unknown; outcome?: unknown }
+        if (event.type === 'ready' && typeof event.revision === 'number' && !readySeen) {
+          readySeen = true
+          resolveReady(event.revision)
+        }
+        if (event.type === 'result' && typeof event.outcome === 'string' && !resultSeen) {
+          resultSeen = true
+          resolveResult(event.outcome)
+        }
+      })
+      const fail = (error: Error) => {
+        if (!readySeen) rejectReady(error)
+        if (!resultSeen) rejectResult(error)
+      }
+      child.once('error', fail)
+      const completed = new Promise<void>((resolve, reject) => {
+        child.once('close', (code) => {
+          if (readySeen && resultSeen && code === 0) {
+            resolve()
+            return
+          }
+          const error = new Error(`Proxy writer exited with code ${String(code)}${stderr ? `: ${stderr}` : ''}`)
+          fail(error)
+          reject(error)
+        })
+      })
+      completed.catch(() => {
+        // The ready/result promises surface the same child failure while the test is at that barrier.
+      })
+      result.catch(() => {
+        // A writer can fail while the parent is still waiting for both ready messages.
+      })
+      const release = () => new Promise<void>((resolve, reject) => {
+        child.send({ type: 'go' }, (error) => error ? reject(error) : resolve())
+      })
+      return { child, ready, release, result, completed, closed }
+    }
+
+    const routes = ['direct', 'inherit'] as const
+    const writers = routes.map((route) => start(route))
+    try {
+      const revisions = await Promise.all(writers.map((writer) => writer.ready))
+      await Promise.all(writers.map((writer) => writer.release()))
+      const outcomes = await Promise.all(writers.map((writer) => writer.result))
+      await Promise.all(writers.map((writer) => writer.completed))
+
+      expect(revisions).toEqual([0, 0])
+      expect([...outcomes].sort()).toEqual(['PROXY_REVISION_CONFLICT', 'ok'])
+      const winner = outcomes.indexOf('ok')
+      const committed = new ProxyStore(root).load()
+      expect(committed.revision).toBe(1)
+      expect(committed.routing.global).toBe(routes[winner])
+    } finally {
+      for (const writer of writers) {
+        if (writer.child.exitCode === null && writer.child.signalCode === null) writer.child.kill()
+      }
+      await Promise.all(writers.map((writer) => writer.closed))
+    }
   })
 })

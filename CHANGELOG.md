@@ -1,5 +1,24 @@
 ## Unreleased
 
+## 2026.720.1 - 2026-07-20
+
+### Added
+
+- Add host-owned acknowledged attachment delivery for local automation: exact
+  live-session resolution, authenticated loopback REST routes, validated file
+  staging, durable restart-safe receipts, and a real Telegram `message_id`.
+- Export the optional `IChannelAdapter.deliverAttachment()` request, immutable
+  target-binding, and receipt types from the CLI and plugin SDK without changing
+  legacy `sendMessage()` behavior or requiring existing adapters to implement it.
+- Extend `openacp doctor` with a read-only attachment-delivery health check for
+  protocol version, file staging, and acknowledged adapter support.
+
+### Security
+
+- Require `attachments:send`, a loopback peer and local Host header, reject
+  forwarding headers, and keep provider credentials, chat/topic IDs, staged
+  paths, and proxy details out of the attachment-delivery API.
+
 ## 2026.718.4 - 2026-07-18
 
 ### Changed

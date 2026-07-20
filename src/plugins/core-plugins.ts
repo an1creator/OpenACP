@@ -13,6 +13,7 @@ import tunnelPlugin from './tunnel/index.js'
 import apiServerPlugin from './api-server/index.js'
 import sseAdapterPlugin from './sse-adapter/index.js'
 import telegramPlugin from './telegram/index.js'
+import attachmentDeliveryPlugin from './attachment-delivery/index.js'
 
 /**
  * Ordered list of all bundled plugins, passed to `LifecycleManager.boot()` on startup.
@@ -46,4 +47,6 @@ export const corePlugins = [
   // Adapter plugins (depend on security, notifications, etc.)
   sseAdapterPlugin,
   telegramPlugin,
+  // Registers routes after API and adapter services exist, but before SYSTEM_READY starts HTTP.
+  attachmentDeliveryPlugin,
 ]

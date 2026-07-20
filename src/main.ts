@@ -149,6 +149,8 @@ export async function startServer(opts?: StartServerOptions) {
   // First boot: auto-register built-in plugins if registry is empty
   if (pluginRegistry.list().size === 0) {
     await autoRegisterBuiltinPlugins(settingsManager, pluginRegistry)
+  } else {
+    await ensureAttachmentDeliveryBuiltinRegistration(settingsManager, pluginRegistry)
   }
 
   // Show banner in foreground TTY mode (not daemon, not piped)
@@ -608,6 +610,7 @@ async function autoRegisterBuiltinPlugins(
     { name: '@openacp/api-server', version: '1.0.0', description: 'REST API + SSE streaming server' },
     { name: '@openacp/sse-adapter', version: '1.0.0', description: 'SSE-based messaging adapter for app clients' },
     { name: '@openacp/telegram', version: '1.0.0', description: 'Telegram adapter with forum topics' },
+    { name: '@openacp/attachment-delivery', version: '1.0.0', description: 'Acknowledged local attachment delivery' },
   ]
 
   // Run install() for each plugin that has no existing settings
@@ -621,6 +624,7 @@ async function autoRegisterBuiltinPlugins(
     import('./plugins/api-server/index.js'),
     import('./plugins/sse-adapter/index.js'),
     import('./plugins/telegram/index.js'),
+    import('./plugins/attachment-delivery/index.js'),
   ])
 
   for (const result of pluginModules) {
@@ -659,6 +663,30 @@ async function autoRegisterBuiltinPlugins(
   }
   await pluginRegistry.save()
   log.info('Built-in plugins registered in plugin registry')
+}
+
+/**
+ * Adds the attachment-delivery built-in to pre-existing plugin registries.
+ *
+ * Older installations have a non-empty registry, so the first-boot bulk
+ * registration path cannot discover newly bundled plugins. This migration is
+ * additive and deliberately leaves existing entries and settings untouched.
+ */
+export async function ensureAttachmentDeliveryBuiltinRegistration(
+  settingsManager: SettingsManager,
+  pluginRegistry: PluginRegistry,
+): Promise<boolean> {
+  const name = '@openacp/attachment-delivery'
+  if (pluginRegistry.get(name)) return false
+  pluginRegistry.register(name, {
+    version: '1.0.0',
+    source: 'builtin',
+    enabled: true,
+    settingsPath: settingsManager.getSettingsPath(name),
+    description: 'Acknowledged local attachment delivery',
+  })
+  await pluginRegistry.save()
+  return true
 }
 
 /**

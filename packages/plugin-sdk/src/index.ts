@@ -48,6 +48,8 @@ export type {
   AgentActionControlResponse, AgentActionControlDeliveryTarget,
   AgentActionControlDeliveryContext, AgentActionControlTargetBinding,
   AgentActionControlDeliveryResult,
+  AttachmentDeliveryTarget, AttachmentTargetBinding,
+  AttachmentDeliveryRequest, AttachmentDeliveryReceipt,
   MessagingAdapterConfig, IRenderer, RenderedMessage,
 } from '@n1creator/openacp-cli'
 

@@ -8,6 +8,7 @@ import notificationsPlugin from './notifications/index.js'
 import tunnelPlugin from './tunnel/index.js'
 import apiServerPlugin from './api-server/index.js'
 import telegramPlugin from './telegram/index.js'
+import attachmentDeliveryPlugin from './attachment-delivery/index.js'
 
 export const builtInPlugins = [
   securityPlugin,
@@ -18,4 +19,5 @@ export const builtInPlugins = [
   tunnelPlugin,
   apiServerPlugin,
   telegramPlugin,
+  attachmentDeliveryPlugin,
 ]

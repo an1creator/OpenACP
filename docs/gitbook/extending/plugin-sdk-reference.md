@@ -109,6 +109,10 @@ interface STTOptions {
 | `ElicitationResolvedEvent` | Resolution metadata with no submitted content. |
 | `NotificationMessage` | Notification sent to the notification channel. |
 | `AgentCommand` | Command received from a channel adapter. |
+| `AttachmentDeliveryTarget` | Secret-free, opaque identity for one resolved attachment destination. |
+| `AttachmentTargetBinding` | Immutable host-owned target plus private thread ID and a just-in-time currentness check. |
+| `AttachmentDeliveryRequest` | Staged file metadata, exact target binding, caption, and abort signal passed to an acknowledged adapter call. |
+| `AttachmentDeliveryReceipt` | Provider-accepted receipt containing the stable delivery ID and real provider message ID. |
 
 `IChannelAdapter.deleteSessionThreadById?(threadId)` is the optional cleanup
 contract for a remote thread created before the first session record is durable.
@@ -123,6 +127,22 @@ Form-capable adapters can additionally implement
 for ownership and protected-input requirements.
 OpenACP accepts flat primitive schemas but rejects string `pattern` constraints;
 plugins must not compile agent-supplied regular expressions independently.
+
+`IChannelAdapter.deliverAttachment?(request)` is additive and optional. The CLI
+and SDK main entries export all four attachment-delivery types, so existing
+adapters compile without the method and `sendMessage(): Promise<void>` retains
+its legacy semantics. Supporting adapters must also advertise
+`capabilities.fileUpload`, use the immutable `AttachmentTargetBinding.threadId`
+instead of resolving mutable session state, call `isCurrent()` immediately
+before provider I/O, honor `request.signal`, and return a receipt only after the
+provider supplies a real message ID. See [Adapter Reference](adapter-reference.md#acknowledged-attachment-delivery).
+
+`IChannelAdapter.isOperational?()` is the optional side-effect-free runtime
+readiness probe used by attachment health, target resolution, and delivery
+revalidation. Implement it when an adapter can be configured for file delivery
+but not currently connected or able to accept provider operations. While it is
+false, new work fails with retryable `provider_unavailable`. Existing adapters
+may omit it.
 
 ---
 

@@ -647,6 +647,23 @@ export class SessionManager {
     return undefined;
   }
 
+  /**
+   * Return every current live session with the exact ACP agent-session identity.
+   *
+   * Unlike user-facing session listings, this includes assistant sessions. Callers
+   * that require an unambiguous owner must inspect the full result instead of
+   * accepting whichever matching session happened to be inserted first.
+   */
+  getCurrentLiveSessionsByAgentSessionId(agentSessionId: string): Session[] {
+    const matches: Session[] = [];
+    for (const session of this.sessions.values()) {
+      if (session.agentSessionId === agentSessionId && this.isCurrentLiveSession(session)) {
+        matches.push(session);
+      }
+    }
+    return matches;
+  }
+
   /** Look up the persisted SessionRecord by the agent's internal session ID. */
   getRecordByAgentSessionId(
     agentSessionId: string,

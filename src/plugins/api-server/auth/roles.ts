@@ -6,6 +6,7 @@ export const ROLES = {
   operator: [
     'sessions:read', 'sessions:write', 'sessions:prompt', 'sessions:permission',
     'agents:read', 'agents:write', 'commands:execute', 'system:health', 'config:read',
+    'attachments:send',
   ],
   viewer: ['sessions:read', 'agents:read', 'system:health'],
 } as const;
@@ -16,6 +17,7 @@ export const ROLES = {
 export const KNOWN_SCOPES = [
   'sessions:read', 'sessions:write', 'sessions:prompt', 'sessions:permission', 'sessions:dangerous',
   'agents:read', 'agents:write', 'commands:execute', 'system:health', 'config:read', 'proxy:write', 'network:proxy:manage',
+  'attachments:send',
 ] as const;
 
 export type RoleName = keyof typeof ROLES;

@@ -156,6 +156,25 @@ describe('SessionManager', () => {
     })
   })
 
+  describe('getCurrentLiveSessionsByAgentSessionId()', () => {
+    it('returns every current owner including assistant sessions, but excludes terminating matches', () => {
+      const primary = createSession({ id: 'primary', agentSessionId: 'shared-agent' })
+      const assistant = createSession({ id: 'assistant', agentSessionId: 'shared-agent' })
+      assistant.isAssistant = true
+      const terminating = createSession({ id: 'terminating', agentSessionId: 'shared-agent' })
+      manager.registerSession(primary)
+      manager.registerSession(assistant)
+      manager.registerSession(terminating)
+      terminating.beginTermination()
+
+      expect(manager.getCurrentLiveSessionsByAgentSessionId('shared-agent')).toEqual([
+        primary,
+        assistant,
+      ])
+      expect(manager.getCurrentLiveSessionsByAgentSessionId('unknown')).toEqual([])
+    })
+  })
+
   describe('getRecordByAgentSessionId()', () => {
     it('delegates to store.findByAgentSessionId', () => {
       manager.getRecordByAgentSessionId('agent-123')

@@ -7,7 +7,7 @@ describe('Built-in plugin boot', () => {
     // Only test plugins that don't require external connections (bot tokens, etc.)
     const safePlugins = builtInPlugins.filter(p =>
       !['@openacp/telegram', '@openacp/discord-adapter', '@openacp/slack-adapter',
-        '@openacp/tunnel', '@openacp/api-server'].includes(p.name)
+        '@openacp/tunnel', '@openacp/api-server', '@openacp/attachment-delivery'].includes(p.name)
     )
 
     const mockCore = {

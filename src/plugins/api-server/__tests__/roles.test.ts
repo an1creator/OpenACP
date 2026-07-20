@@ -15,6 +15,7 @@ describe('roles', () => {
     expect(scopes).toContain('agents:read');
     expect(scopes).toContain('commands:execute');
     expect(scopes).toContain('system:health');
+    expect(scopes).toContain('attachments:send');
     expect(scopes).not.toContain('config:write');
     expect(scopes).not.toContain('system:admin');
     expect(scopes).not.toContain('auth:manage');
@@ -27,6 +28,7 @@ describe('roles', () => {
     expect(scopes).toContain('system:health');
     expect(scopes).not.toContain('sessions:write');
     expect(scopes).not.toContain('sessions:prompt');
+    expect(scopes).not.toContain('attachments:send');
   });
 
   it('hasScope checks wildcard', () => {

@@ -36,6 +36,24 @@ Each check produces one or more results with a status of `pass`, `warn`, or `fai
 | **Tunnel** | Tunnel is enabled; configured provider is recognized; `cloudflared` binary is present (for Cloudflare provider); tunnel port is in valid range |
 | **Speech-to-text** | Selected method, local runtime readiness or authenticated Groq access, hidden key status, and the `services.speech` / `services.speechDownloads` route boundary |
 | **Network proxy** | Native scoped-routing store health and whether the running daemon itself has legacy proxy variables. On Linux, the daemon process is inspected by variable name only; caller-shell variables are reported separately and never treated as proof of daemon compatibility mode. |
+| **Attachment delivery** | The running daemon exposes protocol v1, the service and file staging are ready, and at least one available adapter supports both file upload and acknowledged receipts. |
+
+The attachment-delivery check calls only
+`GET /api/v1/attachment-delivery/v1/health`; it never sends a file. If the daemon
+API is not running, the check warns that runtime verification was skipped. A
+healthy service with no runtime-available acknowledged adapter is also a
+warning. Adapter availability includes its optional `isOperational()` probe;
+Telegram is available only while polling is operational and it is not stopping.
+An unreachable or non-2xx health route, a wrong protocol version, or unavailable
+service/file staging is a failure.
+
+For a read-only machine report, including this check, run:
+
+```bash
+openacp doctor --dry-run --json
+```
+
+`--json` already implies dry-run behavior, so this command cannot apply fixes.
 
 ---
 

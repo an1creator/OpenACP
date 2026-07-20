@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
 describe('release metadata', () => {
-  const version = '2026.718.4'
-  const previousVersion = '2026.718.3'
+  const version = '2026.720.1'
+  const previousVersion = '2026.718.4'
 
   it('keeps package, SDK peer floor, and changelog on the exact release', () => {
     const cli = JSON.parse(fs.readFileSync('package.json', 'utf8'))
@@ -21,15 +21,15 @@ describe('release metadata', () => {
     expect(sdk.peerDependencies['@n1creator/openacp-cli']).toBe(`>=${version}`)
     expect(sdk.peerDependencies.vitest).toBe('>=3 <5')
     expect(sdk.peerDependenciesMeta.vitest).toEqual({ optional: true })
-    expect(version).toBe(`2026.${Number('0718')}.4`)
-    expect(changelog).toMatch(new RegExp(`^## Unreleased\\r?\\n\\r?\\n## ${version.replaceAll('.', '\\.')} - 2026-07-18$`, 'm'))
-    expect(changelog.match(new RegExp(`^## ${version.replaceAll('.', '\\.')} - 2026-07-18$`, 'gm'))).toHaveLength(1)
+    expect(version).toBe(`2026.${Number('0720')}.1`)
+    expect(changelog).toMatch(new RegExp(`^## Unreleased\\r?\\n\\r?\\n## ${version.replaceAll('.', '\\.')} - 2026-07-20$`, 'm'))
+    expect(changelog.match(new RegExp(`^## ${version.replaceAll('.', '\\.')} - 2026-07-20$`, 'gm'))).toHaveLength(1)
     expect(changelog.slice(changelog.indexOf(`## ${version}`), changelog.indexOf(`## ${previousVersion}`)).trim()).not.toBe('')
-    const taggedSection = changelog.slice(changelog.indexOf(`## ${previousVersion}`), changelog.indexOf('## 2026.718.2'))
-    expect(createHash('sha256').update(taggedSection).digest('hex')).toBe('0933cf26dd59b7b5073f5e46a7d798a69198cf29a50744c01ff6fb359dc58c67')
+    const taggedSection = changelog.slice(changelog.indexOf(`## ${previousVersion}`), changelog.indexOf('## 2026.718.3'))
+    expect(createHash('sha256').update(taggedSection).digest('hex')).toBe('66d059a98a3f9d9f4cf5d553495b9b74859ebfb6e50fa539879be42f4583c2ad')
     expect(lockfile).toContain("version: link:../..")
     expect(lockfile).not.toContain(previousVersion)
-    expect(changelog).not.toContain('2026.718.5')
+    expect(changelog).not.toContain('2026.720.2')
 
     const codex = registry.agents.find((agent: { id: string }) => agent.id === 'codex-acp')
     expect(codex).toMatchObject({

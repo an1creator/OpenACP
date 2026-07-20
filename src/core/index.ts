@@ -72,6 +72,7 @@ export { MenuRegistry, type MenuItem } from './menu-registry.js';
 export { AssistantRegistry, AssistantManager, type AssistantSection, type AssistantCommand } from './assistant/index.js';
 export { CommandRegistry } from "./command-registry.js";
 export { deliverAgentActionControlParts } from "./agent-action-delivery.js";
+export * from "./attachment-delivery/index.js";
 export { DoctorEngine, type DoctorReport, type PendingFix } from "./doctor/index.js";
 export {
   CONFIG_REGISTRY,

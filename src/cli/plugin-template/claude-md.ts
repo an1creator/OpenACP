@@ -272,6 +272,21 @@ slash-prefixed form value is captured but unrelated ForceReply commands keep
 their owner. Do not compile agent-supplied string \`pattern\` constraints;
 OpenACP rejects them.
 
+Acknowledged file delivery is an optional adapter contract, not middleware and
+not a \`sendMessage()\` fallback. An adapter that sets
+\`capabilities.fileUpload: true\` may implement
+\`deliverAttachment?(request: AttachmentDeliveryRequest)\`. It must use the
+immutable \`request.targetBinding.threadId\`, re-check \`isCurrent()\` after
+transport waits and immediately before provider I/O, honor \`request.signal\`,
+and return \`AttachmentDeliveryReceipt\` only with the provider's real message
+ID. Reject stale, aborted, provider, queue, rate-limit, and invalid-receipt
+failures. Existing adapters remain valid without the method; legacy
+\`sendMessage(): Promise<void>\` semantics are unchanged.
+If configured file-upload capability does not prove runtime readiness, implement
+side-effect-free \`isOperational(): boolean\`; attachment health uses its result
+for adapter availability, and resolution plus delivery revalidation fail while
+it is false. Omitting it remains backward compatible.
+
 ### Session
 - \`session:beforeCreate\` — before session creation (agentName, workingDir, userId, channelId, threadId)
 - \`session:afterDestroy\` — after session destroyed (sessionId, reason, durationMs, promptCount)

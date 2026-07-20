@@ -26,7 +26,9 @@ credential; the global concurrent-session limit still applies.
 
 **Exempt from auth:** `GET /api/v1/system/health`.
 
-**Body size limit:** 1 MB.
+**Body size limit:** 1 MB unless an endpoint documents a bounded
+upload-specific limit. Acknowledged attachment delivery uses its configured file
+limit plus 64 KiB of multipart overhead.
 
 **API documentation:** Swagger UI is available at `/docs` when the server is running.
 
@@ -851,6 +853,231 @@ changes before they reach the old agent and immediately releases callers waiting
 on an active RPC. The old transport operation remains observed in the background;
 its late settlement or rejection cannot change the new session generation or
 produce an unhandled rejection.
+
+---
+
+## Acknowledged attachment delivery
+
+These protocol-v1 routes let a local automation client resolve one exact live
+session and deliver file bytes with a provider receipt:
+
+- `POST /api/v1/attachment-delivery/v1/resolve`
+- `POST /api/v1/attachment-delivery/v1/deliver`
+- `GET /api/v1/attachment-delivery/v1/health`
+
+Every route requires bearer authentication with `attachments:send`. The built-in
+operator and admin roles include this scope; viewer tokens do not. The master API
+secret retains full access.
+
+This API has an additional network boundary. The TCP peer must be `127.0.0.1`,
+`::1`, or its IPv4-mapped loopback form; Host must be `localhost`, `127.0.0.1`,
+or `::1`; and the request must not contain `Forwarded`, `X-Forwarded-For`,
+`X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP`, `CF-Connecting-IP`, or
+`CF-Ray`. Consequently these routes cannot be used through an OpenACP tunnel or
+reverse proxy. A boundary failure returns HTTP 403 with `code` set to
+`target_unavailable`; a valid credential without the scope also returns 403.
+
+### POST /api/v1/attachment-delivery/v1/resolve
+
+Captures a short-lived, exact routing target. The JSON body is strict and must
+contain at least one of `explicitSessionId` or `agentSessionId`:
+
+```json
+{
+  "explicitSessionId": "session_abc123",
+  "agentSessionId": "019c-thread-id",
+  "expectedWorkingDirectory": "/srv/workspace"
+}
+```
+
+`explicitSessionId` has absolute priority. OpenACP uses only that session,
+requires it to be live/current, non-archiving, and non-terminating, and, when
+`agentSessionId` is also present, requires an exact match with the session's ACP
+agent-session identity. `expectedWorkingDirectory`, when present, must resolve
+to the session working directory. A stale or mismatched explicit session is an
+error and never falls back.
+
+Without `explicitSessionId`, OpenACP calls the exact live lookup by
+`agentSessionId` and requires exactly one deliverable current match. Zero or
+multiple matches produce the normal nonfatal response below. The lookup includes
+assistant sessions, but OpenACP does not select the newest, busiest, or most
+recently used match.
+
+Resolution also requires the session's primary adapter to advertise file upload,
+implement acknowledged delivery, and be operational. An adapter that reports
+`isOperational() === false` returns retryable `provider_unavailable`; it is not
+treated as an absent session.
+
+**Resolved response (HTTP 200)**
+
+```json
+{
+  "status": "resolved",
+  "target": {
+    "schemaVersion": 1,
+    "sessionId": "session_abc123",
+    "adapterId": "telegram",
+    "bindingGeneration": "opaque-signed-value"
+  }
+}
+```
+
+Treat `target` as opaque and return it unchanged to `/deliver`. It contains no
+provider token, proxy configuration, chat/topic ID, or local file path. A new
+delivery normally must use it within the configured target TTL, which defaults
+to five minutes. The opaque proof also binds the current agent generation: an
+in-place agent replacement invalidates it even if the replacement reuses the
+same agent-session ID. A daemon restart invalidates an uncommitted target, so
+resolve again before a new delivery.
+
+**No matching assistant (HTTP 200)**
+
+```json
+{
+  "status": "target_unavailable",
+  "code": "assistant_not_found",
+  "retryable": false,
+  "safeMessage": "No active OpenACP target is available."
+}
+```
+
+### POST /api/v1/attachment-delivery/v1/deliver
+
+Accepts `multipart/form-data` with exactly two parts:
+
+- one text field named `metadata`, containing the strict JSON object below;
+- one file field named `file`.
+
+```json
+{
+  "schemaVersion": 1,
+  "deliveryId": "memory-save-20260720-1",
+  "target": {
+    "schemaVersion": 1,
+    "sessionId": "session_abc123",
+    "adapterId": "telegram",
+    "bindingGeneration": "opaque-signed-value"
+  },
+  "fileName": "memory.md",
+  "mimeType": "text/markdown",
+  "size": 1234,
+  "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "caption": "Saved memory"
+}
+```
+
+Validation rules:
+
+- `deliveryId` is 1-128 ASCII letters, digits, `.`, `_`, `:`, or `-`, beginning
+  with a letter or digit.
+- `target` is the unchanged protocol-v1 object returned by `/resolve`.
+- `fileName` is 1-255 characters, is neither `.` nor `..`, and contains no path
+  separator, NUL, or control character.
+- `mimeType` is at most 200 characters. Both sides of `/` begin with an ASCII
+  letter or digit and otherwise contain only letters, digits, `!#$&^_.+-`.
+- `size` is a non-negative integer, equals the uploaded byte count, and does not
+  exceed the configured limit. The default and maximum built-in limit is 50 MiB.
+- `sha256` is exactly 64 lowercase hexadecimal characters and must match the
+  uploaded bytes.
+- `caption` is optional and at most 1,024 characters.
+- The multipart file's filename and content type must exactly equal `fileName`
+  and `mimeType` in metadata.
+
+OpenACP stages validated bytes through the host `file-service`. It then checks
+the session identity, adapter instance, `fileUpload` capability, and immutable
+topic/thread lease again before provider I/O. Runtime adapter readiness is
+checked before staging and remains part of the binding's just-in-time check
+after any transport queue wait. A transition to non-operational fails without a
+provider send. Provider credentials, proxy configuration, chat/topic IDs, and
+staged paths remain inside OpenACP.
+
+**Provider-accepted response (HTTP 200)**
+
+```json
+{
+  "status": "provider_accepted",
+  "deliveryId": "memory-save-20260720-1",
+  "providerMessageId": "12345",
+  "adapterId": "telegram",
+  "acceptedAt": "2026-07-20T12:00:00.000Z"
+}
+```
+
+HTTP 2xx without a non-empty `providerMessageId` is not success. The Telegram
+adapter returns the real Bot API `message_id`, serialized as a string.
+
+Receipts are committed to a mode-0600 durable journal after provider acceptance.
+A retry with the same resolved target, `deliveryId`, and SHA-256 returns the
+committed receipt without provider I/O, including after restart. Within one
+session and adapter, reusing a delivery ID with different bytes or a different
+binding target returns `delivery_id_conflict`. Telegram provides no idempotency
+key for `sendDocument`; a process crash after Telegram accepts the file but
+before the journal commit is therefore ambiguous and a retry can duplicate that
+one delivery.
+
+To retrieve a committed receipt after restart, retry with the original target,
+delivery ID, and hash. Resolving a new target changes the binding identity.
+
+### GET /api/v1/attachment-delivery/v1/health
+
+Returns service readiness and configured delivery capability without staging or
+sending a file.
+
+```json
+{
+  "status": "ok",
+  "protocolVersion": 1,
+  "serviceLoaded": true,
+  "fileServiceAvailable": true,
+  "maxFileSize": 52428800,
+  "adapters": [
+    {
+      "adapterId": "telegram",
+      "available": true,
+      "acknowledgedReceipt": true,
+      "fileUpload": true
+    }
+  ]
+}
+```
+
+`status` is `ok` when at least one runtime-available adapter advertises file
+upload and implements acknowledged delivery; otherwise it is `unavailable`.
+Availability uses the adapter's optional `isOperational()` runtime probe when
+provided. Telegram reports available only while polling is operational and the
+adapter is not stopping. This endpoint never invokes `deliverAttachment()`.
+
+### Error envelope
+
+Delivery failures use this shape:
+
+```json
+{
+  "status": "error",
+  "code": "provider_timeout",
+  "retryable": true,
+  "safeMessage": "Attachment provider timed out."
+}
+```
+
+| HTTP | Code | Default retryable | Meaning |
+|------|------|-------------------|---------|
+| 400 | `file_invalid` | no | Metadata, multipart shape, filename, MIME type, or declared size is invalid. |
+| 400 | `hash_mismatch` | no | Uploaded bytes do not match the declared SHA-256. |
+| 404 | `target_unavailable` | no | No usable target exists outside the normal resolve no-match response. |
+| 409 | `target_stale` | no | The session is archiving/terminating, or its agent generation, adapter, lease, or signed target is no longer current. |
+| 409 | `target_mismatch` | no | Explicit session, agent identity, or working directory does not match. |
+| 409 | `delivery_id_conflict` | no | The delivery ID is already bound to different content or target state. |
+| 413 | `payload_too_large` | no | The configured byte limit was exceeded. |
+| 422 | `unsupported_channel` | no | The adapter lacks `fileUpload` or acknowledged delivery. |
+| 429 | `rate_limited` | yes | The provider rate limit was reached. |
+| 502 | `provider_rejected` | no | The provider rejected the document or returned no valid receipt. |
+| 503 | `provider_unavailable` | yes | The adapter reports non-operational, or the adapter/provider is stopping or unavailable. |
+| 504 | `provider_timeout` | yes | The route or provider deadline expired. |
+| 500 | `internal_error` | normally yes | Staging, journal, or receipt validation failed internally. An untyped boundary exception is reported conservatively with `retryable: false`. |
+
+Missing or invalid bearer authentication returns HTTP 401. Missing scope and
+loopback-boundary failures return HTTP 403.
 
 ---
 

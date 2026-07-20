@@ -1,6 +1,7 @@
 import type { IChannelAdapter as CliChannelAdapter } from '@n1creator/openacp-cli'
 import type { IChannelAdapter as SdkChannelAdapter } from '@n1creator/openacp-plugin-sdk'
 import type { AgentActionControlDeliveryContext } from '@n1creator/openacp-plugin-sdk'
+import type { AttachmentDeliveryRequest } from '@n1creator/openacp-plugin-sdk'
 
 const legacyAdapter = {
   name: 'legacy',
@@ -41,6 +42,19 @@ const transactionalThreadAdapter = {
   },
 } satisfies CliChannelAdapter & SdkChannelAdapter
 
+const acknowledgedAttachmentAdapter = {
+  ...legacyAdapter,
+  async deliverAttachment(request: AttachmentDeliveryRequest) {
+    return {
+      status: 'provider_accepted' as const,
+      deliveryId: request.deliveryId,
+      providerMessageId: 'provider-message-1',
+      adapterId: 'acknowledged',
+      acceptedAt: new Date(0).toISOString(),
+    }
+  },
+} satisfies CliChannelAdapter & SdkChannelAdapter
+
 function cleanupPreCreatedThread(adapter: CliChannelAdapter & SdkChannelAdapter): void {
   if (adapter.deleteSessionThreadById) {
     void adapter.deleteSessionThreadById('thread-1')
@@ -49,3 +63,4 @@ function cleanupPreCreatedThread(adapter: CliChannelAdapter & SdkChannelAdapter)
 
 cleanupPreCreatedThread(transactionalThreadAdapter)
 void targetBoundAdapter
+void acknowledgedAttachmentAdapter

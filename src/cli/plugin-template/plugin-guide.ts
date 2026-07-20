@@ -104,6 +104,21 @@ startup or the initial durable session write fails. The method is optional for
 backward compatibility; when a session exists, Core can still fall back to
 \`deleteSessionThread(sessionId)\`.
 
+Acknowledged file delivery is also optional. Set
+\`capabilities.fileUpload: true\` and implement
+\`deliverAttachment?(request: AttachmentDeliveryRequest)\` only when the
+provider returns a real message ID. Use the immutable
+\`request.targetBinding.threadId\` directly, call \`isCurrent()\` after every
+queue/capacity wait and immediately before provider I/O, and honor
+\`request.signal\`. Reject stale, aborted, provider, queue, rate-limit, and
+invalid-receipt failures; never route again from \`sessionId\` or fall back to
+\`sendMessage()\`. Return \`AttachmentDeliveryReceipt\` only after provider
+acceptance. Existing adapters remain valid without this method.
+If configured file-upload capability can outlive the provider connection,
+implement side-effect-free \`isOperational(): boolean\`; attachment health uses
+it for runtime availability, and resolution plus delivery revalidation fail
+while it is false. Omitting it remains backward compatible.
+
 To render ACP forms, declare \`capabilities.elicitation.form\` and implement
 \`sendElicitationRequest?(sessionId, request)\`. Implement
 \`dismissElicitationRequest?(sessionId, event)\` to remove stale UI after a

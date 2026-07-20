@@ -35,6 +35,53 @@ export interface Attachment {
   originalFilePath?: string;
 }
 
+/** Opaque, secret-free identity for one resolved attachment destination. */
+export interface AttachmentDeliveryTarget {
+  readonly schemaVersion: 1;
+  readonly sessionId: string;
+  readonly adapterId: string;
+  /** Process-bound proof of the exact adapter/thread/agent attachment generation. */
+  readonly bindingGeneration: string;
+}
+
+/** Exact host-owned binding supplied to an adapter for one attachment delivery. */
+export interface AttachmentTargetBinding {
+  readonly target: Readonly<AttachmentDeliveryTarget>;
+  /** Private provider thread identity. This value must never cross the HTTP boundary. */
+  readonly threadId: string;
+  /** Revalidates every mutable routing boundary immediately before provider I/O. */
+  isCurrent(): boolean;
+}
+
+/** A staged local attachment sent through an acknowledged channel operation. */
+export interface AttachmentDeliveryRequest {
+  readonly deliveryId: string;
+  readonly sessionId: string;
+  readonly targetBinding: AttachmentTargetBinding;
+  readonly attachment: {
+    readonly filePath: string;
+    readonly fileName: string;
+    readonly mimeType: string;
+    readonly size: number;
+    readonly sha256: string;
+  };
+  readonly caption?: string;
+  /**
+   * Cancellation boundary for queued and in-flight provider work.
+   * Adapters must observe it before provider I/O and pass it to cancellable SDK calls.
+   */
+  readonly signal: AbortSignal;
+}
+
+/** Provider acknowledgement proving that an attachment was accepted. */
+export interface AttachmentDeliveryReceipt {
+  readonly status: "provider_accepted";
+  readonly deliveryId: string;
+  readonly providerMessageId: string;
+  readonly adapterId: string;
+  readonly acceptedAt: string;
+}
+
 /**
  * A message arriving from a channel adapter (Telegram, Slack, SSE, etc.)
  * destined for a session's agent.

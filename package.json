@@ -1,6 +1,6 @@
 {
   "name": "@n1creator/openacp-cli",
-  "version": "2026.718.4",
+  "version": "2026.720.1",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -44,6 +44,7 @@
     "@agentclientprotocol/claude-agent-acp": "^0.59.0",
     "@agentclientprotocol/sdk": "^1.2.1",
     "@clack/prompts": "^1.7.0",
+    "@fastify/multipart": "^10.1.0",
     "@fastify/rate-limit": "^11.1.0",
     "@fastify/swagger": "^9.8.1",
     "@fastify/swagger-ui": "^6.1.0",

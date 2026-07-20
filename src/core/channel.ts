@@ -1,4 +1,4 @@
-import type { OutgoingMessage, PermissionRequest, NotificationMessage, AgentActionControlDeliveryContext, AgentActionControlDeliveryResult, AgentActionControlResponse, AgentActionControlTargetBinding, AgentActionControlDeliveryTarget, AgentCommand, ElicitationRequest, ElicitationResolvedEvent } from './types.js'
+import type { OutgoingMessage, PermissionRequest, NotificationMessage, AgentActionControlDeliveryContext, AgentActionControlDeliveryResult, AgentActionControlResponse, AgentActionControlTargetBinding, AgentActionControlDeliveryTarget, AgentCommand, ElicitationRequest, ElicitationResolvedEvent, AttachmentDeliveryRequest, AttachmentDeliveryReceipt } from './types.js'
 
 /**
  * Configuration for an adapter channel (Telegram, Slack, etc.).
@@ -42,11 +42,20 @@ export interface IChannelAdapter {
   readonly name: string
   readonly capabilities: AdapterCapabilities
 
+  /** Report whether the adapter can currently accept new provider operations. */
+  isOperational?(): boolean
+
   start(): Promise<void>
   stop(): Promise<void>
 
   // --- Outgoing: core → platform ---
   sendMessage(sessionId: string, content: OutgoingMessage): Promise<void>
+  /**
+   * Deliver a file to an immutable target and return the provider acknowledgement.
+   * Implementations must cooperate with `request.signal` and revalidate the target
+   * immediately before every provider I/O so queued or timed-out work cannot late-send.
+   */
+  deliverAttachment?(request: AttachmentDeliveryRequest): Promise<AttachmentDeliveryReceipt>
   sendPermissionRequest(sessionId: string, request: PermissionRequest): Promise<void>
   sendElicitationRequest?(sessionId: string, request: ElicitationRequest): Promise<void>
   dismissElicitationRequest?(sessionId: string, event: ElicitationResolvedEvent): Promise<void>

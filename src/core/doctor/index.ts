@@ -15,6 +15,7 @@ import { tunnelCheck } from "./checks/tunnel.js";
 import { inspectDaemonProxyEnvironment, proxyCheck } from './checks/proxy.js';
 import { speechCheck } from './checks/speech.js';
 import { runtimeCheck } from './checks/runtime.js';
+import { attachmentDeliveryCheck } from './checks/attachment-delivery.js';
 
 /** All registered checks, sorted by order before execution. */
 const ALL_CHECKS: DoctorCheck[] = [
@@ -28,6 +29,7 @@ const ALL_CHECKS: DoctorCheck[] = [
   daemonCheck,
   tunnelCheck,
   speechCheck,
+  attachmentDeliveryCheck,
   proxyCheck,
 ];
 

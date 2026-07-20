@@ -1,6 +1,6 @@
 # Built-in Plugins Reference
 
-OpenACP ships with 11 built-in plugins. They live in `src/plugins/` and are loaded automatically on boot. Built-in plugins cannot be uninstalled, but they can be disabled.
+OpenACP ships with built-in plugins in `src/plugins/`; they are loaded automatically on boot. Built-in plugins cannot be uninstalled, but they can be disabled.
 
 ---
 
@@ -14,7 +14,7 @@ Telegram messaging adapter using the grammY framework.
 - **Dependencies**: `@openacp/security`, `@openacp/file-service`
 - **Permissions**: `services:register`, `kernel:access`, `events:read`, `events:emit`, `commands:register`
 
-**What it does**: Connects OpenACP to Telegram. Creates forum topics for sessions, renders agent output as HTML messages with inline keyboards, handles permission buttons, and supports voice messages.
+**What it does**: Connects OpenACP to Telegram. Creates forum topics for sessions, renders agent output as HTML messages with inline keyboards, handles permission buttons, supports voice messages, and returns the real Telegram `message_id` for acknowledged document delivery.
 
 **Settings** (`settings.json`):
 
@@ -118,6 +118,35 @@ interface FileServiceInterface {
   convertOggToWav(oggData: Buffer): Promise<Buffer>
 }
 ```
+
+---
+
+### @openacp/attachment-delivery
+
+Authenticated, host-owned delivery of local files to exact live session targets.
+
+- **Service**: `attachment-delivery` (`AttachmentDeliveryService`)
+- **Dependencies**: `@openacp/file-service`, `@openacp/api-server`
+- **Permissions**: `services:register`, `services:use`, `storage:read`, `kernel:access`
+
+**What it does**: Resolves an exact current session to a short-lived opaque
+target, stages validated bytes through `file-service`, revalidates the adapter
+runtime readiness and topic lease, and invokes the adapter's optional
+acknowledged delivery method. It exposes three authenticated loopback routes under
+`/api/v1/attachment-delivery/v1`, and persists provider receipts in a
+crash-consistent journal so committed retries survive restart.
+
+**Settings**:
+
+| Key | Type | Default | Constraint |
+|-----|------|---------|------------|
+| `maxFileSizeBytes` | positive integer | `52428800` (50 MiB) | At most 50 MiB |
+| `deliveryTimeoutMs` | positive integer | `60000` | At most 5 minutes |
+| `targetTtlMs` | positive integer | `300000` | At most 1 hour |
+
+The API requires `attachments:send`, a loopback peer, a local Host header, and
+no forwarding headers. Its health route is side-effect-free. See the
+[REST API reference](../api-reference/rest-api.md#acknowledged-attachment-delivery).
 
 ---
 
@@ -341,6 +370,7 @@ The SSE (Server-Sent Events) manager is integrated into the API server plugin ra
 @openacp/speech            -> @openacp/file-service
 @openacp/api-server        -> @openacp/security
 @openacp/telegram          -> @openacp/security, @openacp/file-service
+@openacp/attachment-delivery -> @openacp/file-service, @openacp/api-server
 @openacp/discord           -> @openacp/security, @openacp/file-service
 @openacp/slack             -> @openacp/security, @openacp/file-service
 ```

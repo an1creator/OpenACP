@@ -216,6 +216,33 @@ describe('TelegramAdapter startup sequence', () => {
     await expect(adapter.start()).resolves.not.toThrow()
   })
 
+  it('cancels a Telegram 429 retry delay so an aborted upload cannot send later', async () => {
+    const { TelegramAdapter } = await import('../adapter.js')
+    const core = makeMockCore()
+    const adapter = new TelegramAdapter(core, makeTelegramConfig())
+    await adapter.start()
+    const bot = MockBot.instances.at(-1)!
+    const retryTransformer = bot.api.config.use.mock.calls[0]?.[0] as (
+      prev: ReturnType<typeof vi.fn>,
+      method: string,
+      payload: Record<string, unknown>,
+      signal: AbortSignal,
+    ) => Promise<unknown>
+    const controller = new AbortController()
+    const prev = vi.fn().mockResolvedValue({
+      ok: false,
+      error_code: 429,
+      parameters: { retry_after: 30 },
+    })
+
+    const pending = retryTransformer(prev, 'sendDocument', {}, controller.signal)
+    await vi.waitFor(() => expect(prev).toHaveBeenCalledOnce())
+    controller.abort()
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(prev).toHaveBeenCalledTimes(1)
+  })
+
   it('replays current registry state when commands-ready was emitted before adapter subscription', async () => {
     const { EventBus } = await import('../../../core/event-bus.js')
     const { CommandRegistry } = await import('../../../core/command-registry.js')
@@ -438,9 +465,11 @@ describe('TelegramAdapter startup sequence', () => {
 
     // Even when prereqs fail, start() should not throw and bot should still poll
     await expect(adapter.start()).resolves.not.toThrow()
+    expect(adapter.isOperational()).toBe(true)
 
     // Clean up the watcher timer so the test exits cleanly
     await adapter.stop()
+    expect(adapter.isOperational()).toBe(false)
   })
 
   it('requests restart when Telegram polling stops unexpectedly', async () => {
@@ -455,6 +484,7 @@ describe('TelegramAdapter startup sequence', () => {
     await new Promise<void>((resolve) => setImmediate(resolve))
 
     expect(core.requestRestart).toHaveBeenCalledTimes(1)
+    expect(adapter.isOperational()).toBe(false)
   })
 
   it('exits when Telegram polling stops and no restart hook is available', async () => {

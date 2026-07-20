@@ -12,6 +12,8 @@ import type {
   ElicitationResolvedEvent,
   AgentActionControlDeliveryContext,
   AgentActionControlTargetBinding,
+  AttachmentDeliveryRequest,
+  AttachmentDeliveryReceipt,
 } from "../../core/index.js";
 import { createChildLogger } from "../../core/utils/log.js";
 import type { DebugTracer } from "../../core/utils/debug-tracer.js";
@@ -72,6 +74,10 @@ import { OutputModeResolver } from "../../core/adapter-primitives/output-mode-re
 import type { TunnelServiceInterface } from "../../core/plugin/types.js";
 import { clearProxyDraftsForChannel } from "../../core/commands/proxy.js";
 import { redactNetworkSecrets } from "../../core/security/network-redaction.js";
+import {
+  AttachmentDeliveryError,
+  type AttachmentDeliveryErrorCode,
+} from "../../core/attachment-delivery/errors.js";
 import type { SecurityGuard } from "../security/security-guard.js";
 import {
   prepareTelegramCommandBoundary,
@@ -142,6 +148,102 @@ function patchedFetch(
     init = { ...init, signal: nativeController.signal };
   }
   return delegate(input, init);
+}
+
+interface AbortSignalLike {
+  readonly aborted: boolean;
+  readonly reason?: unknown;
+  addEventListener(type: "abort", listener: () => void, options?: { once?: boolean }): void;
+  removeEventListener(type: "abort", listener: () => void): void;
+}
+
+function abortError(signal: AbortSignalLike): unknown {
+  return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+}
+
+function deliveryError(
+  code: AttachmentDeliveryErrorCode,
+  retryable: boolean,
+  safeMessage: string,
+): AttachmentDeliveryError {
+  return new AttachmentDeliveryError(code, { retryable, safeMessage });
+}
+
+function isAbortFailure(error: unknown, signal: AbortSignal): boolean {
+  if (signal.aborted) return true;
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { name?: unknown; error?: unknown };
+  return candidate.name === "AbortError"
+    || (typeof candidate.error === "object"
+      && candidate.error !== null
+      && (candidate.error as { name?: unknown }).name === "AbortError");
+}
+
+function telegramApiErrorCode(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const value = (error as { error_code?: unknown }).error_code;
+  return typeof value === "number" ? value : undefined;
+}
+
+function normalizeTelegramAttachmentError(
+  error: unknown,
+  signal: AbortSignal,
+): AttachmentDeliveryError {
+  if (error instanceof AttachmentDeliveryError) return error;
+  if (isAbortFailure(error, signal)) {
+    return deliveryError("provider_timeout", true, "Attachment provider timed out.");
+  }
+  const providerCode = telegramApiErrorCode(error);
+  if (providerCode === 429) {
+    return deliveryError("rate_limited", true, "Attachment provider rate limit was reached.");
+  }
+  if (providerCode !== undefined && providerCode >= 400 && providerCode < 500) {
+    return deliveryError("provider_rejected", false, "Attachment provider rejected the file.");
+  }
+  return deliveryError("provider_unavailable", true, "Attachment provider is unavailable.");
+}
+
+function requireCurrentAttachmentTarget(request: AttachmentDeliveryRequest): number {
+  const binding = request.targetBinding;
+  if (
+    !Object.isFrozen(binding.target)
+    || binding.target.adapterId !== "telegram"
+    || binding.target.sessionId !== request.sessionId
+  ) {
+    throw deliveryError("target_mismatch", false, "Attachment target does not match the current session.");
+  }
+  const threadId = Number(binding.threadId);
+  if (!Number.isSafeInteger(threadId) || threadId <= 0) {
+    throw deliveryError("target_stale", false, "Attachment target is no longer current.");
+  }
+  let current = false;
+  try {
+    current = binding.isCurrent();
+  } catch {
+    current = false;
+  }
+  if (!current) {
+    throw deliveryError("target_stale", false, "Attachment target is no longer current.");
+  }
+  return threadId;
+}
+
+/** Wait for a Telegram retry window without outliving the caller's delivery lease. */
+function waitForTelegramRetry(delayMs: number, signal?: AbortSignalLike): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, delayMs));
+  if (signal.aborted) return Promise.reject(abortError(signal));
+
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError(signal));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
@@ -237,6 +339,8 @@ export class TelegramAdapter extends MessagingAdapter {
   private _prerequisiteWatcher: ReturnType<typeof setTimeout> | null = null;
   /** Set during normal shutdown so bot.stop() does not trigger a self-restart. */
   private _stopping = false;
+  /** True only while grammY polling is confirmed running. */
+  private _pollingOperational = false;
   private unregisterProxyTester?: () => void;
   /** Serializes command-list reconciliations triggered by startup and plugin hot reloads. */
   private _commandSyncChain: Promise<void> = Promise.resolve();
@@ -263,6 +367,11 @@ export class TelegramAdapter extends MessagingAdapter {
   /** Returns the configured Telegram supergroup chat ID. */
   getChatId(): number {
     return this.telegramConfig.chatId
+  }
+
+  /** Report whether Telegram polling can currently accept provider operations. */
+  isOperational(): boolean {
+    return this._pollingOperational && !this._stopping
   }
 
   /**
@@ -404,6 +513,7 @@ export class TelegramAdapter extends MessagingAdapter {
    */
   async start(): Promise<void> {
     this._stopping = false;
+    this._pollingOperational = false;
     this._commandSyncGeneration++;
     this._commandSyncAbort = new AbortController();
     this._pendingCommandSnapshot = undefined;
@@ -457,6 +567,7 @@ export class TelegramAdapter extends MessagingAdapter {
             ?.retry_after ?? 5) + 1;
         const rateLimitedMethods = [
           "sendMessage",
+          "sendDocument",
           "editMessageText",
           "editMessageReplyMarkup",
         ];
@@ -467,7 +578,7 @@ export class TelegramAdapter extends MessagingAdapter {
           { method, retryAfter, attempt: attempt + 1 },
           "Rate limited by Telegram, retrying",
         );
-        await new Promise((r) => setTimeout(r, retryAfter * 1000));
+        await waitForTelegramRetry(retryAfter * 1000, signal);
       }
       return prev(method, payload, signal);
     });
@@ -952,8 +1063,12 @@ export class TelegramAdapter extends MessagingAdapter {
     // instead of silently leaving the process alive but no longer consuming messages.
     void this.bot.start({
       allowed_updates: ["message", "callback_query"],
-      onStart: () => log.info({ chatId: this.telegramConfig.chatId }, "Telegram bot started"),
+      onStart: () => {
+        if (!this._stopping) this._pollingOperational = true;
+        log.info({ chatId: this.telegramConfig.chatId }, "Telegram bot started");
+      },
     }).catch((err: unknown) => {
+      this._pollingOperational = false;
       if (this._stopping) return;
 
       // grammY sometimes wraps the real error in an { error } envelope.
@@ -1477,6 +1592,7 @@ export class TelegramAdapter extends MessagingAdapter {
    */
   async stop(): Promise<void> {
     this._stopping = true;
+    this._pollingOperational = false;
     this._commandSyncGeneration++;
     this._commandSyncAbort?.abort();
     this._commandSyncAbort = undefined;
@@ -2016,6 +2132,65 @@ export class TelegramAdapter extends MessagingAdapter {
     });
     this._dispatchQueues.set(sessionId, next);
     await next;
+  }
+
+  /**
+   * Deliver one staged file to the exact resolved Telegram topic and return its receipt.
+   *
+   * The supplied binding owns routing. This method never resolves a session or topic
+   * from mutable adapter state, and rechecks the binding after waiting for send capacity.
+   */
+  async deliverAttachment(
+    request: AttachmentDeliveryRequest,
+  ): Promise<AttachmentDeliveryReceipt> {
+    if (request.signal.aborted) {
+      throw deliveryError("provider_timeout", true, "Attachment provider timed out.");
+    }
+    if (this._stopping) {
+      throw deliveryError("provider_unavailable", true, "Attachment provider is unavailable.");
+    }
+    requireCurrentAttachmentTarget(request);
+
+    let message: { message_id?: number } | undefined;
+    try {
+      message = await this.sendQueue.enqueue(async () => {
+        if (request.signal.aborted) throw abortError(request.signal);
+        if (this._stopping) {
+          throw deliveryError("provider_unavailable", true, "Attachment provider is unavailable.");
+        }
+        const threadId = requireCurrentAttachmentTarget(request);
+        const document = new InputFile(
+          request.attachment.filePath,
+          request.attachment.fileName,
+        );
+        return this.bot.api.sendDocument(
+          this.telegramConfig.chatId,
+          document,
+          {
+            message_thread_id: threadId,
+            ...(request.caption !== undefined ? { caption: request.caption } : {}),
+          },
+          request.signal as unknown as Parameters<typeof this.bot.api.sendDocument>[3],
+        );
+      }, { category: "attachment-delivery" });
+    } catch (error) {
+      throw normalizeTelegramAttachmentError(error, request.signal);
+    }
+
+    if (message === undefined) {
+      throw deliveryError("provider_unavailable", true, "Attachment provider is unavailable.");
+    }
+    if (!Number.isSafeInteger(message.message_id) || (message.message_id ?? 0) <= 0) {
+      throw deliveryError("internal_error", false, "Attachment provider returned an invalid acknowledgement.");
+    }
+
+    return {
+      status: "provider_accepted",
+      deliveryId: request.deliveryId,
+      providerMessageId: String(message.message_id),
+      adapterId: this.name,
+      acceptedAt: new Date().toISOString(),
+    };
   }
 
   protected async handleThought(

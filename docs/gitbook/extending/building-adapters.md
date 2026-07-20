@@ -149,6 +149,69 @@ The base class exposes this through `bindAgentActionControlTarget()`. Direct `IC
 
 The target contains the exact session, adapter, thread, attachment generation, agent generation, and action epoch captured by core. Core revalidates it before and after every part and returns `completed`, `partial`, `dropped`, or `failed` with delivered-part counts. The transport must use the captured thread or connection identity directly; never resolve it again from `sessionId`. SSE-style adapters must capture the current connection objects and must not buffer this response for future connections. A detach, remap, adapter replacement, agent switch, or termination stops remaining parts.
 
+### Optional acknowledged attachment delivery
+
+If the platform supports file upload with a real provider acknowledgement, set
+`capabilities.fileUpload` to `true` and implement `deliverAttachment()`. This
+method is separate from `sendMessage()` so legacy adapters and normal message
+delivery keep their existing behavior.
+
+When configured capability does not prove current provider readiness, also
+implement the side-effect-free `isOperational(): boolean` probe. Attachment
+health uses it for the adapter's `available` field, and resolution plus delivery
+revalidation fail while it is false. Legacy adapters that omit it remain
+compatible.
+
+```typescript
+import type {
+  AttachmentDeliveryReceipt,
+  AttachmentDeliveryRequest,
+} from '@n1creator/openacp-plugin-sdk'
+
+async deliverAttachment(
+  request: AttachmentDeliveryRequest,
+): Promise<AttachmentDeliveryReceipt> {
+  if (request.signal.aborted || !request.targetBinding.isCurrent()) {
+    throw new Error('Attachment target is no longer current')
+  }
+
+  const result = await this.sendQueue.enqueue(async () => {
+    // Capacity waits are a mutable boundary: revalidate inside the operation.
+    if (request.signal.aborted || !request.targetBinding.isCurrent()) {
+      throw new Error('Attachment target is no longer current')
+    }
+    return this.client.sendFile(
+      request.targetBinding.threadId,
+      request.attachment.filePath,
+      {
+        fileName: request.attachment.fileName,
+        mimeType: request.attachment.mimeType,
+        caption: request.caption,
+        signal: request.signal,
+      },
+    )
+  })
+
+  if (!result.messageId) throw new Error('Provider returned no message ID')
+  return {
+    status: 'provider_accepted',
+    deliveryId: request.deliveryId,
+    providerMessageId: String(result.messageId),
+    adapterId: this.name,
+    acceptedAt: new Date().toISOString(),
+  }
+}
+```
+
+The request contains a staged local path for adapter use only. Its immutable
+binding already owns the exact private destination; never look up a replacement
+thread from `sessionId`, mutate the target, or expose the path/thread/provider
+credentials in a response. Forward the abort signal, reject before writing when
+the binding is stale, and reject every provider, queue, timeout, rate-limit, or
+invalid-receipt failure. Return success only with the provider's actual message
+ID. See the [Adapter Reference](adapter-reference.md#acknowledged-attachment-delivery)
+for the exact types.
+
 ---
 
 ## Step 5 — Implement sendPermissionRequest()

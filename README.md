@@ -88,6 +88,14 @@ Platform-specific setup is in the maintained [Telegram](https://github.com/an1cr
 
 The core session pipeline is connector-neutral. An external adapter gets the same session, attachment, speech, permission, structured-input, and agent-routing behavior when it implements the standard adapter contract. Adapters without a form renderer receive a visible REST fallback for non-sensitive requests.
 
+Local automation can also deliver a host file to one exact live session through
+the acknowledged attachment API. OpenACP keeps provider credentials and chat or
+topic identifiers inside the host, stages the upload through its file service,
+and reports success only after a supporting adapter returns a provider message
+ID. The three versioned routes are loopback-only and require the
+`attachments:send` API scope. See [Files and Media](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/using-openacp/files-and-media.md#acknowledged-delivery-from-local-automation)
+and the [REST API reference](https://github.com/an1creator/OpenACP/blob/main/docs/gitbook/api-reference/rest-api.md#acknowledged-attachment-delivery).
+
 ### Native speech-to-text
 
 STT is a built-in OpenACP service, not Telegram-specific glue. Any compatible bridge can submit a standard `audio` attachment:

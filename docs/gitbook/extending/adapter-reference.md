@@ -22,8 +22,10 @@ Complete API reference for the `ChannelAdapter` abstract class and the types it 
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
+| `isOperational` | `() => boolean` | Report whether the adapter can currently accept provider operations. Optional; implement it when configured capability differs from runtime readiness. |
 | `deleteSessionThread` | `(sessionId: string) => Promise<void>` | Delete the platform thread when a session is cleaned up. |
 | `deleteSessionThreadById` | `(threadId: string) => Promise<void>` | Delete a thread created before the initial session record is durable. Recommended when `createSessionThread` creates a remote resource. |
+| `deliverAttachment` | `(request: AttachmentDeliveryRequest) => Promise<AttachmentDeliveryReceipt>` | Deliver a staged file to the immutable bound target and return a real provider acknowledgement. |
 | `sendElicitationRequest` | `(sessionId: string, request: ElicitationRequest) => Promise<void>` | Present a transient ACP form request when `capabilities.elicitation.form` is true. |
 | `dismissElicitationRequest` | `(sessionId: string, event: ElicitationResolvedEvent) => Promise<void>` | Remove or disable stale form UI after any resolution. Resolution metadata contains no submitted values. |
 | `sendSkillCommands` | `(sessionId: string, commands: AgentCommand[]) => Promise<void>` | Register dynamic slash commands or menu entries surfaced by the agent. |
@@ -109,6 +111,74 @@ interface Attachment {
   originalFilePath?: string
 }
 ```
+
+### Acknowledged attachment delivery
+
+The CLI and plugin SDK export these additive adapter types:
+
+```typescript
+interface AttachmentDeliveryTarget {
+  readonly schemaVersion: 1
+  readonly sessionId: string
+  readonly adapterId: string
+  readonly bindingGeneration: string
+}
+
+interface AttachmentTargetBinding {
+  readonly target: Readonly<AttachmentDeliveryTarget>
+  readonly threadId: string
+  isCurrent(): boolean
+}
+
+interface AttachmentDeliveryRequest {
+  readonly deliveryId: string
+  readonly sessionId: string
+  readonly targetBinding: AttachmentTargetBinding
+  readonly attachment: {
+    readonly filePath: string
+    readonly fileName: string
+    readonly mimeType: string
+    readonly size: number
+    readonly sha256: string
+  }
+  readonly caption?: string
+  readonly signal: AbortSignal
+}
+
+interface AttachmentDeliveryReceipt {
+  readonly status: 'provider_accepted'
+  readonly deliveryId: string
+  readonly providerMessageId: string
+  readonly adapterId: string
+  readonly acceptedAt: string
+}
+```
+
+`deliverAttachment()` is optional for backward compatibility. Existing adapters
+remain valid, and the semantics of `sendMessage(): Promise<void>` do not change.
+An adapter participates in acknowledged delivery only when
+`capabilities.fileUpload` is true and `deliverAttachment` is implemented.
+If runtime readiness can differ from configured capability, implement
+`isOperational()` as a side-effect-free probe. Attachment health reports its
+result as `available`, and target resolution plus delivery revalidation reject
+with retryable `provider_unavailable` while it is false. Omitting it preserves
+compatibility and is treated as available while the service is open.
+
+The binding is immutable and host-owned. `threadId` is the exact private
+provider destination captured by Core; never resolve a new destination from
+`sessionId` or expose `threadId` outside the adapter. Check `isCurrent()` after
+waiting for send capacity and immediately before provider I/O, and pass
+`request.signal` to the provider operation. A stale or aborted operation must
+reject without sending. The currentness check covers session lifecycle, agent
+generation, adapter identity, runtime readiness, capability, and the exact
+topic/thread lease.
+
+Return a receipt only after the provider accepts the file and returns a real,
+non-empty message ID. Preserve `deliveryId`, use the adapter's registered ID,
+and serialize `acceptedAt` as an ISO timestamp. Provider rejection, timeout,
+queue failure, rate limiting, and invalid acknowledgement must reject; do not
+convert them to `void` or a synthetic success. The built-in Telegram adapter
+uses `sendDocument` and returns its real `message_id` as a string.
 
 ### OutgoingMessage
 
